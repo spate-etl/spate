@@ -63,11 +63,11 @@ impl UnaddressableKeys {
 /// the S3 listing responses it returns, fails a listing page that repeats its
 /// request's continuation token, and cuts the body of a failure answer.
 /// Every other request and response passes through unchanged. The client
-/// verifies TLS against the [`ClientRoots`] the connector holds.
+/// verifies TLS against the [`StoreRoots`] the connector holds.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
-    roots: ClientRoots,
+    roots: StoreRoots,
     hint: Option<TrustHint>,
 }
 
@@ -75,13 +75,13 @@ impl UnaddressableConnector {
     pub(crate) fn new(keys: UnaddressableKeys) -> Self {
         Self {
             keys,
-            roots: ClientRoots::default(),
+            roots: StoreRoots::default(),
             hint: None,
         }
     }
 
     /// The connector, with its client verifying TLS against `roots`.
-    pub(crate) fn trusting(self, roots: ClientRoots) -> Self {
+    pub(crate) fn trusting(self, roots: StoreRoots) -> Self {
         Self { roots, ..self }
     }
 
@@ -132,7 +132,7 @@ impl std::error::Error for Hinted {
 /// The certificates an S3 client trusts. Every client the store builds takes
 /// them, the credential providers' included.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ClientRoots {
+pub(crate) struct StoreRoots {
     /// Trusted in addition to the system trust store, or in its place when
     /// `only` is set.
     pub(crate) certs: Vec<object_store::Certificate>,
@@ -141,7 +141,7 @@ pub(crate) struct ClientRoots {
     pub(crate) only: bool,
 }
 
-impl ClientRoots {
+impl StoreRoots {
     /// `options` trusting these roots. `options` keeps its own
     /// `disable_system_certificates` unless `only` is set.
     fn apply(&self, options: &ClientOptions) -> ClientOptions {
@@ -367,17 +367,17 @@ mod tests {
     #[test]
     fn the_roots_replace_the_system_store_only_when_they_say_so() {
         use object_store::ClientConfigKey;
-        let set = |roots: &ClientRoots, options: &ClientOptions| {
+        let set = |roots: &StoreRoots, options: &ClientOptions| {
             roots
                 .apply(options)
                 .get_config_value(&ClientConfigKey::NoSystemCertificates)
         };
-        let only = ClientRoots {
+        let only = StoreRoots {
             certs: Vec::new(),
             only: true,
         };
         assert_eq!(set(&only, &ClientOptions::new()).as_deref(), Some("true"));
-        let merged = ClientRoots::default();
+        let merged = StoreRoots::default();
         assert_eq!(
             set(&merged, &ClientOptions::new()).as_deref(),
             Some("false")

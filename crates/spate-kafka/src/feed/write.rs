@@ -9,7 +9,7 @@ use super::producer::FeedProducerContext;
 use crate::sink::owned_headers;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
-use spate_core::backoff::Backoff;
+use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::{Clock, Stopwatch};
 use spate_core::error::ErrorClass;
 use spate_core::feed::{Confirmer, Receipt, Unit};
@@ -23,8 +23,12 @@ use std::time::Duration;
 pub(crate) const DELIVERIES_HEADER: &str = "spate.deliveries";
 
 /// The resend schedule of a write that fails transiently: 200 ms doubling
-/// to 5 s.
-const RESEND_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
+/// to 5 s, each wait shortened at random by up to [`DEFAULT_JITTER`] of it.
+/// Each write's copy seeds its own jitter, so writes and replicas that fail
+/// together are sent again apart.
+const RESEND_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5))
+    .with_jitter(DEFAULT_JITTER)
+    .with_fresh_seed();
 
 /// The feed's producer.
 pub(crate) type Producer = ThreadedProducer<FeedProducerContext>;

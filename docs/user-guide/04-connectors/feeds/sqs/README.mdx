@@ -50,6 +50,7 @@ fields are rejected with the offending key.
 | `visibility` | duration | `60s` | How long a received unit stays hidden from other workers without a renewal. Whole seconds from `3s` to `12h`. |
 | `region` | string | `none` | The AWS region. Unset, the region in the queue URL's host applies when the AWS SDK builds that host for the region (`sqs.<region>.amazonaws.com` and its FIPS and dual-stack forms, in every AWS partition the SDK lists), then `AWS_REGION`, the shared config file and instance metadata. |
 | `endpoint` | string | `none` | An endpoint in place of the region's, such as a local emulator or a VPC endpoint. An `http` or `https` URL with no user or password. Calls go to this endpoint when it is set, and to the region's otherwise, so a VPC endpoint in `queue_url` is reached only when it is also set here. `AWS_ENDPOINT_URL` in the environment sets one too. |
+| `tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store, for the feed's SQS, region and credential calls. Refused when `endpoint` is set and not `https://`. |
 
 `units_held` beside `sqs:` sets how many units a worker holds at once. The
 section's `attempt_cap` is refused on `sqs`, because SQS counts deliveries
@@ -90,14 +91,28 @@ and the two KMS actions above on a queue a customer-managed key encrypts.
 
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
 or `SSL_CERT_DIR` is set, the certificates they name replace the system store.
-A private CA is trusted once it is in the system trust store. A bundle that
-`SSL_CERT_FILE` names replaces that store for the feed's SQS, region and
-credential calls, so it holds the private CA and every public root those calls
-need.
-If the store yields no certificate the client can parse, it logs a warning and
-uses the Mozilla root bundle compiled into the binary. It goes through the
-proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the
-hosts in `NO_PROXY`.
+A bundle that `SSL_CERT_FILE` names replaces that store for the feed's SQS,
+region and credential calls, so it holds every root those calls need.
+`tls.root_ca` adds its certificates to the store instead, so a private CA can
+go there alone. A relative path resolves against the working directory. A file
+that cannot be read, holds no certificate or holds one that does not parse
+fails connecting.
+
+The endpoint the feed calls is `endpoint`, else one the AWS configuration names
+(`AWS_ENDPOINT_URL_SQS`, `AWS_ENDPOINT_URL` or the shared config file's
+`endpoint_url`), else the region's, which is `https://`. When that endpoint is
+`https://` and neither the store nor `tls.root_ca` holds a certificate the
+client can use, as on a container image without a CA package, connecting fails
+at `tls.root_ca` with an error that names the fixes. With an `http://`
+endpoint the feed connects without one, and a call over TLS, such as a
+credential call, then fails the handshake.
+
+A server whose certificate comes from an unknown issuer fails the call with a
+hint to add the issuing CA to the system trust store, or to `tls.root_ca` when
+the feed accepts that key.
+
+The client goes through the proxy that `HTTPS_PROXY`, `HTTP_PROXY` or
+`ALL_PROXY` names, except for the hosts in `NO_PROXY`.
 
 A rejected credential, signature or token, a 401 or 403 answer that is not
 throttling, a missing queue, a rejected TLS handshake, a KMS key the queue

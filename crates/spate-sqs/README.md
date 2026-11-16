@@ -28,6 +28,8 @@ feed:
     visibility: 60s      # hidden this long without a renewal
     # region: eu-west-2  # unset: from the queue URL's host, then the AWS chain
     # endpoint: "http://127.0.0.1:9324"  # unset: AWS_ENDPOINT_URL if set, else the region's endpoint
+    # tls:
+    #   root_ca: /etc/spate/sqs-ca.pem    # extra trusted CAs; refused with an http endpoint
   units_held: 8          # a key of feed: itself, beside sqs:
   location: "s3://my-bucket/jobs/orders-backfill/"  # makes the job bounded
   settling_window: 1m    # at least 1m on sqs; 5m when unset
@@ -45,6 +47,10 @@ feed:
   file or instance metadata, and connecting fails when none of them names one.
 - `endpoint` replaces the region's endpoint, for a local emulator or a VPC
   endpoint. It takes an `http` or `https` URL with no user or password.
+- `tls.root_ca` names a PEM bundle trusted in addition to the system trust
+  store. It is refused when `endpoint` is set and not `https://`. With an
+  `https://` endpoint, connecting fails when neither the store nor `tls.root_ca`
+  holds a usable certificate.
 - `attempt_cap` is refused on `sqs`, because the queue's `maxReceiveCount`
   counts deliveries. A `settling_window` below `1m` is refused too, because
   AWS documents SQS's message counts as taking at least a minute to settle.

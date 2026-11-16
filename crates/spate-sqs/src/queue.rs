@@ -118,6 +118,10 @@ pub(crate) struct SdkQueue {
     /// Timeouts for `ReceiveMessage`, whose long poll outlasts the client's
     /// read timeout.
     pub(crate) receive_timeouts: aws_sdk_sqs::config::Builder,
+    /// The key that adds a root CA, named when a server's certificate comes
+    /// from an unknown issuer. `None` when the endpoint is not `https://`,
+    /// which refuses the key.
+    pub(crate) root_ca_key: Option<&'static str>,
 }
 
 impl SdkQueue {
@@ -137,7 +141,7 @@ impl SdkQueue {
             ))
             .send()
             .await
-            .map_err(|e| classify("GetQueueAttributes", &e))?;
+            .map_err(|e| classify("GetQueueAttributes", &e, self.root_ca_key))?;
         Ok(out
             .attributes()
             .into_iter()
@@ -209,7 +213,7 @@ impl Queue for SdkQueue {
                 .config_override(self.receive_timeouts.clone())
                 .send()
                 .await
-                .map_err(|e| classify("ReceiveMessage", &e))?;
+                .map_err(|e| classify("ReceiveMessage", &e, self.root_ca_key))?;
             Ok(out
                 .messages()
                 .iter()
@@ -264,7 +268,7 @@ impl Queue for SdkQueue {
                 )
                 .send()
                 .await
-                .map_err(|e| classify("SendMessageBatch", &e))?;
+                .map_err(|e| classify("SendMessageBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),
@@ -299,7 +303,7 @@ impl Queue for SdkQueue {
             let out = call
                 .send()
                 .await
-                .map_err(|e| classify("ChangeMessageVisibilityBatch", &e))?;
+                .map_err(|e| classify("ChangeMessageVisibilityBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),
@@ -333,7 +337,7 @@ impl Queue for SdkQueue {
             let out = call
                 .send()
                 .await
-                .map_err(|e| classify("DeleteMessageBatch", &e))?;
+                .map_err(|e| classify("DeleteMessageBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),
@@ -350,7 +354,8 @@ mod tests {
     use crate::test_stub::{ScriptedCredentials, queue_with, sqs_stub};
     use aws_credential_types::provider::error::CredentialsError;
     use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region, SharedCredentialsProvider};
-    use spate_test_support::{TestCa, native_certs, serve_tls, silent_server};
+    use spate_core::tls::{SystemRoots, TlsSection, TrustRoots};
+    use spate_test_support::{TestCa, serve_tls, silent_server};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -376,6 +381,7 @@ mod tests {
             visibility: Duration::from_secs(60),
             region: Some("eu-west-2".to_owned()),
             endpoint: Some(endpoint.to_owned()),
+            tls: TlsSection::default(),
         })
         .await
     }
@@ -391,6 +397,7 @@ mod tests {
                 visibility: Duration::from_secs(60),
                 region: None,
                 endpoint: Some("http://127.0.0.1:1".to_owned()),
+                tls: TlsSection::default(),
             })
             .await;
             assert_eq!(
@@ -419,10 +426,8 @@ mod tests {
             let _ = tokio::io::copy(&mut tls, &mut tokio::io::sink()).await;
         })
         .await;
-        let der = ca.der();
-        let http = crate::client::http_client(move || native_certs(vec![der]))
-            .await
-            .unwrap();
+        let roots = TrustRoots::load(SystemRoots::from_certs(vec![ca.der()]), None).unwrap();
+        let http = crate::client::http_client(&roots).unwrap();
         let endpoint = format!("https://{addr}");
         let conf = aws_sdk_sqs::Config::builder()
             .behavior_version(BehaviorVersion::latest())
@@ -435,6 +440,7 @@ mod tests {
             client: Client::from_conf(conf),
             queue_url: format!("{endpoint}/000000000000/jobs"),
             receive_timeouts: aws_sdk_sqs::config::Builder::default(),
+            root_ca_key: Some("tls.root_ca"),
         };
         let attributes = queue
             .attributes(&queue.queue_url, &["QueueArn"])
@@ -447,7 +453,8 @@ mod tests {
     }
 
     /// Pins that a server whose certificate the client does not trust fails
-    /// the call as Fatal, with the TLS error in its message.
+    /// the call as Fatal, with the TLS error in its message and how to trust
+    /// the issuer.
     #[tokio::test]
     async fn a_rejected_tls_handshake_is_fatal() {
         let ca = TestCa::new("untrusted");
@@ -458,7 +465,25 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.class, ErrorClass::Fatal, "{}", e.message);
-        assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
+        assert!(
+            e.message.ends_with(
+                "invalid peer certificate: UnknownIssuer; add the issuing CA to the system \
+                 trust store or `tls.root_ca`"
+            ),
+            "{}",
+            e.message
+        );
+    }
+
+    /// Pins that the hint names `tls.root_ca` only for an `https://`
+    /// endpoint, since any other refuses the key.
+    #[tokio::test]
+    async fn the_root_ca_hint_follows_the_endpoint_scheme() {
+        assert_eq!(
+            queue_at("https://127.0.0.1:1").await.root_ca_key,
+            Some("tls.root_ca")
+        );
+        assert_eq!(queue_at("http://127.0.0.1:1").await.root_ca_key, None);
     }
 
     /// An [`SdkQueue`] over a listener that reads every request and never
@@ -658,6 +683,7 @@ mod tests {
             visibility: Duration::from_secs(60),
             region: Some("eu-west-2".to_owned()),
             endpoint: Some("http://127.0.0.1:1".to_owned()),
+            tls: TlsSection::default(),
         };
         let step = std::sync::Mutex::new("starting");
         let given = Credentials::new("x", "x", None, None, "test");

@@ -21,18 +21,17 @@ aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 aws-smithy-http-client = { workspace = true }
-base64 = { workspace = true }
+# `ServiceConfigKey`, to read the endpoint the SDK configuration names.
+aws-types = { workspace = true }
 humantime-serde = { workspace = true }
 serde_json = { workspace = true }
-# The rustls the SDK's client links, for `tls_rejection!` and root parsing.
+# The rustls the SDK's client links, for `tls_rejection!` and `tls_reason!`.
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
 serde = { workspace = true }
-spate-core = { workspace = true }
+spate-core = { workspace = true, features = ["tls-roots"] }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }
-webpki-root-certs = { workspace = true }
 
 [dev-dependencies]
 spate-sqs = { path = ".", features = ["testing"] }
@@ -43,8 +42,8 @@ spate-json = { workspace = true }
 # `testing`: `S3Source::with_clock`, so a bounded job's end check and the
 # lanes' receive deadline run on a test clock.
 spate-s3 = { workspace = true, features = ["testing"] }
-# `testing`: `TestClock`.
-spate-core = { workspace = true, features = ["testing"] }
+# `testing`: `TestClock` and `SystemRoots::from_certs`.
+spate-core = { workspace = true, features = ["testing", "tls-roots"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["elasticmq", "tls"] }
 tempfile = { workspace = true }

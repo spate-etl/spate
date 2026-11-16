@@ -18,7 +18,7 @@ accepted = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    "CDLA-Permissive-2.0", # webpki-root-certs (Mozilla CCADB root store data)
+    "CDLA-Permissive-2.0", # webpki-root-certs, through rustls-platform-verifier (Mozilla CCADB root store data)
     "0BSD",
     "BSL-1.0",
     "MIT-0",

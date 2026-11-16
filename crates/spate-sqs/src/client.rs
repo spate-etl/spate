@@ -2,7 +2,7 @@
 //! credentials, timeouts and retries.
 
 use crate::config::SqsFeedConfig;
-use crate::config::{BACKEND, NAME};
+use crate::config::{BACKEND, NAME, is_https};
 use crate::credentials::SharedLoad;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -18,9 +18,11 @@ use aws_smithy_http_client::ConnectorBuilder;
 use aws_smithy_http_client::proxy::ProxyConfig;
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
-use rustls_native_certs::CertificateResult;
+use aws_types::service_config::ServiceConfigKey;
 use spate_core::config::SectionPath;
 use spate_core::feed::ConnectError;
+use spate_core::tls::{SystemRoots, TrustError, TrustRoots};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,13 +44,24 @@ pub(crate) async fn sdk_queue(
     credentials: Option<SharedCredentialsProvider>,
     step: &std::sync::Mutex<&'static str>,
 ) -> Result<SdkQueue, ConnectError> {
+    sdk_queue_with(config, credentials, step, SystemRoots::load).await
+}
+
+/// [`sdk_queue`], trusting what `system` yields as the system trust store.
+async fn sdk_queue_with(
+    config: &SqsFeedConfig,
+    credentials: Option<SharedCredentialsProvider>,
+    step: &std::sync::Mutex<&'static str>,
+    system: impl FnOnce() -> SystemRoots + Send + 'static,
+) -> Result<SdkQueue, ConnectError> {
     let set = |s| {
         *step
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = s
     };
-    set("loading the system trust store");
-    let http = http_client(rustls_native_certs::load_native_certs).await?;
+    set("loading the trust roots");
+    let roots = trust_roots(system, config.tls.root_ca.clone()).await?;
+    let http = http_client(&roots)?;
     set("resolving the AWS region");
     let region = match config.region.clone() {
         Some(region) => Some(region),
@@ -76,11 +89,14 @@ pub(crate) async fn sdk_queue(
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint_url(endpoint);
     }
+    let endpoint = endpoint_called(config, &sdk);
+    require_roots(roots, endpoint.as_deref().is_none_or(is_https))?;
     Ok(SdkQueue {
         client: Client::from_conf(builder.build()),
         queue_url: config.queue_url.clone(),
         receive_timeouts: aws_sdk_sqs::config::Builder::default()
             .timeout_config(timeouts(RECEIVE_READ_TIMEOUT, RECEIVE_OPERATION_TIMEOUT)),
+        root_ca_key: config.uses_https().then_some("tls.root_ca"),
     })
 }
 
@@ -121,26 +137,68 @@ async fn first_region(chain: &impl ProvideRegion) -> Result<Region, ConnectError
     })
 }
 
-/// An HTTPS client that verifies servers against the certificates `system`
-/// yields, or against the bundled Mozilla roots when none of them parse. It
-/// goes through the proxies the standard environment variables name.
-pub(crate) async fn http_client(
-    system: impl FnOnce() -> CertificateResult + Send + 'static,
-) -> Result<SharedHttpClient, ConnectError> {
+/// The usable certificates `system` yields and every certificate in
+/// `root_ca`. Reading them blocks, so it runs off the async workers.
+async fn trust_roots(
+    system: impl FnOnce() -> SystemRoots + Send + 'static,
+    root_ca: Option<PathBuf>,
+) -> Result<TrustRoots, ConnectError> {
     #[expect(
         clippy::disallowed_methods,
         reason = "awaited here; the trust-store read ends on its own, and a blocking task cannot be aborted"
     )]
-    let (roots, fallback) = tokio::task::spawn_blocking(move || trust_roots(system()))
-        .await
-        .map_err(|e| {
-            ConnectError::unavailable(NAME, format!("loading the system trust store: {e}"))
-        })?;
-    if let Some(warning) = fallback {
-        tracing::warn!("{warning}");
+    let loaded =
+        tokio::task::spawn_blocking(move || TrustRoots::load(system(), root_ca.as_deref()))
+            .await
+            .map_err(|e| {
+                ConnectError::unavailable(NAME, format!("loading the trust roots: {e}"))
+            })?;
+    loaded.map_err(root_ca_error)
+}
+
+/// `Ok` when `roots` holds a certificate or the feed does not call SQS over
+/// TLS, and otherwise the error that names the fixes.
+fn require_roots(roots: TrustRoots, https: bool) -> Result<(), ConnectError> {
+    if https {
+        roots.require_any().map_err(root_ca_error)?;
     }
+    Ok(())
+}
+
+fn root_ca_error(e: TrustError) -> ConnectError {
+    SectionPath::feed(BACKEND)
+        .invalid("tls.root_ca", e.to_string())
+        .into()
+}
+
+/// The endpoint the client calls in place of the region's: `endpoint`, then
+/// the one `sdk` names, read as the SQS client config reads it:
+/// `AWS_ENDPOINT_URL_SQS`, then `AWS_ENDPOINT_URL`, then the shared config
+/// file's SQS and shared `endpoint_url`.
+fn endpoint_called(config: &SqsFeedConfig, sdk: &aws_config::SdkConfig) -> Option<String> {
+    if let Some(endpoint) = &config.endpoint {
+        return Some(endpoint.clone());
+    }
+    let key = ServiceConfigKey::builder()
+        .service_id("SQS")
+        .env("AWS_ENDPOINT_URL")
+        .profile("endpoint_url")
+        .build()
+        .expect("every field is set");
+    sdk.service_config()
+        .and_then(|conf| conf.load_config(key))
+        .or_else(|| sdk.endpoint_url().map(str::to_owned))
+}
+
+/// An HTTPS client that verifies servers against `roots`, and goes through
+/// the proxies the standard environment variables name.
+///
+/// `roots` may be empty: a call over TLS then fails at the handshake. The SDK
+/// panics on a certificate it cannot parse, and [`TrustRoots`] holds only
+/// those rustls accepts.
+pub(crate) fn http_client(roots: &TrustRoots) -> Result<SharedHttpClient, ConnectError> {
     let tls = TlsContext::builder()
-        .with_trust_store(TrustStore::empty().with_pem_certificate(roots))
+        .with_trust_store(TrustStore::empty().with_pem_certificate(roots.to_pem()))
         .build()
         .map_err(|e| ConnectError::refused(NAME, format!("building the SQS TLS context: {e}")))?;
     // The connector the SDK's default client builds, with this trust store.
@@ -161,193 +219,204 @@ pub(crate) async fn http_client(
     )
 }
 
-/// The parsable certificates in `loaded` as one PEM bundle, or the Mozilla
-/// roots when there are none, with the warning to log when it fell back.
-///
-/// The SDK panics on a certificate it cannot parse, so only those rustls
-/// accepts are passed on.
-pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, Option<String>) {
-    let errors = loaded
-        .errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ");
-    let found = loaded.certs.len();
-    let mut check = rustls::RootCertStore::empty();
-    let mut bundle = String::new();
-    let mut parsed = 0;
-    for cert in loaded.certs {
-        if check.add(cert.clone()).is_ok() {
-            push_pem(&mut bundle, &cert);
-            parsed += 1;
-        }
-    }
-    if parsed > 0 {
-        let refused = found - parsed;
-        if refused > 0 || !errors.is_empty() {
-            tracing::debug!(refused, %errors, "part of the system trust store did not load");
-        }
-        return (bundle, None);
-    }
-    for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-        push_pem(&mut bundle, cert);
-    }
-    let mut warning = if found == 0 {
-        "the system trust store has no certificates".to_owned()
-    } else {
-        format!("none of the {found} certificates in the system trust store parsed")
-    };
-    warning.push_str("; verifying SQS against the Mozilla root bundle");
-    if !errors.is_empty() {
-        warning.push_str(&format!(" (errors reading the store: {errors})"));
-    }
-    (bundle, Some(warning))
-}
-
-fn push_pem(out: &mut String, der: &[u8]) {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    let body = STANDARD.encode(der);
-    out.push_str("-----BEGIN CERTIFICATE-----\n");
-    for line in body.as_bytes().chunks(64) {
-        out.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-        out.push('\n');
-    }
-    out.push_str("-----END CERTIFICATE-----\n");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustls::pki_types::CertificateDer;
+    use aws_types::service_config::LoadServiceConfig;
     use spate_core::config::ConfigError;
-    use spate_test_support::{TestCa, native_certs, pem};
+    use spate_core::tls::CertificateDer;
+    use spate_test_support::{TestCa, pem};
 
-    /// Pins the fallback to the bundled roots when the system store yields
-    /// nothing parsable, so an empty store does not panic the SDK.
-    #[test]
-    fn an_empty_system_store_falls_back_to_the_bundled_roots() {
-        let (bundle, warning) = trust_roots(CertificateResult::default());
-        assert_eq!(
-            warning.as_deref(),
-            Some(
-                "the system trust store has no certificates; verifying SQS against the Mozilla \
-                 root bundle"
-            )
-        );
-        assert!(bundle.starts_with("-----BEGIN CERTIFICATE-----\n"));
-    }
-
-    /// Pins the warning for a store whose certificates all fail to parse:
-    /// it counts them, where an empty store says it has none.
-    #[test]
-    fn a_store_whose_certificates_do_not_parse_says_so() {
-        let unparsable = CertificateDer::from(vec![0u8; 8]);
-        let (bundle, warning) = trust_roots(native_certs(vec![unparsable]));
-        assert_eq!(
-            warning.as_deref(),
-            Some(
-                "none of the 1 certificates in the system trust store parsed; verifying SQS \
-                 against the Mozilla root bundle"
-            )
-        );
-        assert!(bundle.starts_with("-----BEGIN CERTIFICATE-----\n"));
-    }
-
-    /// Pins that a store with a parsable certificate is used with no warning.
-    #[test]
-    fn a_parsable_store_is_used_without_a_warning() {
-        let ca = TestCa::new("private");
-        let (bundle, warning) = trust_roots(native_certs(vec![ca.der()]));
-        assert_eq!(warning, None);
-        assert_eq!(bundle, pem("CERTIFICATE", &ca.der()));
-    }
-
-    /// A read error as `rustls-native-certs` reports one for an unreadable
-    /// bundle file.
-    fn read_error(path: &str) -> rustls_native_certs::Error {
-        rustls_native_certs::Error {
-            context: "failed to read PEM from file",
-            kind: rustls_native_certs::ErrorKind::Io {
-                inner: std::io::Error::other("permission denied"),
-                path: path.into(),
-            },
+    /// The config error loading `system` and `root_ca` for an `https://`
+    /// feed fails with, as its context and message.
+    async fn refusal(
+        system: Vec<CertificateDer<'static>>,
+        root_ca: Option<PathBuf>,
+    ) -> (String, String) {
+        let loaded = trust_roots(move || SystemRoots::from_certs(system), root_ca).await;
+        match loaded.and_then(|roots| require_roots(roots, true)) {
+            Err(ConnectError::Config(ConfigError::Component { context, message })) => {
+                (context, message)
+            }
+            Err(other) => panic!("expected a config error, got {other}"),
+            Ok(()) => panic!("expected a config error, got roots"),
         }
     }
 
-    /// Pins the debug line beside a parsable store: none when the store
-    /// loaded whole, and one counting refused certificates and carrying the
-    /// read errors otherwise.
-    #[test]
-    fn a_partly_loaded_store_logs_at_debug() {
+    /// An `https://` feed with no usable system root and no `root_ca` fails
+    /// at `tls.root_ca`, with the fixes named.
+    #[tokio::test]
+    async fn an_https_feed_with_no_trust_root_fails_at_root_ca() {
+        let unparsable = CertificateDer::from(vec![0u8; 8]);
+        for (system, problem) in [
+            (Vec::new(), "the system trust store has no certificates"),
+            (
+                vec![unparsable],
+                "none of the 1 certificates in the system trust store parsed",
+            ),
+        ] {
+            assert_eq!(
+                refusal(system, None).await,
+                (
+                    "feed.sqs.tls.root_ca".to_owned(),
+                    format!(
+                        "{problem}; install a CA bundle, point SSL_CERT_FILE at one, or set \
+                         this key to the issuing CA"
+                    )
+                )
+            );
+        }
+    }
+
+    /// A feed whose endpoint is not `https://` needs no root, so it builds
+    /// its client on an image with no CA bundle.
+    #[tokio::test]
+    async fn a_feed_off_tls_needs_no_root() {
+        let roots = trust_roots(|| SystemRoots::from_certs(Vec::new()), None)
+            .await
+            .unwrap();
+        http_client(&roots).expect("an empty trust store builds");
+        require_roots(roots, false).expect("no TLS endpoint, no root needed");
+    }
+
+    /// The client trusts the usable system certificates, then `root_ca`'s,
+    /// and leaves out a system certificate rustls refuses, on which the SDK
+    /// would panic.
+    #[tokio::test]
+    async fn the_client_takes_only_usable_certificates() {
+        let (system, extra) = (TestCa::new("system").der(), TestCa::new("extra"));
+        let dir = tempfile::tempdir().unwrap();
+        let unparsable = CertificateDer::from(vec![0u8; 8]);
+        let store = vec![unparsable, system.clone()];
+        let roots = trust_roots(
+            move || SystemRoots::from_certs(store),
+            Some(extra.write(dir.path())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            roots.to_pem(),
+            pem("CERTIFICATE", &system) + &pem("CERTIFICATE", &extra.der())
+        );
+        http_client(&roots).expect("only usable certificates reach the SDK");
+    }
+
+    /// `root_ca` alone satisfies an `https://` feed on an empty system store.
+    #[tokio::test]
+    async fn root_ca_satisfies_an_https_feed_on_an_empty_store() {
         let ca = TestCa::new("private");
-        let unparsable = || CertificateDer::from(vec![0u8; 8]);
-        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
-            trust_roots(native_certs(vec![ca.der()]));
-        });
-        assert_eq!(lines, Vec::<String>::new());
-
-        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
-            trust_roots(native_certs(vec![ca.der(), unparsable()]));
-        });
-        assert_eq!(
-            lines,
-            [
-                "DEBUG spate_sqs::client: part of the system trust store did not load refused=1 \
-              errors="
-            ]
-        );
-
-        let mut loaded = native_certs(vec![ca.der()]);
-        loaded.errors.push(read_error("/etc/ssl/a.pem"));
-        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
-            trust_roots(loaded);
-        });
-        assert_eq!(
-            lines,
-            [
-                "DEBUG spate_sqs::client: part of the system trust store did not load refused=0 \
-              errors=failed to read PEM from file: permission denied at '/etc/ssl/a.pem'"
-            ]
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let roots = trust_roots(
+            || SystemRoots::from_certs(Vec::new()),
+            Some(ca.write(dir.path())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(roots.to_pem(), pem("CERTIFICATE", &ca.der()));
+        require_roots(roots, true).expect("root_ca is a root");
     }
 
-    /// Pins that the fallback warning carries every read error the store
-    /// lookup reported, joined by `; `.
+    /// A `root_ca` that is missing, holds no certificate or holds a malformed
+    /// one fails at `tls.root_ca` with its path, and does not reach the SDK,
+    /// which panics on a certificate it cannot parse.
+    #[tokio::test]
+    async fn an_unusable_root_ca_fails_at_its_key() {
+        let system = TestCa::new("system");
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        let malformed = dir.path().join("malformed.pem");
+        std::fs::write(&malformed, pem("CERTIFICATE", &[0u8; 8])).unwrap();
+        for path in [dir.path().join("missing.pem"), empty, malformed] {
+            let (context, message) = refusal(vec![system.der()], Some(path.clone())).await;
+            assert_eq!(context, "feed.sqs.tls.root_ca");
+            assert!(
+                message.starts_with(&format!("`{}`: ", path.display())),
+                "{message}"
+            );
+        }
+    }
+
+    /// The check for a usable root reads the endpoint the feed calls: an
+    /// `http://` `endpoint` connects on an empty store, and the region's
+    /// endpoint, which is `https://`, fails at `tls.root_ca`.
+    #[tokio::test]
+    async fn the_root_check_follows_the_endpoint_called() {
+        let connect = |endpoint: Option<&str>| {
+            let config = SqsFeedConfig {
+                queue_url: "https://sqs.eu-west-2.amazonaws.com/000000000000/jobs".to_owned(),
+                visibility: Duration::from_secs(60),
+                region: Some("eu-west-2".to_owned()),
+                endpoint: endpoint.map(str::to_owned),
+                tls: spate_core::tls::TlsSection::default(),
+            };
+            async move {
+                let step = std::sync::Mutex::new("starting");
+                let credentials =
+                    aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+                sdk_queue_with(
+                    &config,
+                    Some(SharedCredentialsProvider::new(credentials)),
+                    &step,
+                    || SystemRoots::from_certs(Vec::new()),
+                )
+                .await
+                .map(|queue| queue.root_ca_key)
+            }
+        };
+        assert_eq!(connect(Some("http://127.0.0.1:1")).await.unwrap(), None);
+        let Err(ConnectError::Config(ConfigError::Component { context, .. })) = connect(None).await
+        else {
+            panic!("expected a config error");
+        };
+        assert_eq!(context, "feed.sqs.tls.root_ca");
+    }
+
+    /// Service config that answers only the SQS endpoint key, with `sqs`.
+    #[derive(Debug)]
+    struct SqsEndpoint(Option<&'static str>);
+
+    impl LoadServiceConfig for SqsEndpoint {
+        fn load_config(&self, key: ServiceConfigKey<'_>) -> Option<String> {
+            let sqs = (key.service_id(), key.env(), key.profile())
+                == ("SQS", "AWS_ENDPOINT_URL", "endpoint_url");
+            self.0.filter(|_| sqs).map(str::to_owned)
+        }
+    }
+
+    /// Pins the order the endpoint is read in: `endpoint`, then the SDK
+    /// configuration's SQS one, then its shared one.
     #[test]
-    fn the_fallback_warning_carries_the_read_errors() {
-        let mut loaded = native_certs(vec![CertificateDer::from(vec![0u8; 8])]);
-        loaded.errors.push(read_error("/etc/ssl/a.pem"));
-        loaded.errors.push(read_error("/etc/ssl/b.pem"));
-        let (_, warning) = trust_roots(loaded);
+    fn the_endpoint_called_is_read_in_order() {
+        let called = |own: Option<&str>, sqs, shared: Option<&str>| {
+            let config = SqsFeedConfig {
+                queue_url: "https://sqs.eu-west-2.amazonaws.com/000000000000/jobs".to_owned(),
+                visibility: Duration::from_secs(60),
+                region: None,
+                endpoint: own.map(str::to_owned),
+                tls: spate_core::tls::TlsSection::default(),
+            };
+            let mut builder = aws_config::SdkConfig::builder().service_config(SqsEndpoint(sqs));
+            builder.set_endpoint_url(shared.map(str::to_owned));
+            endpoint_called(&config, &builder.build())
+        };
+        assert_eq!(called(None, None, None), None);
         assert_eq!(
-            warning.as_deref(),
-            Some(
-                "none of the 1 certificates in the system trust store parsed; verifying SQS \
-                 against the Mozilla root bundle (errors reading the store: failed to read PEM \
-                 from file: permission denied at '/etc/ssl/a.pem'; failed to read PEM from \
-                 file: permission denied at '/etc/ssl/b.pem')"
+            called(None, None, Some("http://shared")).as_deref(),
+            Some("http://shared")
+        );
+        assert_eq!(
+            called(None, Some("http://sqs"), Some("https://shared")).as_deref(),
+            Some("http://sqs")
+        );
+        assert_eq!(
+            called(
+                Some("https://own"),
+                Some("http://sqs"),
+                Some("http://shared")
             )
-        );
-    }
-
-    /// Pins that building the client logs the fallback warning at warn.
-    #[test]
-    fn the_fallback_warning_is_logged() {
-        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(http_client(CertificateResult::default))
-                .unwrap();
-        });
-        assert_eq!(
-            lines,
-            [
-                " WARN spate_sqs::client: the system trust store has no certificates; \
-              verifying SQS against the Mozilla root bundle"
-            ]
+            .as_deref(),
+            Some("https://own")
         );
     }
 

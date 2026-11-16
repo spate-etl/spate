@@ -240,6 +240,7 @@ pub(crate) async fn queue_with(
         visibility,
         region: Some("eu-west-2".to_owned()),
         endpoint: Some(endpoint.to_owned()),
+        tls: spate_core::tls::TlsSection::default(),
     };
     let step = std::sync::Mutex::new("starting");
     let mut queue = crate::client::sdk_queue(&config, Some(credentials), &step)

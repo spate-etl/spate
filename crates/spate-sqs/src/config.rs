@@ -3,6 +3,7 @@
 use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, SectionPath, UrlRule, redact};
+use spate_core::tls::TlsSection;
 use std::fmt;
 use std::time::Duration;
 use url::Url;
@@ -45,8 +46,13 @@ pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
         .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", e.to_string()))
 }
 
+/// Whether `url` is an `https://` URL.
+pub(crate) fn is_https(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
+}
+
 /// The keys under `feed: { sqs: … }`.
-#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SqsFeedConfig {
     /// The queue's URL, as `GetQueueUrl` returns it.
@@ -62,6 +68,9 @@ pub(crate) struct SqsFeedConfig {
     /// An endpoint in place of the region's, such as a local emulator.
     #[serde(default)]
     pub(crate) endpoint: Option<String>,
+    /// Trust settings: `tls.root_ca`, which requires an `https://` endpoint.
+    #[serde(default)]
+    pub(crate) tls: TlsSection,
 }
 
 // A hand-written `Debug`, so the URLs print through `redact::url`. The
@@ -73,12 +82,14 @@ impl fmt::Debug for SqsFeedConfig {
             visibility,
             region,
             endpoint,
+            tls,
         } = self;
         f.debug_struct("SqsFeedConfig")
             .field("queue_url", &redact::url(queue_url))
             .field("visibility", visibility)
             .field("region", region)
             .field("endpoint", &endpoint.as_deref().map(redact::url))
+            .field("tls", tls)
             .finish()
     }
 }
@@ -128,7 +139,16 @@ impl SqsFeedConfig {
             URL.check(endpoint)
                 .map_err(|e| at.invalid("endpoint", e.to_string()))?;
         }
+        if self.tls.root_ca.is_some() && !self.uses_https() {
+            return Err(at.invalid("tls.root_ca", "is set, but `endpoint` is not https://"));
+        }
         Ok(())
+    }
+
+    /// Whether `tls.root_ca` can apply: the region's endpoint is `https://`,
+    /// and an `endpoint` in its place sets its own scheme.
+    pub(crate) fn uses_https(&self) -> bool {
+        self.endpoint.as_deref().is_none_or(is_https)
     }
 
     /// How often held units are renewed: a third of the visibility period.
@@ -426,9 +446,40 @@ pub(crate) mod tests {
                 "feed.sqs.endpoint: carries userinfo; credentials come from the AWS SDK's \
                  default provider chain",
             ),
+            (
+                "sqs: { queue_url: \"http://127.0.0.1:9324/000000000000/q\", endpoint: \"http://127.0.0.1:9324\", tls: { root_ca: /etc/ca.pem } }",
+                at("tls.root_ca"),
+                "feed.sqs.tls.root_ca: is set, but `endpoint` is not https://",
+            ),
         ];
         for (yaml, context, text) in cases {
             assert_eq!(refusal(parse(yaml)), (context, text.to_owned()), "{yaml}");
+        }
+    }
+
+    /// `tls.root_ca` loads with the region's endpoint and with an `https://`
+    /// one, which are the endpoints the feed calls over TLS.
+    #[test]
+    fn root_ca_loads_with_an_https_endpoint() {
+        let queue = "queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\"";
+        for (endpoint, https) in [
+            ("", true),
+            (", endpoint: \"https://sqs.internal:9324\"", true),
+            (", endpoint: \"http://127.0.0.1:9324\"", false),
+        ] {
+            let plain = parse(&format!("sqs: {{ {queue}{endpoint} }}")).unwrap();
+            assert_eq!(plain.uses_https(), https, "{endpoint}");
+            assert_eq!(plain.tls.root_ca, None);
+            if https {
+                let config = parse(&format!(
+                    "sqs: {{ {queue}{endpoint}, tls: {{ root_ca: /etc/ca.pem }} }}"
+                ))
+                .unwrap();
+                assert_eq!(
+                    config.tls.root_ca.as_deref(),
+                    Some(std::path::Path::new("/etc/ca.pem"))
+                );
+            }
         }
     }
 

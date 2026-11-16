@@ -5,7 +5,7 @@ pub mod alloc;
 #[cfg(feature = "cargo")]
 mod cargo;
 mod child;
-#[cfg(any(feature = "kafka", feature = "elasticmq"))]
+#[cfg(any(feature = "kafka", feature = "container"))]
 mod container_log;
 mod corpus;
 #[cfg(feature = "elasticmq")]
@@ -19,7 +19,7 @@ mod kafka;
 mod s3;
 mod s3_stub;
 mod serve;
-#[cfg(any(feature = "s3", feature = "elasticmq", feature = "kafka-client"))]
+#[cfg(any(feature = "container", feature = "kafka-client"))]
 mod started;
 #[cfg(feature = "tls")]
 mod tls;
@@ -41,6 +41,8 @@ pub use s3_stub::{
     ACCESS_DENIED, bucket_server, listing_server, oversized_failure_server, reply_server,
 };
 pub use serve::{serve_each, serve_each_on, silent_server};
+#[cfg(feature = "container")]
+pub use started::{ready, ready_async};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
 

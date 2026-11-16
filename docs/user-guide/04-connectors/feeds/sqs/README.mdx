@@ -105,9 +105,11 @@ The endpoint the feed calls is `endpoint`, else one the AWS configuration names
 client can use, as on a container image without a CA package, connecting fails
 at `tls.root_ca` with an error that names the fixes. With an `http://`
 endpoint the feed connects without one, and a call over TLS, such as a
-credential call, then fails the handshake. A server whose certificate comes
-from an unknown issuer fails the call with a hint to add the issuing CA to the
-system trust store, or to `tls.root_ca` when the feed accepts that key.
+credential call, then fails the handshake.
+
+A server whose certificate comes from an unknown issuer fails the call with a
+hint to add the issuing CA to the system trust store, or to `tls.root_ca` when
+the feed accepts that key.
 
 The client goes through the proxy that `HTTPS_PROXY`, `HTTP_PROXY` or
 `ALL_PROXY` names, except for the hosts in `NO_PROXY`.

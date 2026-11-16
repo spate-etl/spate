@@ -89,7 +89,7 @@ async fn sdk_queue_with(
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint_url(endpoint);
     }
-    let endpoint = config.endpoint.clone().or_else(|| sdk_endpoint(&sdk));
+    let endpoint = endpoint_called(config, &sdk);
     require_roots(roots, endpoint.as_deref().is_none_or(is_https))?;
     Ok(SdkQueue {
         client: Client::from_conf(builder.build()),
@@ -171,11 +171,14 @@ fn root_ca_error(e: TrustError) -> ConnectError {
         .into()
 }
 
-/// The endpoint the SDK configuration names in place of the region's, read as
-/// the SQS client config reads it: `AWS_ENDPOINT_URL_SQS`, then
-/// `AWS_ENDPOINT_URL`, then the shared config file's SQS and shared
-/// `endpoint_url`.
-fn sdk_endpoint(sdk: &aws_config::SdkConfig) -> Option<String> {
+/// The endpoint the client calls in place of the region's: `endpoint`, then
+/// the one `sdk` names, read as the SQS client config reads it:
+/// `AWS_ENDPOINT_URL_SQS`, then `AWS_ENDPOINT_URL`, then the shared config
+/// file's SQS and shared `endpoint_url`.
+fn endpoint_called(config: &SqsFeedConfig, sdk: &aws_config::SdkConfig) -> Option<String> {
+    if let Some(endpoint) = &config.endpoint {
+        return Some(endpoint.clone());
+    }
     let key = ServiceConfigKey::builder()
         .service_id("SQS")
         .env("AWS_ENDPOINT_URL")
@@ -381,23 +384,39 @@ mod tests {
         }
     }
 
-    /// Pins the order the SDK configuration's endpoints are read in: the
-    /// SQS one, then the shared one.
+    /// Pins the order the endpoint is read in: `endpoint`, then the SDK
+    /// configuration's SQS one, then its shared one.
     #[test]
-    fn the_sdk_endpoint_prefers_the_sqs_one() {
-        let sdk = |sqs, shared: Option<&str>| {
+    fn the_endpoint_called_is_read_in_order() {
+        let called = |own: Option<&str>, sqs, shared: Option<&str>| {
+            let config = SqsFeedConfig {
+                queue_url: "https://sqs.eu-west-2.amazonaws.com/000000000000/jobs".to_owned(),
+                visibility: Duration::from_secs(60),
+                region: None,
+                endpoint: own.map(str::to_owned),
+                tls: spate_core::tls::TlsSection::default(),
+            };
             let mut builder = aws_config::SdkConfig::builder().service_config(SqsEndpoint(sqs));
             builder.set_endpoint_url(shared.map(str::to_owned));
-            sdk_endpoint(&builder.build())
+            endpoint_called(&config, &builder.build())
         };
-        assert_eq!(sdk(None, None), None);
+        assert_eq!(called(None, None, None), None);
         assert_eq!(
-            sdk(None, Some("http://shared")).as_deref(),
+            called(None, None, Some("http://shared")).as_deref(),
             Some("http://shared")
         );
         assert_eq!(
-            sdk(Some("http://sqs"), Some("https://shared")).as_deref(),
+            called(None, Some("http://sqs"), Some("https://shared")).as_deref(),
             Some("http://sqs")
+        );
+        assert_eq!(
+            called(
+                Some("https://own"),
+                Some("http://sqs"),
+                Some("http://shared")
+            )
+            .as_deref(),
+            Some("https://own")
         );
     }
 

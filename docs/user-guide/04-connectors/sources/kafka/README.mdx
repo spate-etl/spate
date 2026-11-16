@@ -380,8 +380,8 @@ broker that led it before. Every fetch then fails with
 `NOT_LEADER_OR_FOLLOWER`, and the client never moves the partition to its
 leader ([confluentinc/librdkafka#5629](https://github.com/confluentinc/librdkafka/issues/5629)).
 The defect has been seen on Redpanda. The partition stops being consumed while
-the group stays healthy. librdkafka still reports the partition's fetch state
-as `active`, so `spate_kafka_source_partition_not_fetching` reads 0.
+the group stays healthy. The partition's fetch state in the statistics stays
+`active`, so `spate_kafka_source_partition_not_fetching` reads 0.
 
 The source reads each owned partition's fetching broker and leader from the
 statistics snapshots. When the two differ for longer than
@@ -395,7 +395,13 @@ may then send the client's fetches to a follower on purpose. If a broker sends
 fetches to a follower without `client.rack`, set
 `misplaced_partition_timeout: 0s`.
 
-<!-- DEADLOCK -->
+A leader move can also deadlock librdkafka's own threads
+([confluentinc/librdkafka#5476](https://github.com/confluentinc/librdkafka/issues/5476)).
+The client then stops for good without reporting an error.
+The pipeline threads block on the client, so their heartbeats go stale and
+`/healthz` answers 503. A liveness probe on `/healthz` restarts the process, as
+[Probes and the admin server](../../../05-deployment/docker.mdx#probes-and-the-admin-server)
+describes. With `admin.listen: none` nothing reports the deadlock.
 
 ## Dependency note
 

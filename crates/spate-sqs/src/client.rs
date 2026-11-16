@@ -171,10 +171,10 @@ fn root_ca_error(e: TrustError) -> ConnectError {
         .into()
 }
 
-/// The endpoint the SDK configuration names in place of the region's:
-/// `AWS_ENDPOINT_URL_SQS` or the profile's SQS `endpoint_url`, then
-/// `AWS_ENDPOINT_URL` or the profile's `endpoint_url`. The SQS client
-/// config reads them in this order.
+/// The endpoint the SDK configuration names in place of the region's, read as
+/// the SQS client config reads it: `AWS_ENDPOINT_URL_SQS`, then
+/// `AWS_ENDPOINT_URL`, then the shared config file's SQS and shared
+/// `endpoint_url`.
 fn sdk_endpoint(sdk: &aws_config::SdkConfig) -> Option<String> {
     let key = ServiceConfigKey::builder()
         .service_id("SQS")

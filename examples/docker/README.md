@@ -20,6 +20,10 @@ the environment at startup, so the Kubernetes pattern is:
 - **env / Secret-backed env** for credentials and endpoints
   (`KAFKA_BROKERS`, `CLICKHOUSE_PASSWORD`, ...).
 
+With an `http://` `CLICKHOUSE_URL`, a `CLICKHOUSE_PASSWORD` logs a warning at
+startup that the password is sent without TLS. Point `CLICKHOUSE_URL` at an
+`https://` endpoint to send it over TLS.
+
 There is no hot reload: roll the Deployment to reconfigure (annotate the
 pod template with a config checksum so edits trigger a rollout).
 

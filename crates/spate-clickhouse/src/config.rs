@@ -38,8 +38,8 @@ pub(crate) const TAG: &str = "clickhouse";
 ///   clickhouse:
 ///     table: orders_local            # or db.orders_local
 ///     shards:
-///       - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
-///       - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
+///       - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
+///       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
 ///     user: default
 ///     password: ${CLICKHOUSE_PASSWORD}
 ///     batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
@@ -763,8 +763,10 @@ fn build_with(
     system_roots: impl FnOnce() -> SystemRoots,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
     validate(&cfg, at)?;
-    let roots = crate::http::root_store(&cfg.tls, uses_https(&cfg), system_roots)
+    let schemes = Schemes::of(&cfg);
+    let roots = crate::http::root_store(&cfg.tls, schemes.https, system_roots)
         .map_err(|why| at.invalid("tls.root_ca", why.to_string()))?;
+    warn_cleartext_credentials(&cfg, &schemes, at);
     let tls = crate::http::client_config(roots);
 
     // Two independent client sets: inserts and readiness probes must not
@@ -955,7 +957,7 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
                 .map_err(|e| at.invalid("distributed_check.endpoint", e.to_string()))?;
         }
     }
-    if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
+    if cfg.tls.root_ca.is_some() && !Schemes::of(cfg).https {
         return Err(at.invalid(
             "tls.root_ca",
             "is set, but no replica or distributed_check.endpoint is https://",
@@ -969,15 +971,60 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
 const ENDPOINT: UrlRule<'static> =
     UrlRule::new("set them in user and password").schemes(&["http", "https"]);
 
-/// Whether any replica or the `distributed_check` endpoint is `https://`, in
-/// any case.
-fn uses_https(cfg: &ClickHouseSinkConfig) -> bool {
-    let check = cfg.distributed_check.as_ref();
-    cfg.shards
-        .iter()
-        .flat_map(|shard| &shard.replicas)
-        .chain(check.and_then(|c| c.endpoint.as_ref()))
-        .any(|url| ENDPOINT.check(url).is_ok_and(|url| url.scheme() == "https"))
+/// The schemes of the replica and `distributed_check.endpoint` URLs, in any
+/// case. A `distributed_check` with no endpoint queries the first replica,
+/// which the replica walk already covers.
+#[derive(Default)]
+struct Schemes {
+    /// Any replica or `distributed_check.endpoint` is `https://`.
+    https: bool,
+    /// Any replica is `http://`.
+    http_replica: bool,
+    /// `distributed_check.endpoint` is `http://`.
+    http_check: bool,
+}
+
+impl Schemes {
+    fn of(cfg: &ClickHouseSinkConfig) -> Self {
+        let mut schemes = Schemes::default();
+        let replicas = cfg.shards.iter().flat_map(|shard| &shard.replicas);
+        let check = cfg
+            .distributed_check
+            .as_ref()
+            .and_then(|c| c.endpoint.as_ref());
+        let urls = replicas
+            .map(|url| (url, true))
+            .chain(check.map(|url| (url, false)));
+        for (url, is_replica) in urls {
+            let Ok(url) = ENDPOINT.check(url) else {
+                continue;
+            };
+            match url.scheme() {
+                "https" => schemes.https = true,
+                "http" if is_replica => schemes.http_replica = true,
+                "http" => schemes.http_check = true,
+                _ => {}
+            }
+        }
+        schemes
+    }
+}
+
+/// Logs one warning per credential setting that crosses an `http://`
+/// connection. `password` goes to every replica and to
+/// `distributed_check.endpoint` in a header; `settings` go to replicas only,
+/// as URL parameters, and ClickHouse reads a `password` parameter as a login.
+fn warn_cleartext_credentials(cfg: &ClickHouseSinkConfig, schemes: &Schemes, at: &SectionPath) {
+    let set = |value: Option<&String>| value.is_some_and(|v| !v.is_empty());
+    if set(cfg.password.as_ref()) && (schemes.http_replica || schemes.http_check) {
+        at.warn_cleartext_credential(
+            "password",
+            "a replica or distributed_check.endpoint uses http://",
+        );
+    }
+    if set(cfg.settings.get("password")) && schemes.http_replica {
+        at.warn_cleartext_credential("settings.password", "a replica uses http://");
+    }
 }
 
 /// Strict identifier: `[A-Za-z_][A-Za-z0-9_]*`. Validated before being
@@ -1937,6 +1984,170 @@ settings: { insert_quorum: "auto" }
             "sink.clickhouse.tls.root_ca: the system trust store has no certificates; install \
              a CA bundle, point SSL_CERT_FILE at one, or set this key to the issuing CA"
         );
+    }
+
+    const CLEARTEXT: &str = "the credential is sent without TLS";
+
+    /// The cleartext-credential lines building `cfg` logs, and every line it
+    /// logs. The trust store is a stub, so no host store adds a line.
+    fn cleartext_lines(cfg: ClickHouseSinkConfig) -> (Vec<String>, Vec<String>) {
+        let system = crate::test_tls::TestCa::new("system");
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _ = build_with(cfg, &SectionPath::sink(TAG), || {
+                SystemRoots::from_certs(vec![system.der()])
+            })
+            .unwrap();
+        });
+        let cleartext = lines
+            .iter()
+            .filter(|l| l.contains(CLEARTEXT))
+            .cloned()
+            .collect();
+        (cleartext, lines)
+    }
+
+    fn shards(urls: &[&[&str]]) -> ClickHouseSinkConfig {
+        let shards = urls
+            .iter()
+            .map(|replicas| ShardConfig::new(replicas.iter().map(|&u| u.into()).collect()))
+            .collect();
+        ClickHouseSinkConfig::new("t", shards)
+    }
+
+    fn with_check_endpoint(mut cfg: ClickHouseSinkConfig, url: &str) -> ClickHouseSinkConfig {
+        let mut check = DistributedCheckSection::new("prod", "db.t_dist", "id");
+        check.endpoint = Some(url.into());
+        cfg.distributed_check = Some(check);
+        cfg
+    }
+
+    /// `password` sent over an `http://` replica or `distributed_check`
+    /// endpoint logs one warning however many URLs it crosses. All-`https`
+    /// URLs, an empty password and no password log none.
+    #[test]
+    fn a_password_over_http_logs_one_warning() {
+        const LINE: &str = "sink.clickhouse.password: a replica or distributed_check.endpoint \
+                            uses http://; the credential is sent without TLS";
+        let https = || shards(&[&["https://a"]]);
+        let four_http = || shards(&[&["http://a", "http://b"], &["http://c", "HTTP://d"]]);
+        for (case, cfg, secret, warns) in [
+            (
+                "one http replica",
+                shards(&[&["http://a"]]),
+                Some("hunter2"),
+                true,
+            ),
+            ("four http replicas", four_http(), Some("hunter2"), true),
+            (
+                "http check endpoint",
+                with_check_endpoint(https(), "http://front"),
+                Some("hunter2"),
+                true,
+            ),
+            (
+                "all https",
+                with_check_endpoint(https(), "https://front"),
+                Some("hunter2"),
+                false,
+            ),
+            ("empty", four_http(), Some(""), false),
+            ("absent", four_http(), None, false),
+        ] {
+            let mut cfg = cfg;
+            cfg.password = secret.map(Into::into);
+            let (cleartext, lines) = cleartext_lines(cfg);
+            assert_eq!(cleartext.len(), usize::from(warns), "{case}: {lines:?}");
+            for line in &cleartext {
+                assert!(
+                    line.contains("WARN") && line.contains(LINE),
+                    "{case}: {line}"
+                );
+            }
+            assert!(
+                !lines.iter().any(|l| l.contains("hunter2")),
+                "{case}: {lines:?}"
+            );
+        }
+    }
+
+    /// `settings.password` sent to an `http://` replica logs one warning.
+    /// Settings never reach `distributed_check.endpoint`, so an `http://`
+    /// endpoint in front of `https://` replicas logs none for it.
+    #[test]
+    fn a_settings_password_over_an_http_replica_logs_one_warning() {
+        const LINE: &str = "sink.clickhouse.settings.password: a replica uses http://; \
+                            the credential is sent without TLS";
+        let https = || shards(&[&["https://a"]]);
+        for (case, cfg, secret, warns) in [
+            (
+                "http replicas",
+                shards(&[&["http://a", "http://b"]]),
+                "hunter2",
+                true,
+            ),
+            ("empty", shards(&[&["http://a"]]), "", false),
+            ("all https", https(), "hunter2", false),
+            (
+                "http check endpoint only",
+                with_check_endpoint(https(), "http://front"),
+                "hunter2",
+                false,
+            ),
+        ] {
+            let mut cfg = cfg;
+            cfg.settings.insert("password".into(), secret.into());
+            let (cleartext, lines) = cleartext_lines(cfg);
+            assert_eq!(cleartext.len(), usize::from(warns), "{case}: {lines:?}");
+            for line in &cleartext {
+                assert!(
+                    line.contains("WARN") && line.contains(LINE),
+                    "{case}: {line}"
+                );
+            }
+            assert!(
+                !lines.iter().any(|l| l.contains("hunter2")),
+                "{case}: {lines:?}"
+            );
+        }
+    }
+
+    /// A `sinks:` entry names its own path in the warning.
+    #[test]
+    fn a_sinks_entry_names_its_path_in_the_warning() {
+        let section =
+            sinks_entry("table: t\nshards: [{ replicas: [\"http://a\"] }]\npassword: hunter2\n");
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _ = from_component_config(&section).unwrap();
+        });
+        let cleartext: Vec<_> = lines.iter().filter(|l| l.contains(CLEARTEXT)).collect();
+        assert_eq!(cleartext.len(), 1, "{lines:?}");
+        assert!(
+            cleartext[0].contains("sinks.eu.clickhouse.password: "),
+            "{cleartext:?}"
+        );
+    }
+
+    /// A config the builder refuses logs no warning, even when its password
+    /// would cross `http://`: the warning follows the section's own checks.
+    #[test]
+    fn a_refused_config_logs_no_cleartext_warning() {
+        let system = crate::test_tls::TestCa::new("system");
+        // Refused by `validate`, then by the trust-store load.
+        for replicas in [&["http://a"][..], &["http://a", "https://b"]] {
+            let mut cfg = shards(&[replicas]);
+            cfg.password = Some("hunter2".into());
+            cfg.tls.root_ca = Some("/nonexistent-spate-1647/ca.pem".into());
+            let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+                let err = refusal(build_with(cfg, &SectionPath::sink(TAG), || {
+                    SystemRoots::from_certs(vec![system.der()])
+                }));
+                assert!(err.contains("tls.root_ca"), "{err}");
+            });
+            assert!(
+                !lines.iter().any(|l| l.contains(CLEARTEXT)),
+                "{replicas:?}: {lines:?}"
+            );
+        }
     }
 
     #[test]

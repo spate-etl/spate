@@ -224,6 +224,9 @@ export CLICKHOUSE_URL=http://localhost:8123
 cargo run --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro
 ```
 
+With these `http://` URLs, setting `CLICKHOUSE_PASSWORD` logs a warning at
+startup that the password is sent without TLS.
+
 Probes and metrics are on the admin listener from the YAML:
 
 ```sh

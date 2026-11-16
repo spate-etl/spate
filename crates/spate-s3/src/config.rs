@@ -243,10 +243,7 @@ impl S3SourceConfig {
             if !s3 {
                 return Err(at.invalid("tls.root_ca", "is set, but `url` is not an S3 store"));
             }
-            if self
-                .store_endpoint()
-                .is_some_and(|e| !e.starts_with("https://"))
-            {
+            if self.store_endpoint().is_some_and(|e| !is_https(e)) {
                 return Err(at.invalid(
                     "tls.root_ca",
                     "is set, but the endpoint `store` sets is not https://",
@@ -256,10 +253,9 @@ impl S3SourceConfig {
         Ok(())
     }
 
-    /// The endpoint `store` sets: `s3_endpoint` in place of `endpoint`, as the
-    /// client reads them.
+    /// The endpoint `store` sets, read in [`ENDPOINT_KEYS`] order.
     fn store_endpoint(&self) -> Option<&str> {
-        [AmazonS3ConfigKey::S3Endpoint, AmazonS3ConfigKey::Endpoint]
+        ENDPOINT_KEYS
             .iter()
             .find_map(|wanted| {
                 self.store
@@ -268,6 +264,16 @@ impl S3SourceConfig {
             })
             .map(|(_, value)| value.as_str())
     }
+}
+
+/// The options that name the store's endpoint, in the order the client reads
+/// them: `aws_endpoint_url_s3` in place of `endpoint`.
+pub(crate) const ENDPOINT_KEYS: [AmazonS3ConfigKey; 2] =
+    [AmazonS3ConfigKey::S3Endpoint, AmazonS3ConfigKey::Endpoint];
+
+/// Whether `url` is an `https://` URL, in any case the URL parser accepts.
+pub(crate) fn is_https(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
 }
 
 /// The S3 client option a `store` key names, under any spelling and case
@@ -617,6 +623,7 @@ mod tests {
         for store in [
             "",
             "  store:\n    ENDPOINT: https://127.0.0.1:9000\n",
+            "  store:\n    endpoint: HTTPS://127.0.0.1:9000\n",
             "  store:\n    aws_endpoint_url_s3: https://127.0.0.1:9000\n    endpoint: \
              http://127.0.0.1:9000\n",
         ] {

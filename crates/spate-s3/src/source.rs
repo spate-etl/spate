@@ -12,7 +12,7 @@
 //! feed that hands back, the reader reads on to the stop reserve and hands
 //! back what it has not read to its end; see `unit_reader`.
 
-use crate::config::{S3SourceConfig, s3_store_key};
+use crate::config::{ENDPOINT_KEYS, S3SourceConfig, is_https, s3_store_key};
 use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
 use crate::listing::{ClientRoots, UnaddressableConnector, UnaddressableKeys};
@@ -962,7 +962,7 @@ fn build_store(
     let roots = client_roots(
         system,
         root_ca,
-        calls_https(&builder),
+        needs_root(&builder),
         no_system,
         PLATFORM_VERIFIER,
     )
@@ -989,27 +989,46 @@ const PLATFORM_VERIFIER: bool = cfg!(any(target_vendor = "apple", windows, targe
 /// Whether `builder`'s store is called over `https://`: the S3-specific
 /// endpoint wins over the generic one, and with neither the client calls AWS.
 fn calls_https(builder: &AmazonS3Builder) -> bool {
-    [AmazonS3ConfigKey::S3Endpoint, AmazonS3ConfigKey::Endpoint]
+    ENDPOINT_KEYS
         .iter()
         .find_map(|key| builder.get_config_value(key))
-        .is_none_or(|endpoint| endpoint.starts_with("https://"))
+        .is_none_or(|endpoint| is_https(&endpoint))
+}
+
+/// Whether `builder`'s client verifies its store against the system roots
+/// alone: the store is called over `https://`, its options leave certificate
+/// checks on, and no proxy CA adds a root.
+fn needs_root(builder: &AmazonS3Builder) -> bool {
+    let set = |key| {
+        builder
+            .get_config_value(&AmazonS3ConfigKey::Client(key))
+            .is_some()
+    };
+    calls_https(builder)
+        && !flag_set(
+            builder,
+            AmazonS3ConfigKey::Client(ClientConfigKey::AllowInvalidCertificates),
+        )
+        && !(set(ClientConfigKey::ProxyUrl) && set(ClientConfigKey::ProxyCaCertificate))
 }
 
 /// The certificates the S3 client trusts: `system`'s and `root_ca`'s, which
-/// replace the system trust store the platform verifier reads.
+/// replace the system trust store the platform verifier reads. With
+/// `needs_root` and no certificate it fails, since the client could verify no
+/// server.
 ///
 /// With `platform_verifier` the client keeps that verifier and adds
 /// `root_ca`'s. So does a client whose options set
-/// `disable_system_certificates`, which then trusts `root_ca`'s alone. An
-/// `https` client with no certificate fails, since it could reach no server.
+/// `disable_system_certificates`, which then trusts `root_ca`'s alone, and
+/// with none fails each `https` call at the handshake.
 ///
 /// # Errors
 ///
-/// `root_ca` cannot be used, or an `https` client has no certificate.
+/// `root_ca` cannot be used, or `needs_root` is set and no certificate loads.
 fn client_roots(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
-    https: bool,
+    needs_root: bool,
     no_system: bool,
     platform_verifier: bool,
 ) -> Result<ClientRoots, String> {
@@ -1027,7 +1046,7 @@ fn client_roots(
         });
     }
     let mut roots = TrustRoots::load(system(), root_ca).map_err(|e| e.to_string())?;
-    if https {
+    if needs_root {
         roots = roots.require_any().map_err(|e: TrustError| e.to_string())?;
     }
     Ok(ClientRoots {
@@ -1248,6 +1267,66 @@ mod tests {
         }
     }
 
+    /// A store needs a system root only when it verifies an `https://` server
+    /// against them: not with certificate checks off, and not when a proxy CA
+    /// adds a root.
+    #[test]
+    fn a_store_needs_a_root_only_when_it_verifies_against_the_system() {
+        let needs = |pairs: &[(&str, &str)]| {
+            needs_root(&apply_options(AmazonS3Builder::new(), &map(pairs)))
+        };
+        assert!(needs(&[]));
+        assert!(!needs(&[("endpoint", "http://127.0.0.1:9000")]));
+        assert!(!needs(&[("allow_invalid_certificates", "true")]));
+        assert!(needs(&[("allow_invalid_certificates", "false")]));
+        let proxy = ("proxy_url", "https://127.0.0.1:3128");
+        let proxy_ca = ("proxy_ca_certificate", "-----BEGIN CERTIFICATE-----");
+        assert!(!needs(&[proxy, proxy_ca]));
+        assert!(needs(&[proxy]));
+        assert!(needs(&[proxy_ca]));
+    }
+
+    /// A store that turns certificate checks off, or trusts a proxy CA, opens
+    /// on an empty system trust store, as one with `disable_system_certificates`
+    /// does without reading the store.
+    #[test]
+    fn a_store_that_needs_no_system_root_opens_on_an_empty_trust_store() {
+        let url = Url::parse("s3://b/data/").unwrap();
+        let pem = spate_test_support::pem(
+            "CERTIFICATE",
+            &crate::test_servers::TestCa::new("proxy").der(),
+        );
+        for options in [
+            map(&[("allow_invalid_certificates", "true")]),
+            map(&[
+                ("proxy_url", "https://127.0.0.1:3128"),
+                ("proxy_ca_certificate", pem.as_str()),
+            ]),
+        ] {
+            let built = build_store(&url, &options, None, empty_system);
+            assert!(built.is_ok(), "{options:?}: {:?}", built.err());
+        }
+        let options = map(&[("disable_system_certificates", "true")]);
+        assert!(build_store(&url, &options, None, unread).is_ok());
+    }
+
+    /// The store is built with the config's `tls.root_ca`.
+    #[test]
+    fn the_store_takes_the_configs_root_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = S3SourceConfig::new("s3://b/data/");
+        config.tls.root_ca = Some(dir.path().join("missing.pem"));
+        let url = Url::parse(&config.url).unwrap();
+        let err = store_named(&url, &config, "the store")
+            .err()
+            .expect("the root_ca file is missing")
+            .to_string();
+        assert!(
+            err.contains("building the object store for the store: source.s3.tls.root_ca: `"),
+            "{err}"
+        );
+    }
+
     /// Pins which endpoint decides the scheme: `aws_endpoint_url_s3` over
     /// `endpoint`, and AWS's `https://` with neither.
     #[test]
@@ -1258,6 +1337,7 @@ mod tests {
         assert!(https(&[]));
         assert!(https(&[("endpoint", "https://s3.example")]));
         assert!(!https(&[("endpoint", "http://s3.example")]));
+        assert!(https(&[("endpoint", "HTTPS://s3.example")]));
         assert!(!https(&[
             ("aws_endpoint_url_s3", "http://s3.example"),
             ("endpoint", "https://s3.example"),

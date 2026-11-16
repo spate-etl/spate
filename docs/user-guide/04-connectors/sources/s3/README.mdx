@@ -296,7 +296,8 @@ calls. A relative path resolves against the working directory. A file that
 cannot be read, holds no certificate or holds one that does not parse fails
 opening the source at `source.s3.tls.root_ca`. With
 `disable_system_certificates: "true"` under `store`, the client trusts the
-`tls.root_ca` certificates alone.
+`tls.root_ca` certificates alone. With that set and no `tls.root_ca`, every
+call over `https://` fails the handshake.
 
 The store is called over `https://` unless `aws_endpoint_url_s3`, or else
 `endpoint`, names an `http://` endpoint, from `store` or the environment. On
@@ -306,6 +307,11 @@ container image without a CA package, opening the source fails at
 `source.s3.tls.root_ca` with an error that names the fixes. With an `http://`
 endpoint the source opens without one, and a credential call over TLS then
 fails the handshake.
+
+A store that needs no system root opens without one too: one with
+`allow_invalid_certificates: "true"` under `store`, which verifies no
+certificate, and one with `proxy_url` and `proxy_ca_certificate`, whose proxy
+CA the client trusts.
 
 ## Scaling out
 

@@ -260,9 +260,16 @@ impl<'de> Cursor<'de> {
     #[inline]
     fn utf8(&mut self) -> Result<&'de str, DatumError> {
         let bytes = self.len_prefixed()?;
-        std::str::from_utf8(bytes)
-            .map_err(|e| DatumError(format!("string is not valid UTF-8: {e}")))
+        str_from_utf8(bytes).map_err(|e| DatumError(format!("string is not valid UTF-8: {e}")))
     }
+}
+
+/// UTF-8 validation through simdutf8, which uses SIMD from 64 bytes up. Its
+/// `basic` error has no position, so std validates a rejected input again to
+/// give the error its byte offset.
+#[inline]
+fn str_from_utf8(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
+    simdutf8::basic::from_utf8(bytes).or_else(|_| std::str::from_utf8(bytes))
 }
 
 /// Compile the datum-decode spec for a schema: the named-type index the
@@ -1080,13 +1087,13 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
             Schema::String => visitor.visit_borrowed_str(self.cur.utf8()?),
             Schema::Bytes => {
                 let bytes = self.cur.len_prefixed()?;
-                let s = std::str::from_utf8(bytes)
+                let s = str_from_utf8(bytes)
                     .map_err(|e| DatumError(format!("bytes are not valid UTF-8: {e}")))?;
                 visitor.visit_borrowed_str(s)
             }
             Schema::Fixed(f) => {
                 let bytes = self.cur.take(f.size)?;
-                let s = std::str::from_utf8(bytes)
+                let s = str_from_utf8(bytes)
                     .map_err(|e| DatumError(format!("fixed bytes are not valid UTF-8: {e}")))?;
                 visitor.visit_borrowed_str(s)
             }
@@ -1599,6 +1606,70 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.0.contains("UTF-8"), "{err}");
+    }
+
+    /// Strings of 64 bytes or more take simdutf8's SIMD path.
+    #[test]
+    fn long_ascii_and_two_byte_strings_decode() {
+        let ascii = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(8);
+        let two_byte = "αβγδ".repeat(8);
+        assert_eq!(two_byte.len(), 64);
+        for text in [ascii.as_str(), two_byte.as_str()] {
+            let datum = avro_str(text);
+            let got: &str = decode(&schema(r#""string""#), &datum).unwrap();
+            assert_eq!(got, text);
+        }
+    }
+
+    /// A rejected input past the SIMD threshold keeps std's error, with the
+    /// byte offset, under each schema read as a string.
+    #[test]
+    fn long_invalid_utf8_reports_its_offset_under_each_schema() {
+        let mut bad = vec![b'a'; 128];
+        bad[70] = 0xFF;
+        let std_err = std::str::from_utf8(&bad).unwrap_err();
+
+        let mut prefixed = zig(128);
+        prefixed.extend_from_slice(&bad);
+        let cases = [
+            (r#""string""#, &prefixed, "string is"),
+            (r#""bytes""#, &prefixed, "bytes are"),
+            (
+                r#"{"type":"fixed","name":"F","size":128}"#,
+                &bad,
+                "fixed bytes are",
+            ),
+        ];
+        for (sch, datum, what) in cases {
+            let err = decode::<&str>(&schema(sch), datum).unwrap_err();
+            assert_eq!(err.0, format!("{what} not valid UTF-8: {std_err}"), "{sch}");
+        }
+    }
+
+    proptest::proptest! {
+        /// Accepts and rejects what std does, with std's message, on both
+        /// sides of simdutf8's 64-byte SIMD threshold.
+        #[test]
+        fn string_validation_matches_std(
+            text in proptest::prop_oneof!["[ -~]{0,200}", "[\\PC]{0,100}"],
+            corrupt in proptest::option::of(
+                (proptest::prelude::any::<proptest::sample::Index>(), proptest::prelude::any::<u8>()),
+            ),
+        ) {
+            let mut bytes = text.into_bytes();
+            if let Some((at, byte)) = corrupt
+                && !bytes.is_empty()
+            {
+                let i = at.index(bytes.len());
+                bytes[i] = byte;
+            }
+            let mut datum = zig(bytes.len() as i64);
+            datum.extend_from_slice(&bytes);
+            let got = decode::<&str>(&schema(r#""string""#), &datum).map_err(|e| e.0);
+            let want = std::str::from_utf8(&bytes)
+                .map_err(|e| format!("string is not valid UTF-8: {e}"));
+            proptest::prop_assert_eq!(got, want);
+        }
     }
 
     #[test]

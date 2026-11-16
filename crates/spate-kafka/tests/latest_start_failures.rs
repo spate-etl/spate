@@ -510,61 +510,58 @@ mod silent_coordinator {
 
     impl Proxy {
         fn on(listener: TcpListener, upstream: String) -> Proxy {
-            let addr = listener.local_addr().expect("addr").to_string();
             let armed = Arc::new(AtomicBool::new(false));
             let trigger = Arc::new(AtomicI16::new(OFFSET_COMMIT));
             let t = Arc::clone(&trigger);
             let silent = Arc::new(AtomicBool::new(false));
             let (a, s) = (Arc::clone(&armed), Arc::clone(&silent));
-            std::thread::spawn(move || {
-                for client in listener.incoming().flatten() {
-                    let Ok(broker) = TcpStream::connect(&upstream) else {
-                        continue;
-                    };
-                    let (mut c_in, mut b_out) = (
-                        client.try_clone().expect("clone"),
-                        broker.try_clone().expect("clone"),
-                    );
-                    let (mut b_in, mut c_out) = (broker, client);
-                    let (a1, s1, s2) = (Arc::clone(&a), Arc::clone(&s), Arc::clone(&s));
-                    let t1 = Arc::clone(&t);
-                    std::thread::spawn(move || {
-                        loop {
-                            let mut len = [0u8; 4];
-                            if c_in.read_exact(&mut len).is_err() {
-                                return;
-                            }
-                            let mut frame =
-                                vec![0u8; usize::try_from(i32::from_be_bytes(len)).expect("len")];
-                            if c_in.read_exact(&mut frame).is_err() {
-                                return;
-                            }
-                            if i16::from_be_bytes([frame[0], frame[1]]) == t1.load(Ordering::SeqCst)
-                                && a1.swap(false, Ordering::SeqCst)
-                            {
-                                s1.store(true, Ordering::SeqCst);
-                            }
-                            hold(&s1);
-                            if b_out.write_all(&len).is_err() || b_out.write_all(&frame).is_err() {
-                                return;
-                            }
+            // Each connection is relayed client to broker on its own thread,
+            // and broker to client on one more.
+            let addr = spate_test_support::serve_each_on(listener, move |client| {
+                let Ok(broker) = TcpStream::connect(&upstream) else {
+                    return;
+                };
+                let (mut c_in, mut b_out) = (
+                    client.try_clone().expect("clone"),
+                    broker.try_clone().expect("clone"),
+                );
+                let (mut b_in, mut c_out) = (broker, client);
+                let s2 = Arc::clone(&s);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 65536];
+                    loop {
+                        let Ok(n) = b_in.read(&mut buf) else { return };
+                        if n == 0 {
+                            return;
                         }
-                    });
-                    std::thread::spawn(move || {
-                        let mut buf = [0u8; 65536];
-                        loop {
-                            let Ok(n) = b_in.read(&mut buf) else { return };
-                            if n == 0 {
-                                return;
-                            }
-                            hold(&s2);
-                            if c_out.write_all(&buf[..n]).is_err() {
-                                return;
-                            }
+                        hold(&s2);
+                        if c_out.write_all(&buf[..n]).is_err() {
+                            return;
                         }
-                    });
+                    }
+                });
+                loop {
+                    let mut len = [0u8; 4];
+                    if c_in.read_exact(&mut len).is_err() {
+                        return;
+                    }
+                    let mut frame =
+                        vec![0u8; usize::try_from(i32::from_be_bytes(len)).expect("len")];
+                    if c_in.read_exact(&mut frame).is_err() {
+                        return;
+                    }
+                    if i16::from_be_bytes([frame[0], frame[1]]) == t.load(Ordering::SeqCst)
+                        && a.swap(false, Ordering::SeqCst)
+                    {
+                        s.store(true, Ordering::SeqCst);
+                    }
+                    hold(&s);
+                    if b_out.write_all(&len).is_err() || b_out.write_all(&frame).is_err() {
+                        return;
+                    }
                 }
-            });
+            })
+            .to_string();
             Proxy {
                 addr,
                 trigger,

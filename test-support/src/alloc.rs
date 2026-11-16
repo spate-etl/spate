@@ -17,12 +17,14 @@
 //!   `new_size - old_size` of each growing `realloc`.
 //!
 //! The wall-clock benches count with their own allocator,
-//! `spate_bench::alloc`, which folds a growing `realloc` into its allocation
-//! count and drops a shrinking one, so a doubling push-loop does not read as
-//! quadratic. This one keeps `reallocs` as a figure of its own, so a test or a
-//! snapshot sees every `realloc` the code makes, a shrinking one included.
-//! Both charge the same bytes, and the call counts of one are not compared
-//! with the other's.
+//! `spate_bench::alloc`. Both charge a growing `realloc` its growth in bytes,
+//! so a doubling push-loop does not read as quadratic. Their call counts
+//! differ. The bench folds a growing `realloc` into its allocation count and
+//! drops a shrinking or equal one, so a per-iteration `shrink_to_fit` does not
+//! read as an allocation regression against its floor. This one keeps
+//! `reallocs` as a figure of its own, so a test or a snapshot sees every
+//! `realloc` the code makes. The call counts of one are not compared with the
+//! other's.
 //!
 //! Freeing is not counted. Sizes are the requested `Layout` sizes, so the
 //! platform `malloc` changes no figure. Only the Rust global allocator is seen:

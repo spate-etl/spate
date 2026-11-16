@@ -74,10 +74,21 @@ so a plaintext pipeline runs on an image with no CA bundle. Do not fall back to
 a bundled root set
 ([ADR-0105](../../adr/0105-connectors-share-one-trust-root-loader-in-core.md)).
 
-If the library verifies through the platform's own verifier, keep it on Apple
-and Windows and add the `root_ca` certificates. On Linux that verifier fails on
-an empty store for any endpoint, so give the client the roots from
-`spate::tls`.
+If the client is built on reqwest, take its roots from
+`spate::tls::client_roots`. Set its `needs_root` argument when the client
+verifies a server against these roots, such as an `https://` endpoint with
+certificate checks on. `spate::tls::is_https` says whether an endpoint is
+`https://`.
+
+On Apple platforms, Windows and Android, `client_roots` returns
+`ClientRoots::Add`, so keep reqwest's platform verifier and pass the
+certificates to `tls_certs_merge`. Elsewhere it returns `ClientRoots::Only`,
+because that verifier fails on an empty store for any endpoint, so pass the
+certificates to `tls_certs_only`. A test that depends on which one applies
+branches on `spate::tls::PLATFORM_VERIFIER`.
+
+On Android, `client_roots` refuses a `root_ca` file, because the platform
+verifier there takes no added roots. Put the key around its error.
 
 A config key that names a private CA adds its certificates to the system
 roots. Take its section from `spate::tls::TlsSection`. `TrustRoots::load`

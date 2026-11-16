@@ -50,8 +50,10 @@ Loading fails when a shard has no replicas, a replica or
 `distributed_check.endpoint` URL does not parse, has a scheme other than `http`
 or `https` in any case, or carries credentials, a `weight` is 0, or `table` or
 `database` is not a plain identifier. It also fails when `settings` names a setting the sink
-manages (listed under [Writes and retries](#writes-and-retries)), and when
-`tls.root_ca` is set and no URL is `https://`. `tls.root_ca` names a PEM bundle
+manages (listed under [Writes and retries](#writes-and-retries)), when
+`tls.root_ca` is set and no URL is `https://`, and when a URL is `https://`
+and neither the system trust store nor `tls.root_ca` holds a usable
+certificate. `tls.root_ca` names a PEM bundle
 of CAs trusted beside the system store.
 
 `compression` applies to the wire only. The sink compresses insert bodies on the

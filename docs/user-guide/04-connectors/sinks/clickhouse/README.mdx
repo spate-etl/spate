@@ -163,7 +163,7 @@ root bundle to fall back to.
 For a private CA, set `tls.root_ca` to a PEM file. Its certificates are trusted
 in addition to the store. A relative path resolves against the working
 directory, and a file that cannot be read, holds no certificate or holds one
-that is not a valid CA certificate fails the sink at startup. A config with no
+that does not parse fails the sink at startup. A config with no
 `https://` URL reads no trust store and rejects `tls.root_ca`.
 
 A replica certificate that fails verification is a

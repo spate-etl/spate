@@ -750,8 +750,9 @@ pub fn from_component_config(
 ///
 /// # Errors
 ///
-/// [`ConfigError::Component`] when `cfg` breaks a configuration rule, or when
-/// `tls.root_ca` cannot be loaded.
+/// [`ConfigError::Component`] when `cfg` breaks a configuration rule, when
+/// `tls.root_ca` cannot be loaded, or when a URL is `https://` and neither the
+/// system trust store nor `tls.root_ca` holds a usable certificate.
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
     build_with(cfg, &SectionPath::sink(TAG), SystemRoots::load)
 }

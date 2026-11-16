@@ -3,7 +3,7 @@
 
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::PipelineConfig;
-use spate_core::feed::{DepthOf, Feed, FeedErrorKind, Unit};
+use spate_core::feed::{DepthOf, Feed, FeedErrorKind, Unit, wake_channel};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_json::NdjsonFramer;
 use spate_s3::{S3Source, SplitDescriptor};
@@ -80,6 +80,17 @@ fn the_recording_passes_each_call_on_and_records_it() {
     recording.close(Duration::from_secs(3));
     assert_eq!(recording.closes(), [Duration::from_secs(3)]);
     assert_eq!(script.closes(), [Duration::from_secs(3)]);
+}
+
+/// The waker reaches the feed, which signals it for a unit already queued.
+#[test]
+fn the_recording_passes_the_waker_on() {
+    let (feed, script) = scripted_feed();
+    let recording = Recording::new(Arc::new(feed));
+    script.deliver(Unit::new("a", b"a".to_vec()));
+    let (waker, park) = wake_channel();
+    recording.set_waker(waker);
+    assert!(park.park(Duration::ZERO));
 }
 
 #[test]

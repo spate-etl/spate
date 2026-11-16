@@ -862,31 +862,13 @@ pub(crate) fn publisher_on(section_yaml: &str) -> Publisher {
     (publisher, io)
 }
 
-/// Wait until `group` is stable with `members` members. A coordinator still
-/// loading the group, as Redpanda's is after a member leaves, is asked again.
+/// Wait until `group` is stable with `members` members. A failed listing is
+/// asked again, as a coordinator still loading the group refuses one.
 pub(crate) fn group_stable(brokers: &str, group: &str, members: usize) {
-    use rdkafka::types::RDKafkaErrorCode::{CoordinatorLoadInProgress, CoordinatorNotAvailable};
-    let probe: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("probe");
-    wait_until(HANG, "the group is stable", || {
-        let groups = match probe.fetch_group_list(Some(group), Duration::from_secs(10)) {
-            Ok(groups) => groups,
-            Err(e)
-                if matches!(
-                    e.rdkafka_error_code(),
-                    Some(CoordinatorLoadInProgress | CoordinatorNotAvailable)
-                ) =>
-            {
-                return false;
-            }
-            Err(e) => panic!("group list: {e}"),
-        };
+    super::group_listing(brokers, group, "the group is stable", |groups| {
         groups
-            .groups()
             .iter()
-            .any(|g| g.state() == "Stable" && g.members().len() == members)
+            .any(|g| g.state == "Stable" && g.members == members)
     });
 }
 

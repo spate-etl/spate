@@ -846,15 +846,8 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(committed(&brokers, &group, WORK), Some(1));
     assert_eq!(a.recording.closes().len(), 1);
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("probe");
-    wait_until(HANG, "A leaves the group", || {
-        let groups = probe
-            .fetch_group_list(Some(&group), Duration::from_secs(10))
-            .expect("group list");
-        groups.groups().iter().all(|g| g.members().is_empty())
+    support::group_listing(&brokers, &group, "A leaves the group", |groups| {
+        groups.iter().all(|g| g.members == 0)
     });
 
     let source = format!(

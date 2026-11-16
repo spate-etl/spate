@@ -542,6 +542,46 @@ pub(crate) fn committed_by(
         .collect()
 }
 
+/// One group as the broker's group listing shows it.
+#[derive(Debug)]
+pub(crate) struct ListedGroup {
+    pub(crate) state: String,
+    pub(crate) members: usize,
+}
+
+/// `group`'s listing once `done` holds for it. A failed listing is asked
+/// again, since a slow broker fails one with a local timeout.
+pub(crate) fn group_listing(
+    brokers: &str,
+    group: &str,
+    what: &str,
+    mut done: impl FnMut(&[ListedGroup]) -> bool,
+) -> Vec<ListedGroup> {
+    let probe: BaseConsumer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("probe");
+    spate_test::wait_for_value(
+        HANG,
+        what,
+        || {
+            probe
+                .fetch_group_list(Some(group), Duration::from_secs(10))
+                .map(|list| {
+                    list.groups()
+                        .iter()
+                        .map(|g| ListedGroup {
+                            state: g.state().to_owned(),
+                            members: g.members().len(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+        },
+        |listing| listing.as_ref().is_ok_and(|groups| done(groups)),
+    )
+    .expect("the wait ends on a listing")
+}
+
 /// Commit `offset` for partition 0 of `topic` in `group` through a new
 /// [`probe`] outside the group, sent again while the broker refuses. The
 /// broker checks no offset, so a commit above the partition's end stands as a

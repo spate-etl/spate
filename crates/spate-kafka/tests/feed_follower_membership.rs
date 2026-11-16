@@ -11,10 +11,7 @@
 
 mod support;
 
-use support::Raw as _;
-
 use rdkafka::admin::{NewTopic, TopicReplication};
-use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, LogCapture, wait_until};
@@ -101,13 +98,7 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
 
     assert_eq!(assignments(&capture), 1, "{:#?}", capture.lines());
     assert!(seen.iter().all(|&count| count == 1), "{seen:?}");
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("probe");
-    let groups = probe
-        .fetch_group_list(Some(&group), Duration::from_secs(10))
-        .expect("group list");
-    let members: Vec<_> = groups.groups().iter().map(|g| g.members().len()).collect();
+    let groups = support::group_listing(&brokers, &group, "the group listing", |_| true);
+    let members: Vec<_> = groups.iter().map(|g| g.members).collect();
     assert_eq!(members, [1], "the group's members");
 }

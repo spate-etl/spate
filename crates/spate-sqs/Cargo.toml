@@ -36,7 +36,6 @@ url = { workspace = true }
 [dev-dependencies]
 spate-sqs = { path = ".", features = ["testing"] }
 aws-smithy-runtime-api = { workspace = true }
-object_store = { workspace = true }
 serde_yaml = { workspace = true }
 spate-json = { workspace = true }
 # `testing`: `S3Source::with_clock`, so a bounded job's end check and the
@@ -46,6 +45,7 @@ spate-s3 = { workspace = true, features = ["testing"] }
 spate-core = { workspace = true, features = ["testing", "tls-roots"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["elasticmq", "tls"] }
+spate-test-s3-feed = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 

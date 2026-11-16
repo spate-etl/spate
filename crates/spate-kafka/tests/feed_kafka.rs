@@ -27,16 +27,18 @@ use spate_core::feed::{ConnectError, DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STO
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_test::{HANG, WriteOutcome, wait_until};
+use spate_test_s3_feed::{
+    DRAIN_TIMEOUT, TWO_RANGES, data_dir, recs, sorted, stage, two_range_unit, written,
+};
 use spate_test_support::{ChildTest, KAFKA_PORT};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DRAIN_TIMEOUT, HeldUnit, RETRY, TWO_RANGES,
-    WORK, Worker, assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with,
-    exists, feed_yaml, group_stable, high_watermark, hold_for, hold_open, launch_bounded,
-    launch_source, launch_stopping, launch_with, list_once, open_transaction_with, produce_raw,
-    publish, publisher_on, read_attempts, read_depth, recs, run_to_exit, sorted, stage,
-    two_range_unit, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, HeldUnit, RETRY, WORK, Worker, assert_stalled,
+    bounded_section, committed, create_topics, direct_with, exists, feed_yaml, group_stable,
+    high_watermark, hold_for, hold_open, launch_bounded, launch_source, launch_stopping,
+    launch_with, list_once, open_transaction_with, produce_raw, publish, publisher_on,
+    read_attempts, read_depth, run_to_exit,
 };
 use support::{
     TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, produce_transaction,
@@ -154,9 +156,9 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         |_| {},
     );
     wait_until(HANG, "B reads the unit", || {
-        !b.recording.seen.lock().unwrap().is_empty()
+        !b.recording.deliveries().is_empty()
     });
-    assert_eq!(b.recording.seen.lock().unwrap()[0], 2);
+    assert_eq!(b.recording.deliveries()[0], 2);
     // Elapsed time is the property: B is assigned the partition only once A's
     // session lapses on the broker.
     let waited = killed.elapsed();
@@ -227,10 +229,7 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
         "B dead-letters the unit and commits its offset",
         || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
     );
-    assert!(
-        b.recording.seen.lock().unwrap().is_empty(),
-        "B read the unit"
-    );
+    assert!(b.recording.deliveries().is_empty(), "B read the unit");
     assert_eq!(b.stop(), ExitState::Completed);
 }
 
@@ -609,7 +608,7 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
         &[("message.timestamp.type", "LogAppendTime")],
     );
     let publisher = connect("pub-good").expect("connect");
-    support::feed::publish_to(
+    spate_test_s3_feed::publish(
         &publisher,
         spate_core::feed::Unit::new("u", b"body".to_vec()),
     );
@@ -696,7 +695,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let mut rows = Vec::new();
     for name in ["a", "b", "c", "d"] {
         let r = recs(name, 2);
-        support::feed::publish_to(&publisher, stage(&data, &format!("{name}.ndjson"), &r));
+        spate_test_s3_feed::publish(&publisher, stage(&data, &format!("{name}.ndjson"), &r));
         rows.extend(r);
     }
     assert!(
@@ -751,7 +750,7 @@ fn a_unit_whose_record_is_deleted_while_held_is_read_to_its_end() {
     );
     assert_eq!(written(&held.b.script), sorted(held.rows.clone()));
     assert_eq!(committed(&brokers, &held.group, WORK), Some(1));
-    assert_eq!(*held.b.recording.seen.lock().unwrap(), [1]);
+    assert_eq!(held.b.recording.deliveries(), [1]);
 }
 
 /// Pins that a bounded job ends once its group's commit stands below a log
@@ -858,7 +857,7 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
     wait_until(HANG, "B receives the unit", || {
         !b.recording.receipts().is_empty()
     });
-    assert_eq!(b.recording.seen.lock().unwrap().as_slice(), [2]);
+    assert_eq!(b.recording.deliveries().as_slice(), [2]);
     wait_until(HANG, "B writes every row of the unit", || {
         written(&b.script) == sorted(rows.clone())
     });

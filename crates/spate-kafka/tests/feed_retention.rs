@@ -13,12 +13,12 @@ mod support;
 
 use spate_core::pipeline::ExitState;
 use spate_test::{HANG, LogCapture, wait_until};
+use spate_test_s3_feed::{STEP, recs, stage, written};
 use spate_test_support::KAFKA_PORT;
 use support::broker;
 use support::delete_records_below;
 use support::feed::{
-    HeldUnit, STEP, WORK, committed, create_topics, group_stable, hold_for, produce_raw, recs,
-    run_to_exit, stage, written,
+    HeldUnit, WORK, committed, create_topics, group_stable, hold_for, produce_raw, run_to_exit,
 };
 use testcontainers::runners::SyncRunner;
 

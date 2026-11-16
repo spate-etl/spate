@@ -44,6 +44,7 @@
 //! |---|---|---|
 //! | `--replicates` / `-n` | `20` | Measured replicates per case; `ab` and `arms` need an even count |
 //! | `--package` / `-p` | every package | Only the targets this package declares |
+//! | `--exclude` | none | Every target except those this package declares |
 //! | `--filter` | none | Only cases whose id contains this substring |
 //! | `--seed` | `20260804` | Corpus seed, identical on both legs and across replicates |
 //! | `--target-ms` | `50` | How long one calibrated measured region should take |
@@ -58,9 +59,10 @@
 //! default set.
 //!
 //! `--package` chooses which targets are built and `--filter` chooses cases
-//! within them, so the two compose. Names are exact and the flag repeats. The
+//! within them, so the two compose. `--exclude` drops a package's targets and
+//! cannot be given with `--package`. Names are exact and both flags repeat. The
 //! selection is checked against the working tree before anything is built, so a
-//! misspelling costs no compilation.
+//! misspelling costs no compilation, an excluded name included.
 //!
 //! A selection narrows the build, never the resolved features the two legs are
 //! guarded on: a bench binary links what its package depends on, so a set
@@ -69,9 +71,10 @@
 //! which `--allow features` waives.
 //!
 //! `--filter` and the feature flags also apply to `list --cases`: a filter is a
-//! filter on case ids, so it needs the case list to filter. `--package` names
-//! targets rather than cases, so it applies to a bare `list` as well. `run`
-//! takes `--leg NAME` (default `head`) for the name stamped into every record.
+//! filter on case ids, so it needs the case list to filter. `--package` and
+//! `--exclude` name targets rather than cases, so they apply to a bare `list`
+//! as well. `run` takes `--leg NAME` (default `head`) for the name stamped into
+//! every record.
 //!
 //! `arms` builds each arm into its own directory under the bench cache, keyed by
 //! the flags it was given and kept between runs. Neither arm uses the
@@ -107,9 +110,9 @@
 //! # Exit codes, and three refusals worth knowing in advance
 //!
 //! Exit code 2 means the thing you named does not exist: anything the parser
-//! rejects, a reference or directory that is not there, a `--package` the
-//! *working tree* declares no wall-clock target in, and not being inside a git
-//! repository at all. Exit code 1 means something failed while running, which
+//! rejects, a reference or directory that is not there, a `--package` or
+//! `--exclude` the *working tree* declares no wall-clock target in, and not
+//! being inside a git repository at all. Exit code 1 means something failed while running, which
 //! includes a selected package the working tree declares a target in and the
 //! reference does not: the name is right and the comparison is impossible.
 //!
@@ -131,7 +134,7 @@ use std::process::Command;
 
 use clap::{Arg, ArgAction, ArgMatches, Command as Cli, value_parser};
 use spate_bench::ab::{self, Axis, BASE_LEG, HEAD_LEG, Plan};
-use spate_bench::cargo;
+use spate_bench::cargo::{self, Selection};
 use spate_bench::compare::{Comparison, load_leg};
 use spate_bench::render;
 use spate_bench::worktree::{self, Worktree};
@@ -187,6 +190,12 @@ fn cli() -> Cli {
         .value_name("NAME")
         .action(ArgAction::Append)
         .help("Only targets this package declares, repeatable");
+    let exclude = Arg::new("exclude")
+        .long("exclude")
+        .value_name("NAME")
+        .action(ArgAction::Append)
+        .conflicts_with("package")
+        .help("Every target except those this package declares, repeatable");
     let filter = Arg::new("filter")
         .long("filter")
         .value_name("SUBSTRING")
@@ -254,6 +263,7 @@ fn cli() -> Cli {
                         .help("Build the targets and list their cases too"),
                 )
                 .arg(package.clone())
+                .arg(exclude.clone())
                 .arg(filter.clone())
                 .arg(features.clone())
                 .arg(all_features.clone()),
@@ -275,6 +285,7 @@ fn cli() -> Cli {
                         .help("The leg name stamped into every record"),
                 )
                 .arg(package.clone())
+                .arg(exclude.clone())
                 .arg(filter.clone())
                 .arg(replicates.clone())
                 .arg(seed.clone())
@@ -317,6 +328,7 @@ fn cli() -> Cli {
                         .help("Where to write both legs (default: under the bench cache)"),
                 )
                 .arg(package.clone())
+                .arg(exclude.clone())
                 .arg(filter.clone())
                 .arg(replicates.clone())
                 .arg(seed.clone())
@@ -361,6 +373,7 @@ fn cli() -> Cli {
                         .help("Pass --all-features to the head arm"),
                 )
                 .arg(package)
+                .arg(exclude)
                 .arg(filter)
                 .arg(replicates)
                 .arg(seed)
@@ -371,30 +384,38 @@ fn cli() -> Cli {
         )
 }
 
-/// The packages a command was narrowed to, in the order given.
-fn packages(args: &ArgMatches) -> Vec<String> {
-    args.get_many::<String>("package")
-        .map(|values| values.cloned().collect())
-        .unwrap_or_default()
+/// The packages a command was narrowed to or excluded, in the order given.
+fn selection(args: &ArgMatches) -> Selection {
+    let named = |id: &str| -> Vec<String> {
+        args.get_many::<String>(id)
+            .map(|values| values.cloned().collect())
+            .unwrap_or_default()
+    };
+    Selection {
+        packages: named("package"),
+        excluded: named("exclude"),
+    }
 }
 
-/// Refuses a `--package` this working tree declares no wall-clock target in,
-/// before anything is built.
+/// Refuses a `--package` or `--exclude` this working tree declares no
+/// wall-clock target in, before anything is built.
 ///
-/// Each leg refuses the same thing, but `ab` prepares the base leg first, and
-/// that leg is a worktree at the reference: a name misspelled here would
-/// otherwise be reported against a tree the caller is not looking at. Only run
-/// when a selection was given, since it costs a `cargo metadata`.
+/// Each leg refuses the same `--package`, but `ab` prepares the base leg first,
+/// and that leg is a worktree at the reference: a name misspelled here would
+/// otherwise be reported against a tree the caller is not looking at. A leg
+/// does not refuse an `--exclude`, since the base can predate the package, so
+/// this is the only check an excluded name gets. Only run when a selection was
+/// given, since it costs a `cargo metadata`.
 fn check_packages(
     repo: &Path,
-    packages: &[String],
+    selection: &Selection,
     feature_args: &[String],
 ) -> Result<(), Failure> {
-    if packages.is_empty() {
+    if selection.is_everything() {
         return Ok(());
     }
     cargo::discover(repo, feature_args)?
-        .select(packages, &repo.display().to_string())
+        .check(selection, &repo.display().to_string())
         .map_err(|message| Failure {
             message,
             code: EXIT_NOT_FOUND,
@@ -404,7 +425,7 @@ fn check_packages(
 fn list(args: &ArgMatches) -> Result<(), Failure> {
     let repo = repo_root()?;
     let feature_args = feature_args(args);
-    let packages = packages(args);
+    let selection = selection(args);
     let mut discovery = cargo::discover(&repo, &feature_args)?;
 
     if discovery.targets.is_empty() {
@@ -416,10 +437,13 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
         )
         .into());
     }
-    // Narrowing what this command already discovered is the pre-check the other
-    // subcommands make with `check_packages`, and it narrows a bare `list` too.
+    // Checking and narrowing what this command already discovered is the
+    // pre-check the other subcommands make with `check_packages`, and it narrows
+    // a bare `list` too.
+    let whose = repo.display().to_string();
     discovery
-        .select(&packages, &repo.display().to_string())
+        .check(&selection, &whose)
+        .and_then(|()| discovery.select(&selection, &whose))
         .map_err(|message| Failure {
             message,
             code: EXIT_NOT_FOUND,
@@ -439,7 +463,7 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
         target_dir: head_target_dir(&repo),
         out: PathBuf::new(),
         leg: HEAD_LEG.to_owned(),
-        packages,
+        selection,
         filter: args.get_one::<String>("filter").cloned(),
         seed: 0,
         replicates: 0,
@@ -474,15 +498,15 @@ fn run(args: &ArgMatches) -> Result<(), Failure> {
         .map_or_else(|| default_out().join(&leg), PathBuf::from);
     outside_repo(&repo, &out, "a leg")?;
     let feature_args = feature_args(args);
-    let packages = packages(args);
-    check_packages(&repo, &packages, &feature_args)?;
+    let selection = selection(args);
+    check_packages(&repo, &selection, &feature_args)?;
 
     let plan = Plan {
         dir: repo.clone(),
         target_dir: head_target_dir(&repo),
         out,
         leg,
-        packages,
+        selection,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
@@ -541,14 +565,14 @@ fn ab_run(args: &ArgMatches) -> Result<(), Failure> {
         worktree::cache_root().join(format!("target-{}", &commit[..12.min(commit.len())]));
     outside_repo(&repo, &base_target_dir, "the base leg's build artifacts")?;
     let feature_args = feature_args(args);
-    let packages = packages(args);
-    check_packages(&repo, &packages, &feature_args)?;
+    let selection = selection(args);
+    check_packages(&repo, &selection, &feature_args)?;
     let common = Plan {
         dir: repo.clone(),
         target_dir: head_target_dir(&repo),
         out: out.join(HEAD_LEG),
         leg: HEAD_LEG.to_owned(),
-        packages,
+        selection,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
@@ -595,8 +619,8 @@ fn arms_run(args: &ArgMatches) -> Result<(), Failure> {
 
     // Either arm's answer would do. A bench target's existence is a property of
     // the manifest, and no feature cargo resolves changes it.
-    let packages = packages(args);
-    check_packages(&repo, &packages, &head_features)?;
+    let selection = selection(args);
+    check_packages(&repo, &selection, &head_features)?;
 
     // Both arms are the working tree. There is no worktree and no reference:
     // what separates them is what cargo was asked to compile, so the tree they
@@ -606,7 +630,7 @@ fn arms_run(args: &ArgMatches) -> Result<(), Failure> {
         target_dir: head_target_dir,
         out: out.join(HEAD_LEG),
         leg: HEAD_LEG.to_owned(),
-        packages,
+        selection,
         filter: args.get_one::<String>("filter").cloned(),
         seed: *args.get_one::<u64>("seed").expect("defaulted"),
         replicates: *args.get_one::<u32>("replicates").expect("defaulted"),
@@ -766,7 +790,7 @@ fn default_out() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{cli, named_feature_args};
+    use super::{Selection, cli, named_feature_args};
 
     fn arms_matches(args: &[&str]) -> clap::ArgMatches {
         let full: Vec<&str> = ["bench", "arms"].iter().chain(args).copied().collect();
@@ -812,7 +836,61 @@ mod tests {
     #[test]
     fn the_package_selector_repeats() {
         let matches = arms_matches(&["-p", "spate-avro", "--package", "spate-json"]);
-        assert_eq!(super::packages(&matches), ["spate-avro", "spate-json"]);
+        assert_eq!(
+            super::selection(&matches).packages,
+            ["spate-avro", "spate-json"]
+        );
+    }
+
+    /// The exclusion repeats the same way, and reads into its own list.
+    #[test]
+    fn the_exclusion_repeats() {
+        let matches = arms_matches(&["--exclude", "spate-avro", "--exclude", "spate-json"]);
+        let selection = super::selection(&matches);
+        assert_eq!(selection.excluded, ["spate-avro", "spate-json"]);
+        assert!(selection.packages.is_empty());
+    }
+
+    /// An excluded name is checked against the working tree, since no leg
+    /// checks it: a misspelt one would measure the package it meant to drop.
+    #[test]
+    fn an_unknown_exclusion_is_refused_before_anything_builds() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the bench crate sits inside the workspace");
+        let named = |name: &str| Selection {
+            packages: Vec::new(),
+            excluded: vec![name.to_owned()],
+        };
+        let err = super::check_packages(repo, &named("spate-no-such-package"), &[])
+            .expect_err("an unknown exclusion is refused");
+        assert_eq!(err.code, super::EXIT_NOT_FOUND);
+        assert!(
+            err.message.contains("spate-no-such-package"),
+            "{}",
+            err.message
+        );
+        super::check_packages(repo, &named("spate-bench"), &[])
+            .map_err(|e| e.message)
+            .expect("a package with wall-clock targets is accepted");
+    }
+
+    /// Keeping some packages and dropping others in one run has no meaning a
+    /// reader could rely on, so the parser refuses the pair.
+    #[test]
+    fn an_exclusion_beside_a_narrowing_is_refused() {
+        let err = cli()
+            .try_get_matches_from([
+                "bench",
+                "ab",
+                "main",
+                "-p",
+                "spate-avro",
+                "--exclude",
+                "spate-json",
+            ])
+            .expect_err("refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     /// The parser is built once and shared by five subcommands; a duplicated

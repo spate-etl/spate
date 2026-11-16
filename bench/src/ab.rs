@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::cargo;
+use crate::cargo::{self, Selection};
 use crate::compare::{Cause, Comparison, Leg, NotComparable, guard_fingerprints, load_leg};
 use crate::fingerprint::BuildFingerprint;
 pub use crate::fingerprint::{Axis, BASE_LEG, HEAD_LEG};
@@ -80,11 +80,11 @@ pub struct Plan {
     pub out: PathBuf,
     /// `base`, `head`, or a name a bare `run` was given.
     pub leg: String,
-    /// Packages whose targets to build and measure. Empty selects every one.
+    /// Packages whose targets to build and measure.
     ///
     /// Applied to discovery before the build, where `filter` is applied to the
     /// case list after it.
-    pub packages: Vec<String>,
+    pub selection: Selection,
     /// Substring a case id must contain, if any.
     pub filter: Option<String>,
     /// Corpus seed, identical across legs and replicates.
@@ -130,7 +130,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
         ));
     }
     discovery.select(
-        &plan.packages,
+        &plan.selection,
         &format!("the {} leg at {}", plan.leg, plan.dir.display()),
     )?;
 
@@ -228,7 +228,7 @@ pub fn run(plan: &Plan) -> Result<PathBuf, String> {
     let (describe, dirty) = worktree::describe(&plan.dir);
     let leg = prepare(plan, describe, dirty)?;
     if leg.cases.is_empty() {
-        return Err(no_cases(plan));
+        return Err(no_cases(&plan.selection, plan.filter.as_deref()));
     }
 
     let cases: Vec<CaseId> = leg.cases.iter().cloned().collect();
@@ -396,7 +396,7 @@ fn two_legs(base_plan: &Plan, head_plan: &Plan, allow: &[String]) -> Result<AbOu
             "the two legs share no case{}. base has {}, head has {}. \
              A filter that matches nothing, or a target added on one side only, \
              both look like this.",
-            selection(base_plan),
+            selection(&base_plan.selection),
             base.cases.len(),
             head.cases.len()
         ));
@@ -557,23 +557,28 @@ fn runner_for<'a>(leg: &'a Prepared, case: &CaseId) -> Result<&'a Runner, String
     })
 }
 
-/// " within 'a', 'b'" for a narrowed plan, and nothing for an unnarrowed one.
+/// " within 'a', 'b'" and " outside 'c'" for a narrowed selection, and
+/// nothing for an unnarrowed one.
 ///
 /// Appended to a message about an empty case set, where the selection is one of
 /// the reasons the set can be empty.
-fn selection(plan: &Plan) -> String {
-    if plan.packages.is_empty() {
-        return String::new();
+fn selection(selection: &Selection) -> String {
+    let mut out = String::new();
+    let Selection { packages, excluded } = selection;
+    if !packages.is_empty() {
+        out.push_str(" within ");
+        out.push_str(&crate::quoted(packages.iter().map(String::as_str)));
     }
-    format!(
-        " within {}",
-        crate::quoted(plan.packages.iter().map(String::as_str))
-    )
+    if !excluded.is_empty() {
+        out.push_str(" outside ");
+        out.push_str(&crate::quoted(excluded.iter().map(String::as_str)));
+    }
+    out
 }
 
-fn no_cases(plan: &Plan) -> String {
-    let within = selection(plan);
-    match &plan.filter {
+fn no_cases(chosen: &Selection, filter: Option<&str>) -> String {
+    let within = selection(chosen);
+    match filter {
         Some(filter) => format!("no case id{within} contains '{filter}'"),
         None => format!("no cases were declared by any wall-clock target{within}"),
     }
@@ -674,7 +679,48 @@ impl Writer {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_first, guard_parity};
+    use super::{Selection, base_first, guard_parity, no_cases, selection};
+
+    /// An empty case set's message names the selection that could have caused
+    /// it, kept packages and excluded ones alike, and nothing when there was
+    /// none.
+    #[test]
+    fn the_empty_set_message_names_the_selection() {
+        let names = |list: &[&str]| list.iter().map(|&n| n.to_owned()).collect();
+        assert_eq!(selection(&Selection::default()), "");
+        assert_eq!(
+            selection(&Selection {
+                packages: names(&["a", "b"]),
+                excluded: Vec::new(),
+            }),
+            " within 'a', 'b'"
+        );
+        assert_eq!(
+            selection(&Selection {
+                packages: Vec::new(),
+                excluded: names(&["c"]),
+            }),
+            " outside 'c'"
+        );
+    }
+
+    /// An empty case set names the filter when there was one, and the
+    /// selection either way.
+    #[test]
+    fn an_empty_case_set_names_the_filter_and_the_selection() {
+        let without = Selection {
+            packages: Vec::new(),
+            excluded: vec!["p".to_owned()],
+        };
+        assert_eq!(
+            no_cases(&without, Some("gz")),
+            "no case id outside 'p' contains 'gz'"
+        );
+        assert_eq!(
+            no_cases(&without, None),
+            "no cases were declared by any wall-clock target outside 'p'"
+        );
+    }
 
     /// Neither leg may be systematically second. Asserted rather than read off
     /// the expression, because the property is about the sequence and the

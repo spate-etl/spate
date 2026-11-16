@@ -9,9 +9,9 @@ use spate_json::NdjsonFramer;
 use spate_s3::{S3Source, SplitDescriptor};
 use spate_test::{FeedScript, HANG, ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
 use spate_test_s3_feed::{
-    CHECKPOINT, PipelineConfigFeed, Recording, STEP, TWO_RANGES, Worker, assert_stalled,
-    data_dir, file_source, launch_customized, pipeline_yaml, publish, recs, sorted, stage,
-    stage_with_etag, two_range_unit, written,
+    CHECKPOINT, PipelineConfigFeed, Recording, STEP, TWO_RANGES, Worker, assert_stalled, data_dir,
+    file_source, launch_customized, pipeline_yaml, publish, recs, sorted, stage, stage_with_etag,
+    two_range_unit, written,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -66,6 +66,8 @@ fn the_recording_passes_each_call_on_and_records_it() {
     assert_eq!(recording.depth_reads(), 1);
     assert_eq!(script.depth_reads(DepthOf::DeadLetters), 1);
 
+    assert!(format!("{recording:?}").starts_with("Recording {"));
+    assert_eq!(recording.stopped_receiving(), 0);
     assert!(!recording.hands_back());
     script.hand_back_on_stop();
     assert!(recording.hands_back());
@@ -93,7 +95,10 @@ fn the_recording_passes_acknowledge_fail_and_publish_on() {
     assert_eq!(script.failed(), [(bad, "unreadable".to_owned())]);
     publish(&recording, Unit::new("new", b"n".to_vec()));
     assert_eq!(script.published()[0].id, "new");
-    assert!(Arc::ptr_eq(recording.inner(), &recording.clone().inner().clone()));
+    assert!(Arc::ptr_eq(
+        recording.inner(),
+        &recording.clone().inner().clone()
+    ));
 }
 
 /// `publish` returns once the feed has settled the unit, not before.
@@ -228,6 +233,9 @@ fn a_two_range_unit_is_read_in_full() {
     let descriptor = SplitDescriptor::decode(&unit.body).unwrap();
     assert!(descriptor.objects[0].etag.is_some());
     assert_eq!(rows.len(), 68);
+    // Each line is 16,386 bytes with its newline, so the object fills one
+    // 1 MiB range and part of a second.
+    assert_eq!(descriptor.objects[0].size, 68 * 16_386);
     let (feed, script) = scripted_feed();
     script.deliver(unit);
     let worker = launch(&data, feed, TWO_RANGES);
@@ -260,7 +268,10 @@ fn the_pipeline_file_carries_each_section() {
     let config = PipelineConfig::from_str(&yaml).unwrap();
     assert_eq!(config.pipeline.name, "feed-worker");
     assert!(yaml.contains("checkpoint: { interval: 7s }"), "{yaml}");
-    assert!(yaml.contains("  s3:\n    url: \"file:///d/\"\n    x: 1\n"), "{yaml}");
+    assert!(
+        yaml.contains("  s3:\n    url: \"file:///d/\"\n    x: 1\n"),
+        "{yaml}"
+    );
     assert!(config.feed.is_some());
     let feed: PipelineConfigFeed = serde_yaml::from_str(SCRIPTED).unwrap();
     assert_eq!(feed.feed.backend().type_tag(), "scripted");
@@ -338,4 +349,41 @@ fn a_stalled_job_passes_the_stalled_check() {
 #[should_panic(expected = "no \"2 visible\" in")]
 fn the_stalled_check_wants_every_needle() {
     assert_stalled(&stalled_report(), &["1 visible", "2 visible"]);
+}
+
+/// A failed run whose reason is not a stall fails the check, whatever the
+/// needles.
+#[test]
+#[should_panic(expected = "refused by the feed script")]
+fn the_stalled_check_wants_a_stall() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (feed, script) = scripted_feed();
+    script.refuse_next_receive(FeedErrorKind::Fatal);
+    let worker = launch(&data, feed, "");
+    let report = worker
+        .run
+        .wait_exit(HANG)
+        .expect("the run exits")
+        .expect("the run starts");
+    assert_eq!(report.exit_code(), 1);
+    assert_stalled(&report, &[]);
+}
+
+/// A run that completes fails the check on its exit code.
+#[test]
+#[should_panic(expected = "right: 1")]
+fn the_stalled_check_wants_a_failed_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (feed, _script) = scripted_feed();
+    let worker = launch(&data, feed, "");
+    assert!(format!("{worker:?}").starts_with("Worker {"));
+    worker.shutdown.trigger();
+    let report = worker
+        .run
+        .wait_exit(HANG)
+        .expect("the run exits")
+        .expect("the run starts");
+    assert_stalled(&report, &[]);
 }

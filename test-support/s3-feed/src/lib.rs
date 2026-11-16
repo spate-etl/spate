@@ -100,12 +100,22 @@ impl<F> Recording<F> {
 
     /// Each delivery's count, in the order received.
     pub fn deliveries(&self) -> Vec<u32> {
-        self.seen.lock().unwrap().iter().map(|(n, _, _)| *n).collect()
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _, _)| *n)
+            .collect()
     }
 
     /// Each delivery's receipt, in the order received.
     pub fn receipts(&self) -> Vec<Receipt> {
-        self.seen.lock().unwrap().iter().map(|(_, r, _)| *r).collect()
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r, _)| *r)
+            .collect()
     }
 
     /// The first delivery's count and when the reader took it.

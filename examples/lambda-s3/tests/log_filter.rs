@@ -5,11 +5,9 @@
 mod support;
 
 use spate_example_lambda_s3::{LOG_FILTER, run_batch};
+use spate_test::LogCapture;
 use std::future::pending;
-use std::io;
-use std::sync::{Arc, Mutex};
 use support::*;
-use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -17,41 +15,13 @@ use tracing_subscriber::{EnvFilter, Layer};
 /// The recorder's line for a histogram value it drops.
 const DROPPED: &str = "more than 100 unflushed values";
 
-#[derive(Clone, Default)]
-struct Buffer(Arc<Mutex<Vec<u8>>>);
-
-impl Buffer {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl io::Write for Buffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for Buffer {
-    type Writer = Buffer;
-
-    fn make_writer(&'a self) -> Buffer {
-        self.clone()
-    }
-}
-
 /// Pins that the function's filter drops the recorder's line for each
 /// histogram value past 100 and keeps the handler's own lines. The test
 /// records 101 values itself, so the recorder drops one whatever the run's
 /// poll count, and a layer at `info` beside the filter shows that it did.
 #[tokio::test]
 async fn the_log_filter_drops_the_recorders_lines_and_keeps_the_handlers() {
-    let (function, control) = (Buffer::default(), Buffer::default());
+    let (function, control) = (LogCapture::new(), LogCapture::new());
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -89,10 +59,10 @@ async fn the_log_filter_drops_the_recorders_lines_and_keeps_the_handlers() {
     assert_eq!(failed, Vec::<String>::new());
 
     assert!(
-        control.text().contains(DROPPED),
+        control.lines().join("\n").contains(DROPPED),
         "the recorder dropped no value"
     );
-    let kept = function.text();
+    let kept = function.lines().join("\n");
     assert!(!kept.contains(DROPPED), "{kept}");
     assert!(kept.contains("the batch ended"), "{kept}");
 }

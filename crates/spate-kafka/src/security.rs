@@ -60,6 +60,27 @@ fn check(
     Ok(())
 }
 
+/// Logs one warning when `rdkafka` sends a non-empty `sasl.password` over
+/// `sasl_plaintext`, which carries the SASL login without TLS. Call it after
+/// the section's checks pass and before the client is created.
+pub(crate) fn warn_sasl_plaintext(rdkafka: &BTreeMap<String, String>, at: &SectionPath) {
+    if sends_password_without_tls(rdkafka) {
+        at.warn_cleartext_credential(
+            r#"rdkafka."sasl.password""#,
+            r#"rdkafka."security.protocol" is sasl_plaintext"#,
+        );
+    }
+}
+
+/// Whether `sasl.password` is non-empty and `security.protocol` is
+/// `sasl_plaintext`. librdkafka matches the protocol in any case.
+fn sends_password_without_tls(rdkafka: &BTreeMap<String, String>) -> bool {
+    rdkafka
+        .get("security.protocol")
+        .is_some_and(|v| v.eq_ignore_ascii_case("sasl_plaintext"))
+        && rdkafka.get("sasl.password").is_some_and(|p| !p.is_empty())
+}
+
 /// Whether a `builtin.features` list names a flag librdkafka supports only with OpenSSL.
 fn names_openssl_feature(features: &str) -> bool {
     features.split(',').any(|flag| {
@@ -329,6 +350,40 @@ pub(crate) mod tests {
                     .envs(vars.iter().copied())
                     .env(EXPECT, expected)
             });
+        }
+    }
+
+    /// A non-empty `sasl.password` over `sasl_plaintext`, in any case, is
+    /// sent without TLS. Every other protocol, no protocol, and an empty or
+    /// absent password are not.
+    #[test]
+    fn only_a_password_over_sasl_plaintext_is_sent_without_tls() {
+        for (case, (protocol, secret, cleartext)) in [
+            (Some("sasl_plaintext"), Some("p"), true),
+            (Some("SASL_PLAINTEXT"), Some("p"), true),
+            (Some("sasl_plaintext"), Some(""), false),
+            (Some("sasl_plaintext"), None, false),
+            (Some("sasl_ssl"), Some("p"), false),
+            (Some("plaintext"), Some("p"), false),
+            (Some("ssl"), Some("p"), false),
+            (None, Some("p"), false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rdkafka: BTreeMap<String, String> = [
+                protocol.map(|v| ("security.protocol", v)),
+                secret.map(|v| ("sasl.password", v)),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+            assert_eq!(
+                sends_password_without_tls(&rdkafka),
+                cleartext,
+                "case {case}"
+            );
         }
     }
 }

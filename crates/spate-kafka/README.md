@@ -273,6 +273,9 @@ states when a worker ends the job.
 - Without `kafka-tls`, each role refuses a TLS or SASL property in its
   `rdkafka:` map at load. See
   [Security](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#security-tls-mtls-sasl).
+- A non-empty `sasl.password` with `security.protocol: sasl_plaintext` loads,
+  and logs one warning that the credential is sent without TLS. See
+  [Security](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#security-tls-mtls-sasl).
 - The feed never creates a topic. Create all four before the first worker
   starts: the attempt topic compacted and nothing else, the other three not
   compacted, and the work topic with `message.timestamp.type=LogAppendTime`.

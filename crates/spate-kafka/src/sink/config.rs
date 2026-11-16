@@ -571,6 +571,7 @@ fn build_on(
     io_clock: Arc<dyn IoClock + RefUnwindSafe>,
 ) -> Result<KafkaSink, ConfigError> {
     cfg.validate_at(at)?;
+    crate::security::warn_sasl_plaintext(&cfg.rdkafka, at);
 
     // The statistics slot connects the writer (whose `attach_metrics`
     // fills it) to the main producer's context (whose `stats` callback

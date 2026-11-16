@@ -708,6 +708,51 @@ mod tests {
         }
     }
 
+    /// A sink sending a SASL password over `sasl_plaintext` logs one warning
+    /// naming its `sasl.password` key when it is built.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_sasl_plaintext_sink_logs_one_cleartext_warning() {
+        let body = format!(
+            "  brokers: {}\n  topic: orders\n  rdkafka:\n    security.protocol: \
+             SASL_PLAINTEXT\n    sasl.mechanism: PLAIN\n    sasl.username: u\n    \
+             sasl.password: hunter2\n",
+            crate::testutil::refused_broker()
+        );
+        let cfg: crate::sink::KafkaSinkConfig = spate_test::component_config("kafka", &body)
+            .deserialize_into()
+            .expect("config");
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _sink = crate::sink::build(cfg).expect("sink");
+        });
+        crate::testutil::assert_one_cleartext_warning(&lines, "sink.kafka");
+    }
+
+    /// A sink over `sasl_plaintext` with an empty `sasl.password` sends no
+    /// password, and logs no cleartext warning.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn an_empty_sasl_password_logs_no_cleartext_warning() {
+        let body = format!(
+            "  brokers: {}\n  topic: orders\n  rdkafka:\n    security.protocol: \
+             sasl_plaintext\n    sasl.mechanism: PLAIN\n    sasl.username: u\n    \
+             sasl.password: \"\"\n",
+            crate::testutil::refused_broker()
+        );
+        let cfg: crate::sink::KafkaSinkConfig = spate_test::component_config("kafka", &body)
+            .deserialize_into()
+            .expect("config");
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _ = crate::sink::build(cfg);
+        });
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("the credential is sent without TLS")),
+            "{lines:?}"
+        );
+    }
+
     /// `build_on_clocks` stamps and ages a broker's rejection on the clock
     /// it is given.
     #[cfg(feature = "tls")]

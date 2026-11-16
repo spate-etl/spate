@@ -1890,6 +1890,10 @@ impl Source for KafkaSource {
         self.config
             .validate()
             .map_err(|e| SourceError::fatal(e.to_string()))?;
+        crate::security::warn_sasl_plaintext(
+            &self.config.rdkafka,
+            &SectionPath::source(crate::client::TAG),
+        );
         self.metrics = ctx.stage_metrics.clone();
         if self.config.statistics_interval.is_zero() {
             // Consumer lag is derived from the statistics snapshot and has no
@@ -6245,6 +6249,51 @@ mod tests {
                 assert_eq!(class, expected, "alert {alert}: {reason}");
             }
         }
+    }
+
+    /// A source loaded from YAML over `sasl_plaintext` logs one warning
+    /// naming its `sasl.password` key across loading and `open`.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_yaml_sasl_plaintext_source_logs_one_cleartext_warning() {
+        let section = spate_test::component_config(
+            "kafka",
+            &format!(
+                "brokers: {}\ntopic: orders\ngroup_id: g\nrdkafka:\n  \
+                 security.protocol: sasl_plaintext\n  sasl.mechanism: PLAIN\n  \
+                 sasl.username: u\n  sasl.password: hunter2\n",
+                crate::testutil::refused_broker()
+            ),
+        );
+        let cp = Checkpointer::new();
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let mut source = KafkaSource::from_component_config(&section).expect("loads");
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+        });
+        crate::testutil::assert_one_cleartext_warning(&lines, "source.kafka");
+    }
+
+    /// A source built in code over `sasl_plaintext` logs the same warning
+    /// from `open`.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_sasl_plaintext_source_built_in_code_logs_one_cleartext_warning() {
+        let mut cfg = test_config();
+        cfg.brokers = crate::testutil::refused_broker();
+        for (key, value) in [
+            ("security.protocol", "sasl_plaintext"),
+            ("sasl.mechanism", "PLAIN"),
+            ("sasl.username", "u"),
+            ("sasl.password", "hunter2"),
+        ] {
+            cfg.rdkafka.insert(key.into(), value.into());
+        }
+        let cp = Checkpointer::new();
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let mut source = KafkaSource::new(cfg);
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+        });
+        crate::testutil::assert_one_cleartext_warning(&lines, "source.kafka");
     }
 
     /// The source polls through SASL handshakes its broker drops, each a

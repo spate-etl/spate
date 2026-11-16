@@ -4250,7 +4250,6 @@ dependencies = [
  "proptest",
  "rust_decimal",
  "rustls",
- "rustls-native-certs",
  "serde",
  "serde_repr",
  "spate-bench",
@@ -4268,7 +4267,6 @@ dependencies = [
  "twox-hash",
  "url",
  "uuid",
- "webpki-roots",
  "yaml_serde",
  "zstd 0.14.3",
 ]

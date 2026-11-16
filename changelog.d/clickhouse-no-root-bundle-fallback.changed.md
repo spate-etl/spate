@@ -1,0 +1,3 @@
+**Breaking:** **The ClickHouse sink no longer falls back to the Mozilla root bundle** (`spate-clickhouse`)
+
+A sink with an `https://` replica or `distributed_check.endpoint` fails at startup when the system trust store yields no usable certificate and `tls.root_ca` is not set. The error is at `sink.clickhouse.tls.root_ca` and names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `tls.root_ca` to the CA that signs the replicas. In previous versions the sink logged a warning and verified replicas against the Mozilla root bundle compiled into the binary. A sink with only `http://` URLs reads no trust store and is unaffected. `spate_clickhouse::TlsSection` is now `spate::tls::TlsSection`, re-exported under the same path with the same field.

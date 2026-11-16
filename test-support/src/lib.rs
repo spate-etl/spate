@@ -15,6 +15,7 @@ pub mod events;
 mod http;
 #[cfg(feature = "kafka")]
 mod kafka;
+mod registry_stub;
 #[cfg(feature = "s3")]
 mod s3;
 mod s3_stub;
@@ -35,6 +36,7 @@ pub use http::{http, http_with_body, http_with_headers};
 pub use kafka::PartitionState;
 #[cfg(feature = "kafka")]
 pub use kafka::{BROKER_FROM_INSIDE, Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster};
+pub use registry_stub::{RegistryRequest, RegistryStub};
 #[cfg(feature = "s3")]
 pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 pub use s3_stub::{

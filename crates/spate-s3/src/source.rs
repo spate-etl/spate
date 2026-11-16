@@ -1304,21 +1304,24 @@ mod tests {
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
         let url = crate::test_servers::serve(&server, None).await;
         let dir = tempfile::tempdir().unwrap();
-        let (trusted, untrusted) = (server.write(dir.path()), other.write(dir.path()));
+        let (server_pem, other_pem) = (server.write(dir.path()), other.write(dir.path()));
         let system = || SystemRoots::from_certs(vec![server.der()]);
         for platform_verifier in [false, true] {
-            for (root_ca, rejects) in [(&trusted, false), (&untrusted, true)] {
+            for (case, root_ca, rejects) in [
+                ("the server's CA", &server_pem, false),
+                ("another CA", &other_pem, true),
+            ] {
                 let roots =
                     client_roots(empty_system, Some(root_ca), true, false, platform_verifier)
                         .unwrap();
-                assert_eq!(rejected(&url, roots, false).await, rejects, "{root_ca:?}");
+                assert_eq!(rejected(&url, roots, false).await, rejects, "{case}");
             }
         }
         let roots = client_roots(system, None, true, false, false).unwrap();
         assert!(!rejected(&url, roots, false).await);
         let roots = client_roots(system, None, true, true, false).unwrap();
         assert!(rejected(&url, roots, true).await);
-        let roots = client_roots(system, Some(&trusted), true, true, false).unwrap();
+        let roots = client_roots(system, Some(&server_pem), true, true, false).unwrap();
         assert!(!rejected(&url, roots, true).await);
     }
 

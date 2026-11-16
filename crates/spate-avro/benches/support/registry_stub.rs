@@ -17,10 +17,9 @@
 //! runtime is not driven again, so the measured walk resolves every payload
 //! out of the local cache snapshot.
 //!
-//! It is deliberately a hand-framed HTTP/1.1 responder rather than a hyper
-//! service: the whole thing runs under valgrind, and a canned response over
-//! a blocking socket is the smallest thing that answers the one request
-//! shape the fetcher makes.
+//! It is its own server because its thread is stopped and joined before the
+//! measured walk. `spate_test_support::RegistryStub` serves from threads that
+//! run until the process exits, and this bench runs under valgrind.
 
 // Each bench target and the fixtures test compile this module separately and
 // use a different subset of it: a target that warms one id does not call the

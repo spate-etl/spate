@@ -788,7 +788,9 @@ mod tests {
 
     /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a
     /// certificate `ca` signed, and returns the `https://` URL. With `clients`
-    /// set, the server requires a client certificate that CA signed.
+    /// set, the server requires a client certificate that CA signed. It is
+    /// its own server because `spate_test_support::RegistryStub` serves plain
+    /// HTTP only.
     async fn serve(ca: &TestCa, clients: Option<&TestCa>) -> String {
         let body = serde_json::json!({ "schema": SCHEMA }).to_string();
         let addr = spate_test_support::serve_tls(ca.server_config(clients), move |tls| {
@@ -855,7 +857,9 @@ mod tests {
     }
 
     /// Answers every request with `head` and then `chunks` written in one
-    /// write, and holds the connection open; returns the `http://` URL.
+    /// write, and holds the connection open; returns the `http://` URL. It is
+    /// its own server because `spate_test_support::RegistryStub` frames each
+    /// response itself and closes the connection.
     async fn serve_raw(head: &'static str, chunks: Vec<u8>, drip: Option<Duration>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1234,7 +1238,9 @@ mod tests {
         use super::*;
 
         /// An `http://` server on `127.0.0.1` that answers every request with
-        /// a `307` to the same path under `target`, and returns its URL.
+        /// a `307` to the same path under `target`, and returns its URL. It is
+        /// its own server because a `spate_test_support::RegistryStub` script
+        /// sets no `Location` header.
         async fn redirect_to(target: String) -> String {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

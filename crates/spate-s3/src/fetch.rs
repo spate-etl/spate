@@ -2931,7 +2931,7 @@ mod tests {
     /// One entry under `key` with an ETag, read from a local server answering
     /// every request with `status` and `body`; returns the lane's failure.
     async fn read_answered(status: &'static str, body: String, key: &str) -> SplitFailure {
-        let url = crate::test_servers::sequence_server(vec![(status, body)]);
+        let url = crate::test_servers::reply_server(status, body);
         let store: Arc<dyn ObjectStore> = Arc::new(crate::test_servers::store_at(&url));
         let slice = vec![entry(key, 10, Some("\"e\""))];
         match collect_fetch(store, slice, 0, 64, 64)

@@ -1129,8 +1129,10 @@ mod tests {
     /// location and the status.
     #[tokio::test]
     async fn a_location_answering_403_fails_naming_it() {
-        let store =
-            crate::test_servers::store_at(&crate::test_servers::status_server("403 Forbidden"));
+        let store = crate::test_servers::store_at(&crate::test_servers::reply_server(
+            "403 Forbidden",
+            crate::test_servers::ACCESS_DENIED,
+        ));
         let location = accepted("s3://ops/jobs/a/");
         let err = read_object(&store, &location, &location.fingerprint())
             .await

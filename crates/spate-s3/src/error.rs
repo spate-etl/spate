@@ -332,7 +332,10 @@ mod tests {
             ("404 Not Found", ErrorClass::Fatal),
             ("500 Internal Server Error", ErrorClass::Retryable),
         ] {
-            let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));
+            let store = crate::test_servers::store_at(&crate::test_servers::reply_server(
+                status,
+                crate::test_servers::ACCESS_DENIED,
+            ));
             let e = store.list(None).next().await.unwrap().unwrap_err();
             assert!(e.to_string().contains(status), "{e}");
             if expected == ErrorClass::Fatal {
@@ -352,7 +355,10 @@ mod tests {
     async fn a_rejected_read_is_fatal() {
         use object_store::ObjectStore as _;
         for status in ["403 Forbidden", "401 Unauthorized"] {
-            let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));
+            let store = crate::test_servers::store_at(&crate::test_servers::reply_server(
+                status,
+                crate::test_servers::ACCESS_DENIED,
+            ));
             let e = store
                 .get_opts(&"k".into(), object_store::GetOptions::default())
                 .await
@@ -455,7 +461,7 @@ mod tests {
             "<Error><Code>SlowDown</Code><Message>{}</Message></Error>",
             "x".repeat(64 * 1024)
         );
-        let url = crate::test_servers::sequence_server(vec![("503 Service Unavailable", body)]);
+        let url = crate::test_servers::reply_server("503 Service Unavailable", body);
         let store = crate::test_servers::store_at(&url);
         let key = format!("p/{}", "数".repeat(60));
         let e = store
@@ -655,8 +661,9 @@ mod tests {
     #[tokio::test]
     async fn a_416_on_a_notification_read_is_an_overwrite() {
         use object_store::ObjectStore as _;
-        let store = crate::test_servers::store_at(&crate::test_servers::status_server(
+        let store = crate::test_servers::store_at(&crate::test_servers::reply_server(
             "416 Range Not Satisfiable",
+            crate::test_servers::ACCESS_DENIED,
         ));
         let e = store
             .get_opts(&"k".into(), object_store::GetOptions::default())
@@ -667,8 +674,9 @@ mod tests {
         assert!(is_overwrite(&e, &notification(None)), "{e}");
         assert!(!is_overwrite(&e, &notification(Some("v1"))), "{e}");
         assert!(!is_overwrite(&e, &Origin::Lister), "{e}");
-        let other = crate::test_servers::store_at(&crate::test_servers::status_server(
+        let other = crate::test_servers::store_at(&crate::test_servers::reply_server(
             "500 Internal Server Error",
+            crate::test_servers::ACCESS_DENIED,
         ));
         let e = other
             .get_opts(&"k".into(), object_store::GetOptions::default())
@@ -706,10 +714,10 @@ mod tests {
             assert!(e.to_string().contains(&text), "{e}");
             assert!(!is_overwrite(&e, &notification(None)), "{e}");
         }
-        let url = crate::test_servers::sequence_server(vec![(
+        let url = crate::test_servers::reply_server(
             "503 Service Unavailable",
             format!("<Error><Code>SlowDown</Code><Message>{text}</Message></Error>"),
-        )]);
+        );
         let e = crate::test_servers::store_at(&url)
             .get_opts(
                 &format!("data/{text}").as_str().into(),

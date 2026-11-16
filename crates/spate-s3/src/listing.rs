@@ -332,7 +332,7 @@ mod tests {
             "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
             "\u{20ac}".repeat(30_000)
         );
-        let url = crate::test_servers::sequence_server(vec![("403 Forbidden", body)]);
+        let url = crate::test_servers::reply_server("403 Forbidden", body);
         let store = store_behind_the_connector(&url);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn an_object_read_passes_through_unfiltered() {
         let body = page(&["d//dbl.ndjson"], None);
-        let url = crate::test_servers::sequence_server(vec![("200 OK", body.clone())]);
+        let url = crate::test_servers::reply_server("200 OK", body.clone());
         let keys = UnaddressableKeys::default();
         let client = UnaddressableConnector::new(keys.clone())
             .connect(&ClientOptions::new().with_allow_http(true))

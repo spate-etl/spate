@@ -4,15 +4,15 @@
 mod support;
 
 use spate_core::pipeline::ExitState;
+use spate_test_support::bucket_server;
 use std::time::Duration;
-use support::s3_stub::s3_stub;
 use support::{PipelineYaml, captured_rows, launch, sorted, test_options};
 
 /// Every object beside a key with an empty segment is read, the key's own
 /// split quarantines, and the bounded job ends stalled. Regression for #1082.
 #[test]
 fn a_listing_with_an_unaddressable_key_reads_every_other_object() {
-    let endpoint = s3_stub(&[
+    let endpoint = bucket_server(&[
         ("data/a.ndjson", b"{\"k\":\"a\"}\n"),
         ("data/d//dbl.ndjson", b"{\"k\":\"dbl\"}\n"),
         ("data/dir/", b""),
@@ -47,7 +47,7 @@ fn a_listing_with_an_unaddressable_key_reads_every_other_object() {
 /// poisoning the second.
 #[test]
 fn an_empty_key_that_decodes_alike_does_not_hide_one_with_bytes() {
-    let endpoint = s3_stub(&[
+    let endpoint = bucket_server(&[
         ("data/c\nr.ndjson", b""),
         ("data/c\rr.ndjson", b"{\"k\":\"x\"}\n"),
     ]);

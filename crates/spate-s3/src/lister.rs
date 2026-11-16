@@ -2431,7 +2431,8 @@ mod tests {
     #[test]
     fn a_refused_listing_fails_the_lister_run_as_fatal() {
         let rt = runtime();
-        let endpoint = crate::test_servers::status_server("403 Forbidden");
+        let endpoint =
+            crate::test_servers::reply_server("403 Forbidden", crate::test_servers::ACCESS_DENIED);
         let job = Job::new();
         let (feed, script) = spate_test::scripted_feed();
         let err = stub_source(&rt, &endpoint)
@@ -2453,7 +2454,7 @@ mod tests {
             "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
             "x".repeat(64 * 1024)
         );
-        let endpoint = crate::test_servers::sequence_server(vec![("403 Forbidden", body)]);
+        let endpoint = crate::test_servers::reply_server("403 Forbidden", body);
         let job = Job::new();
         let (feed, _script) = spate_test::scripted_feed();
         let err = stub_source(&rt, &endpoint)
@@ -2500,14 +2501,14 @@ mod tests {
     /// `object_store` gives that entry fails here.
     #[test]
     fn the_s3_clients_refused_delete_entry_is_fatal() {
-        let endpoint = crate::test_servers::sequence_server(vec![(
+        let endpoint = crate::test_servers::reply_server(
             "200 OK",
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
              <Error><Key>jobs/a/checkpoint</Key><Code>AccessDenied</Code>\
              <Message>Access Denied</Message></Error></DeleteResult>"
                 .to_owned(),
-        )]);
+        );
         let store = crate::test_servers::store_at(&endpoint);
         let e = runtime()
             .block_on(store.delete(&Path::from(CHECKPOINT)))

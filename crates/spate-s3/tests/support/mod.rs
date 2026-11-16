@@ -3,7 +3,6 @@
 #![allow(dead_code)]
 
 pub(crate) mod location;
-pub(crate) mod s3_stub;
 pub(crate) mod scripted_store;
 pub(crate) mod spy;
 pub(crate) mod store;

@@ -1223,6 +1223,31 @@ mod tests {
         }
     }
 
+    /// An S3 store called over `http://` builds on an empty system trust
+    /// store. Without the platform verifier, one called over `https://`
+    /// fails at `source.s3.tls.root_ca`.
+    #[test]
+    fn an_empty_trust_store_fails_only_an_https_store() {
+        let url = Url::parse("s3://b/data/").unwrap();
+        let http = map(&[
+            ("endpoint", "http://127.0.0.1:9000"),
+            ("allow_http", "true"),
+        ]);
+        assert!(build_store(&url, &http, None, empty_system).is_ok());
+        let https = build_store(&url, &BTreeMap::new(), None, empty_system);
+        if PLATFORM_VERIFIER {
+            assert!(https.is_ok());
+        } else {
+            let err = https.err().expect("no root to verify AWS against");
+            assert!(
+                err.starts_with(
+                    "source.s3.tls.root_ca: the system trust store has no certificates"
+                ),
+                "{err}"
+            );
+        }
+    }
+
     /// Pins which endpoint decides the scheme: `aws_endpoint_url_s3` over
     /// `endpoint`, and AWS's `https://` with neither.
     #[test]

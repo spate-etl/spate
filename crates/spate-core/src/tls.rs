@@ -284,8 +284,8 @@ pub enum ClientRoots {
 ///   platform verifier takes no added roots.
 /// - [`TrustError::RootCa`] when `root_ca` cannot be used, as
 ///   [`read_root_ca`] says.
-/// - [`TrustError::NoRoots`] when `needs_root` is set and no certificate
-///   loads.
+/// - [`TrustError::NoRoots`] when [`PLATFORM_VERIFIER`] is unset, `needs_root`
+///   is set and no certificate loads.
 ///
 /// # Examples
 ///

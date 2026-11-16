@@ -30,7 +30,6 @@ use apache_avro::rabin::Rabin;
 use serde::Deserialize;
 use spate_core::clock::SyncClock;
 use spate_core::config::{ComponentConfig, DurationBounds, SectionPath, check_duration, redact};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -847,7 +846,7 @@ mod tests {
         let rt = runtime();
         let mut settings = registry_settings("http://127.0.0.1:1", Some("hunter2"));
         if let Some(registry) = settings.registry.as_mut() {
-            registry.tls.root_ca = Some(PathBuf::from("/nonexistent-spate-1647/ca.pem"));
+            registry.tls.root_ca = Some(std::path::PathBuf::from("/nonexistent-spate-1647/ca.pem"));
         }
         let (cleartext, lines) = cleartext_lines(|| {
             let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err();

@@ -825,14 +825,19 @@ mod tests {
     #[test]
     fn a_registry_password_over_http_logs_one_warning() {
         let rt = runtime();
-        for (url, password, warns) in [
-            ("http://127.0.0.1:1", Some("hunter2"), true),
-            ("HTTP://127.0.0.1:1", Some("hunter2"), true),
-            ("https://127.0.0.1:1", Some("hunter2"), false),
-            ("http://127.0.0.1:1", Some(""), false),
-            ("http://127.0.0.1:1", None, false),
+        for (case, url, secret, warns) in [
+            ("http", "http://127.0.0.1:1", Some("hunter2"), true),
+            (
+                "upper-case scheme",
+                "HTTP://127.0.0.1:1",
+                Some("hunter2"),
+                true,
+            ),
+            ("https", "https://127.0.0.1:1", Some("hunter2"), false),
+            ("empty", "http://127.0.0.1:1", Some(""), false),
+            ("absent", "http://127.0.0.1:1", None, false),
         ] {
-            let settings = registry_settings(url, password);
+            let settings = registry_settings(url, secret);
             let (cleartext, lines) = cleartext_lines(|| {
                 AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
             });
@@ -844,11 +849,7 @@ mod tests {
             } else {
                 &[]
             };
-            assert_eq!(
-                cleartext.len(),
-                expected.len(),
-                "{url} {password:?}: {lines:?}"
-            );
+            assert_eq!(cleartext.len(), expected.len(), "{case}: {lines:?}");
             for (line, want) in cleartext.iter().zip(expected) {
                 assert!(line.contains("WARN") && line.contains(want), "{line}");
             }

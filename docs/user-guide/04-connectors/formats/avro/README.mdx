@@ -92,6 +92,14 @@ registry. Interpolate them from the environment (`${SR_USER}` /
 `${SR_PASSWORD}`) rather than committing them. The registry URL must omit
 credentials.
 
+A non-empty `registry.password` with an `http://` registry URL logs one warning
+when the deserializer is built, and the pipeline keeps running. A loopback host
+gets the same warning. Use an `https://` URL to send the password over TLS.
+
+```text
+deserializer.avro.registry.password: registry.url uses http://; the credential is sent without TLS
+```
+
 For migration, remove userinfo from `registry.url` and set the separate
 credential fields. Percent-encoded URL credentials become decoded text in
 these fields. Username-only URLs need only `registry.username`. If separate

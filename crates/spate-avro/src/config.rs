@@ -29,7 +29,7 @@ use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
 use spate_core::clock::SyncClock;
-use spate_core::config::{ComponentConfig, DurationBounds, check_duration, redact};
+use spate_core::config::{ComponentConfig, DurationBounds, SectionPath, check_duration, redact};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -371,9 +371,17 @@ impl AvroDeserializerBuilder {
                     .username
                     .as_ref()
                     .map(|u| (u.clone(), registry.password.clone()));
+                let cleartext_password = url.scheme() == "http"
+                    && registry.password.as_ref().is_some_and(|p| !p.is_empty());
                 let rejection = Rejection::default();
                 let endpoint = Arc::new(Endpoint::new(url, basic_auth));
                 let http = http_client(registry.tls.root_ca.as_deref())?;
+                if cleartext_password {
+                    SectionPath::deserializer("avro").warn_cleartext_credential(
+                        "registry.password",
+                        "registry.url uses http://",
+                    );
+                }
                 let handle = spawn_fetcher(
                     http.clone(),
                     Arc::clone(&endpoint),
@@ -786,6 +794,82 @@ mod tests {
                 AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
             }
         }
+    }
+
+    const CLEARTEXT: &str = "the credential is sent without TLS";
+
+    /// The cleartext-credential lines `build` logs, and every line it logs.
+    fn cleartext_lines(build: impl FnOnce()) -> (Vec<String>, Vec<String>) {
+        let lines = spate_test::capture_logs(tracing::Level::INFO, build);
+        let cleartext = lines
+            .iter()
+            .filter(|line| line.contains(CLEARTEXT))
+            .cloned()
+            .collect();
+        (cleartext, lines)
+    }
+
+    fn registry_settings(url: &str, password: Option<&str>) -> AvroSettings {
+        let mut registry = RegistrySection::new(url);
+        registry.username = Some("svc".into());
+        registry.password = password.map(Into::into);
+        AvroSettings {
+            registry: Some(registry),
+            ..AvroSettings::default()
+        }
+    }
+
+    /// A registry password sent to an `http://` registry logs one warning that
+    /// names the key and never the password. An `https://` registry, an empty
+    /// password and no password log none.
+    #[test]
+    fn a_registry_password_over_http_logs_one_warning() {
+        let rt = runtime();
+        for (url, password, warns) in [
+            ("http://127.0.0.1:1", Some("hunter2"), true),
+            ("HTTP://127.0.0.1:1", Some("hunter2"), true),
+            ("https://127.0.0.1:1", Some("hunter2"), false),
+            ("http://127.0.0.1:1", Some(""), false),
+            ("http://127.0.0.1:1", None, false),
+        ] {
+            let settings = registry_settings(url, password);
+            let (cleartext, lines) = cleartext_lines(|| {
+                AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+            });
+            let expected: &[&str] = if warns {
+                &[
+                    "deserializer.avro.registry.password: registry.url uses http://; \
+                   the credential is sent without TLS",
+                ]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                cleartext.len(),
+                expected.len(),
+                "{url} {password:?}: {lines:?}"
+            );
+            for (line, want) in cleartext.iter().zip(expected) {
+                assert!(line.contains("WARN") && line.contains(want), "{line}");
+            }
+            assert!(!lines.iter().any(|l| l.contains("hunter2")), "{lines:?}");
+        }
+    }
+
+    /// A config the builder refuses logs no warning, even when its password
+    /// would cross `http://`.
+    #[test]
+    fn a_refused_registry_logs_no_cleartext_warning() {
+        let rt = runtime();
+        let mut settings = registry_settings("http://127.0.0.1:1", Some("hunter2"));
+        if let Some(registry) = settings.registry.as_mut() {
+            registry.tls.root_ca = Some(PathBuf::from("/nonexistent-spate-1647/ca.pem"));
+        }
+        let (cleartext, lines) = cleartext_lines(|| {
+            let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err();
+            assert!(err.to_string().contains("registry.tls.root_ca"), "{err}");
+        });
+        assert!(cleartext.is_empty(), "{lines:?}");
     }
 
     /// `Debug` on the settings hides the registry password and URL userinfo

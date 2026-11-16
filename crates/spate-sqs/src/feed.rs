@@ -31,7 +31,7 @@ use crate::queue::{
     VisibilityEntry,
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
-use spate_core::backoff::Backoff;
+use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::tokio::{Clock, SystemClock, before};
 use spate_core::clock::{SyncClock, deadline_after};
 use spate_core::config::{FeedSection, redact};
@@ -81,8 +81,12 @@ const STOP_EXTENSION_BOUND: Duration = Duration::from_secs(1);
 const RECEIVE_GRACE: Duration = Duration::from_secs(1);
 
 /// The retry schedule of a receive, settle or publish call that fails
-/// transiently: 200 ms doubling to 5 s.
-const CALL_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
+/// transiently: 200 ms doubling to 5 s, each wait shortened at random by up
+/// to [`DEFAULT_JITTER`] of it. Each loop's copy seeds its own jitter, so
+/// feeds and replicas that fail together retry apart.
+const CALL_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5))
+    .with_jitter(DEFAULT_JITTER)
+    .with_fresh_seed();
 
 /// A renewal tick seen later than this past its due time schedules the next
 /// a period after it was seen, so a long pass does not leave a burst of

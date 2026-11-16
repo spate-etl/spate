@@ -6,6 +6,7 @@
 use super::*;
 use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
+use spate_core::backoff::DEFAULT_JITTER;
 use spate_core::clock::LONGEST_DEADLINE;
 use spate_core::clock::TestClock as SyncTestClock;
 use spate_core::clock::tokio::TestClock;
@@ -2607,7 +2608,7 @@ async fn a_close_past_the_clock_sends_a_held_back_delete() {
         "settled with the delete down"
     );
     queue.delete_down.store(false, Ordering::SeqCst);
-    tokio::time::advance(first_retry()).await;
+    tokio::time::advance(FIRST_STEP).await;
     settle_tasks().await;
     assert!(closed.try_outcome().unwrap().is_ok());
 }
@@ -2666,7 +2667,7 @@ async fn close_settles_after_the_batch_in_flight() {
     settle_tasks().await;
     assert!(closed.try_outcome().is_none());
     queue.delete_down.store(false, Ordering::SeqCst);
-    tokio::time::advance(first_retry()).await;
+    tokio::time::advance(FIRST_STEP).await;
     settle_tasks().await;
     assert_eq!(queue.inner.deletes().len(), 1);
     assert_eq!(queue.inner.deletes()[0].len(), 2);
@@ -2888,7 +2889,7 @@ async fn a_fatal_during_close_rejects_it() {
     let mut closed = feed.close(within).unwrap();
     settle_tasks().await;
     assert!(closed.try_outcome().is_none());
-    tokio::time::advance(first_retry()).await;
+    tokio::time::advance(FIRST_STEP).await;
     settle_tasks().await;
     assert!(Instant::now() < bound);
     assert_eq!(
@@ -4423,18 +4424,17 @@ async fn a_settle_retry_is_given_up_by_the_injected_clock() {
     tokio::time::advance(MINUTE).await;
     settle_tasks().await;
     assert_eq!(queue.visibility().len(), 1, "tokio time ended the backoff");
-    until("the backoff waits on the clock", || {
-        clock.has_slept_until(t0 + first_retry())
-    })
-    .await;
-    clock.advance(first_retry());
+    let at = retry_deadline(&clock, t0, FIRST_STEP).await;
+    clock.advance(at - t0);
     until("the fail is retried", || queue.visibility().len() == 2).await;
     assert_eq!(
         queue.visibility_within(),
-        [Some(deadline - t0), Some(deadline - t0 - first_retry())]
+        [Some(deadline - t0), Some(deadline - at)]
     );
 
-    for (left, retried) in [(ms(200), false), (ms(201), true)] {
+    // A first wait is at least 160 ms and at most `FIRST_STEP`, so the
+    // first case is given up and the second retried whatever the draw.
+    for (left, retried) in [(ms(159), false), (ms(201), true)] {
         let (feed, queue, clock) = start_clocked(MINUTE);
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
@@ -4446,16 +4446,20 @@ async fn a_settle_retry_is_given_up_by_the_injected_clock() {
         queue.fail_next_visibility_call(CallError::retryable("throttled"));
         feed.fail(d.receipt, "unreadable").unwrap();
         until("the fail is sent", || queue.visibility().len() == 1).await;
-        settle_tasks().await;
-        clock.advance(first_retry());
+        let sent = clock.now();
         settle_tasks().await;
         if retried {
+            let at = retry_deadline(&clock, sent, FIRST_STEP).await;
+            clock.advance(at - sent);
+            until("the fail is retried", || queue.visibility().len() == 2).await;
             assert_eq!(
                 queue.visibility_within(),
-                [Some(left), Some(left - first_retry())],
+                [Some(left), Some(left - (at - sent))],
                 "{left:?} left"
             );
         } else {
+            clock.advance(FIRST_STEP);
+            settle_tasks().await;
             assert_eq!(queue.visibility().len(), 1, "{left:?} left: retried");
         }
     }
@@ -4926,7 +4930,7 @@ fn a_fail_dropped_at_its_deadline_is_counted() {
 #[test]
 fn a_fail_batch_given_up_at_its_deadline_is_counted() {
     let ms = Duration::from_millis;
-    for (left, given_up) in [(ms(200), true), (ms(201), false)] {
+    for (left, given_up) in [(ms(159), true), (ms(201), false)] {
         let mut rendered = String::new();
         let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
             rendered = counted(|meter| async move {
@@ -4942,7 +4946,7 @@ fn a_fail_batch_given_up_at_its_deadline_is_counted() {
                 feed.fail(d.receipt, "unreadable").unwrap();
                 until("the fail is sent", || queue.visibility().len() == 1).await;
                 settle_tasks().await;
-                clock.advance(first_retry());
+                clock.advance(FIRST_STEP);
                 settle_tasks().await;
                 let calls = if given_up { 1 } else { 2 };
                 assert_eq!(queue.visibility().len(), calls, "{left:?} left");
@@ -4975,7 +4979,8 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
                 queue.ready(Message::new("u"));
                 let d = receive_n(&feed, &park, 1).await.remove(0);
                 let deadline = feed.deadline_of(d.receipt).unwrap();
-                clock.advance(deadline - first_retry() - clock.now());
+                // Shorter than any first wait, so the retry is given up.
+                clock.advance(deadline - Duration::from_millis(159) - clock.now());
                 let calls = || {
                     if acknowledge {
                         queue.deletes().len()
@@ -4992,7 +4997,7 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
                 }
                 until("the call is sent", || calls() == 1).await;
                 settle_tasks().await;
-                clock.advance(first_retry());
+                clock.advance(FIRST_STEP);
                 settle_tasks().await;
                 assert_eq!(calls(), 1, "acknowledge {acknowledge}: retried");
             });
@@ -5053,10 +5058,10 @@ fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
         // unit's deadline.
         let mut closed = feed.close(Duration::from_millis(300)).unwrap();
         settle_tasks().await;
-        clock.advance(first_retry());
+        clock.advance(FIRST_STEP);
         until("the fail is retried", || queue.visibility().len() == 2).await;
         settle_tasks().await;
-        clock.advance(first_retry());
+        clock.advance(FIRST_STEP);
         until("the close settles", || closed.try_outcome().is_some()).await;
         assert_eq!(queue.visibility().len(), 2, "sent past the close's bound");
         let e = closed.try_outcome().unwrap().unwrap_err();
@@ -5399,10 +5404,48 @@ fn no_meter_stops_the_counting() {
     assert_eq!(retries(&rendered), [0.0; 6]);
 }
 
-/// The first wait of [`CALL_BACKOFF`].
-fn first_retry() -> Duration {
-    let mut backoff = CALL_BACKOFF;
-    backoff.next_delay()
+/// The first step of [`CALL_BACKOFF`]. Its first jittered wait is never
+/// longer.
+const FIRST_STEP: Duration = Duration::from_millis(200);
+
+/// The steps of [`CALL_BACKOFF`] over seven failures, in milliseconds.
+const SEVEN_STEPS: [u64; 7] = [200, 400, 800, 1600, 3200, 5000, 5000];
+
+/// Whether `delay` lies in the jitter window of `step`. The floor gives a
+/// nanosecond to the `f64` arithmetic the draw is made in.
+fn within_step(delay: Duration, step: Duration) -> bool {
+    let floor = step.mul_f64(1.0 - DEFAULT_JITTER) - Duration::from_nanos(1);
+    floor <= delay && delay <= step
+}
+
+/// The one deadline armed on `clock` in the jitter window of a `step` wait
+/// from `from`, once it is armed.
+async fn retry_deadline(clock: &TestClock, from: Instant, step: Duration) -> Instant {
+    let armed = || {
+        clock
+            .slept_until()
+            .into_iter()
+            .filter(|&at| at > from && within_step(at - from, step))
+            .collect::<Vec<_>>()
+    };
+    until("the retry waits on the clock", || !armed().is_empty()).await;
+    let armed = armed();
+    assert_eq!(armed.len(), 1, "{armed:?}");
+    armed[0]
+}
+
+/// Steps `clock` through one retry per step of `steps` from `from`, and
+/// returns each retry's wait.
+async fn step_through_retries(clock: &TestClock, from: Instant, steps: &[u64]) -> Vec<Duration> {
+    let mut now = from;
+    let mut waits = Vec::new();
+    for &step in steps {
+        let at = retry_deadline(clock, now, Duration::from_millis(step)).await;
+        clock.advance(at - now);
+        waits.push(at - now);
+        now = at;
+    }
+    waits
 }
 
 /// Lets `d` of paused tokio time pass, firing each timer at its own instant.
@@ -5411,34 +5454,85 @@ async fn pass(d: Duration) {
     settle_tasks().await;
 }
 
-/// The time between consecutive instants, in whole milliseconds.
-fn gaps(at: &Mutex<Vec<Instant>>) -> Vec<u128> {
+/// The time between consecutive instants.
+fn gaps(at: &Mutex<Vec<Instant>>) -> Vec<Duration> {
     at.lock()
         .unwrap()
         .windows(2)
-        .map(|pair| (pair[1] - pair[0]).as_millis())
+        .map(|pair| pair[1] - pair[0])
         .collect()
 }
 
-/// Pins the receive retry schedule: a failing receive waits 200 ms, doubling
-/// to 5 s, and an empty reply or a reply with messages starts it again from
-/// 200 ms.
-#[tokio::test(start_paused = true)]
-async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply() {
+/// What a gap between two recorded calls must be.
+#[derive(Clone, Copy, Debug)]
+enum Gap {
+    /// A retry wait: in the jitter window of this step, in milliseconds.
+    Step(u64),
+    /// Exactly this many milliseconds.
+    Exact(u64),
+    /// Set by the test's own pacing, so anything.
+    Any,
+}
+
+/// Asserts that the gaps between the instants in `at` match `expected`.
+fn assert_gaps(at: &Mutex<Vec<Instant>>, expected: &[Gap]) {
+    let gaps = gaps(at);
+    let holds = gaps.len() == expected.len()
+        && gaps.iter().zip(expected).all(|(&gap, want)| match *want {
+            Gap::Step(ms) => within_step(gap, Duration::from_millis(ms)),
+            Gap::Exact(ms) => gap == Duration::from_millis(ms),
+            Gap::Any => true,
+        });
+    assert!(holds, "gaps {gaps:?} against {expected:?}");
+}
+
+/// The gaps of seven failing calls, one per step of [`SEVEN_STEPS`].
+fn seven_steps() -> Vec<Gap> {
+    SEVEN_STEPS.map(Gap::Step).to_vec()
+}
+
+/// Starts a feed whose receives fail, and lets every receive of seven steps
+/// fail. The seven waits sum to at most 16.2 s, and an eighth would end at
+/// 16.96 s at the earliest.
+async fn seven_failed_receives() -> (SqsFeed, Arc<Gated>) {
     let (feed, queue) = start_gated(MINUTE);
     queue.receive_down.store(true, Ordering::SeqCst);
     assert!(feed.receive(1).unwrap().is_empty());
     settle_tasks().await;
     pass(Duration::from_millis(16_200)).await;
-    assert_eq!(
-        gaps(&queue.receives_at),
-        [200, 400, 800, 1600, 3200, 5000, 5000]
-    );
+    (feed, queue)
+}
+
+/// Starts a feed whose sends fail, and lets every send of one batch fail for
+/// seven steps, as [`seven_failed_receives`] does for receives.
+async fn seven_failed_sends() -> (SqsFeed, Arc<Gated>, Confirmation) {
+    let (feed, queue) = start_gated(MINUTE);
+    queue.send_down.store(true, Ordering::SeqCst);
+    let published = feed.publish(Unit::new("a", "x"));
+    settle_tasks().await;
+    pass(Duration::from_millis(16_200)).await;
+    (feed, queue, published)
+}
+
+/// Pins the receive retry schedule: a failing receive waits 200 ms, doubling
+/// to 5 s, each wait shortened by at most its jitter, and an empty reply or a
+/// reply with messages starts it again from 200 ms.
+#[tokio::test(start_paused = true)]
+async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply() {
+    use Gap::{Any, Exact, Step};
+    let (feed, queue) = seven_failed_receives().await;
+    assert_gaps(&queue.receives_at, &seven_steps());
 
     // The next receive long-polls 20 s and answers empty; the receive after
-    // it fails, and its retry follows 200 ms later.
+    // it fails, and its retry follows within 200 ms.
     queue.receive_down.store(false, Ordering::SeqCst);
-    pass(Duration::from_millis(5_000)).await;
+    for _ in 0..50 {
+        if queue.receives_at.lock().unwrap().len() == 9 {
+            break;
+        }
+        pass(Duration::from_millis(100)).await;
+    }
+    assert_eq!(queue.receives_at.lock().unwrap().len(), 9);
     queue.receive_down.store(true, Ordering::SeqCst);
     pass(Duration::from_millis(20_200)).await;
 
@@ -5458,27 +5552,26 @@ async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply
     assert!(feed.receive(1).unwrap().is_empty());
     settle_tasks().await;
     pass(Duration::from_millis(200)).await;
-    assert_eq!(
-        gaps(&queue.receives_at),
-        [
-            200, 400, 800, 1600, 3200, 5000, 5000, 5000, 20_000, 200, 400, 0, 200
-        ]
-    );
+    let mut expected = seven_steps();
+    expected.extend([
+        Step(5000),
+        Exact(20_000),
+        Step(200),
+        Step(400),
+        Any,
+        Step(200),
+    ]);
+    assert_gaps(&queue.receives_at, &expected);
 }
 
 /// Pins the publish retry schedule: a failing send waits 200 ms, doubling to
-/// 5 s, and the next batch starts again from 200 ms.
+/// 5 s, each wait shortened by at most its jitter, and the next batch starts
+/// again from 200 ms.
 #[tokio::test(start_paused = true)]
 async fn a_failing_publish_backs_off_from_200ms_to_5s_for_each_batch() {
-    let (feed, queue) = start_gated(MINUTE);
-    queue.send_down.store(true, Ordering::SeqCst);
-    let mut first = feed.publish(Unit::new("a", "x"));
-    settle_tasks().await;
-    pass(Duration::from_millis(16_200)).await;
-    assert_eq!(
-        gaps(&queue.sends_at),
-        [200, 400, 800, 1600, 3200, 5000, 5000]
-    );
+    use Gap::{Any, Step};
+    let (feed, queue, mut first) = seven_failed_sends().await;
+    assert_gaps(&queue.sends_at, &seven_steps());
     queue.send_down.store(false, Ordering::SeqCst);
     pass(Duration::from_millis(5_000)).await;
     until("the first publish is confirmed", || {
@@ -5491,60 +5584,105 @@ async fn a_failing_publish_backs_off_from_200ms_to_5s_for_each_batch() {
     let _second = feed.publish(Unit::new("b", "y"));
     settle_tasks().await;
     pass(Duration::from_millis(200)).await;
-    assert_eq!(
-        gaps(&queue.sends_at),
-        [200, 400, 800, 1600, 3200, 5000, 5000, 5000, 0, 200]
-    );
+    let mut expected = seven_steps();
+    expected.extend([Step(5000), Any, Step(200)]);
+    assert_gaps(&queue.sends_at, &expected);
 }
 
-/// Pins the settle retry schedule on the feed's clock: a failing fail call
-/// waits 200 ms, doubling to 5 s, each retry bounded by the time left, and
-/// the next batch starts again from 200 ms.
-#[tokio::test(start_paused = true)]
-async fn a_failing_settle_call_backs_off_from_200ms_to_5s_on_the_injected_clock() {
-    let ms = Duration::from_millis;
+/// Fails the fail call of the first of two units on a clocked feed seven
+/// times, steps the clock through each retry, and returns the feed, its
+/// queue and clock, the second unit, and the unit's deadline, the instant
+/// of the fail, and each retry's wait.
+async fn seven_failed_settles() -> (
+    SqsFeed,
+    Arc<ScriptedQueue>,
+    Arc<TestClock>,
+    Delivery,
+    (Instant, Instant, Vec<Duration>),
+) {
     let (feed, queue, clock) = start_clocked(MINUTE);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
     queue.ready(Message::new("a"));
     queue.ready(Message::new("b"));
-    let got = receive_n(&feed, &park, 2).await;
+    let mut got = receive_n(&feed, &park, 2).await;
     let deadline = feed.deadline_of(got[0].receipt).unwrap();
     for _ in 0..7 {
         queue.fail_next_visibility_call(CallError::retryable("throttled"));
     }
     let t0 = clock.now();
     feed.fail(got[0].receipt, "unreadable").unwrap();
-    let mut waited = Duration::ZERO;
-    let mut within = vec![Some(deadline - t0)];
-    for step in [200, 400, 800, 1600, 3200, 5000, 5000].map(ms) {
-        until("the retry waits on the clock", || {
-            clock.has_slept_until(t0 + waited + step)
-        })
-        .await;
-        clock.advance(step);
-        waited += step;
-        within.push(Some(deadline - (t0 + waited)));
-    }
+    let waits = step_through_retries(&clock, t0, &SEVEN_STEPS).await;
     until("the eighth call is sent", || queue.visibility().len() == 8).await;
+    let second = got.remove(1);
+    (feed, queue, clock, second, (deadline, t0, waits))
+}
+
+/// Pins the settle retry schedule on the feed's clock: a failing fail call
+/// waits 200 ms, doubling to 5 s, each wait shortened by at most its jitter
+/// and each retry bounded by the time left, and the next batch starts again
+/// from 200 ms.
+#[tokio::test(start_paused = true)]
+async fn a_failing_settle_call_backs_off_from_200ms_to_5s_on_the_injected_clock() {
+    let (feed, queue, clock, second, (deadline, t0, waits)) = seven_failed_settles().await;
+    let mut at = t0;
+    let mut within = vec![Some(deadline - t0)];
+    for &wait in &waits {
+        at += wait;
+        within.push(Some(deadline - at));
+    }
     assert_eq!(queue.visibility_within(), within);
 
     queue.fail_next_visibility_call(CallError::retryable("throttled"));
     let t1 = clock.now();
-    feed.fail(got[1].receipt, "unreadable").unwrap();
-    until("the next batch waits 200 ms", || {
-        clock.has_slept_until(t1 + ms(200))
-    })
-    .await;
+    feed.fail(second.receipt, "unreadable").unwrap();
+    retry_deadline(&clock, t1, FIRST_STEP).await;
 }
 
-/// Pins that a settle retry is given up by the step it would wait: with
-/// 600 ms left, a second failure's 400 ms wait reaches the deadline, and with
-/// 601 ms left it does not.
+/// Two feeds whose receives fail at the same instants retry them apart.
+/// With no jitter, or one seed for every copy of the schedule, their gaps
+/// match.
+#[tokio::test(start_paused = true)]
+async fn two_feeds_retry_their_receives_apart() {
+    let ((_a, first), (_b, second)) =
+        tokio::join!(seven_failed_receives(), seven_failed_receives());
+    assert_gaps(&first.receives_at, &seven_steps());
+    assert_ne!(
+        gaps(&first.receives_at),
+        gaps(&second.receives_at),
+        "two feeds drew alike"
+    );
+}
+
+/// Two feeds whose sends fail at the same instants send again apart.
+#[tokio::test(start_paused = true)]
+async fn two_feeds_retry_their_sends_apart() {
+    let ((_a, first, _), (_b, second, _)) =
+        tokio::join!(seven_failed_sends(), seven_failed_sends());
+    assert_gaps(&first.sends_at, &seven_steps());
+    assert_ne!(
+        gaps(&first.sends_at),
+        gaps(&second.sends_at),
+        "two feeds drew alike"
+    );
+}
+
+/// Two feeds whose fail calls fail retry them apart.
+#[tokio::test(start_paused = true)]
+async fn two_feeds_retry_their_settles_apart() {
+    let (.., (_, _, first)) = seven_failed_settles().await;
+    let (.., (_, _, second)) = seven_failed_settles().await;
+    assert_ne!(first, second, "two feeds drew alike");
+}
+
+/// Pins that a settle retry is given up by the step it would wait. With
+/// 479 ms left, a second wait of at least 320 ms after a first of at most
+/// 200 ms reaches the deadline whatever the draws. With 601 ms left, the two
+/// waits of at most 600 ms never do.
 #[tokio::test(start_paused = true)]
 async fn a_second_settle_retry_is_given_up_by_its_doubled_step() {
     let ms = Duration::from_millis;
-    for (left, sent) in [(ms(600), 2), (ms(601), 3)] {
+    for (left, sent) in [(ms(479), 2), (ms(601), 3)] {
         let (feed, queue, clock) = start_clocked(MINUTE);
         let (waker, park) = wake_channel();
         feed.set_waker(waker);

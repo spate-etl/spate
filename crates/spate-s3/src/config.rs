@@ -243,7 +243,7 @@ impl S3SourceConfig {
             if !s3 {
                 return Err(at.invalid("tls.root_ca", "is set, but `url` is not an S3 store"));
             }
-            if self.store_endpoint().is_some_and(|e| !is_https(e)) {
+            if store_endpoint(&self.store).is_some_and(|e| !is_https(e)) {
                 return Err(at.invalid(
                     "tls.root_ca",
                     "is set, but the endpoint `store` sets is not https://",
@@ -252,18 +252,18 @@ impl S3SourceConfig {
         }
         Ok(())
     }
+}
 
-    /// The endpoint `store` sets, read in [`ENDPOINT_KEYS`] order.
-    fn store_endpoint(&self) -> Option<&str> {
-        ENDPOINT_KEYS
-            .iter()
-            .find_map(|wanted| {
-                self.store
-                    .iter()
-                    .find(|(key, _)| s3_store_key(key).as_ref() == Some(wanted))
-            })
-            .map(|(_, value)| value.as_str())
-    }
+/// The endpoint the `store` options set, read in [`ENDPOINT_KEYS`] order.
+pub(crate) fn store_endpoint(store: &BTreeMap<String, String>) -> Option<&str> {
+    ENDPOINT_KEYS
+        .iter()
+        .find_map(|wanted| {
+            store
+                .iter()
+                .find(|(key, _)| s3_store_key(key).as_ref() == Some(wanted))
+        })
+        .map(|(_, value)| value.as_str())
 }
 
 /// The options that name the store's endpoint, in the order the client reads

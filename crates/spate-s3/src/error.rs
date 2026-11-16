@@ -150,7 +150,8 @@ pub(crate) fn bounded_reason(e: &object_store::Error) -> String {
         text.push('…');
     }
     if let Some(tls) = spate_core::tls_rejection!(rustls, e) {
-        text = format!("{text}: {tls}");
+        let key = crate::listing::RootCaKey::of(e);
+        text = format!("{text}: {}", spate_core::tls_reason!(rustls, tls, key));
     }
     text
 }

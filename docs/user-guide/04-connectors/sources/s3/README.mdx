@@ -313,6 +313,10 @@ A store that needs no system root opens without one too: one with
 certificate, and one with `proxy_url` and `proxy_ca_certificate`, whose proxy
 CA the client trusts.
 
+A server whose certificate comes from an unknown issuer fails the request with
+a hint to add the issuing CA to the system trust store, or to `tls.root_ca`
+when the source accepts that key.
+
 ## Scaling out
 
 Every worker of a pipeline reads the same feed, and the feed divides the work:

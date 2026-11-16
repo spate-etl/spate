@@ -68,6 +68,7 @@ impl UnaddressableKeys {
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
     roots: ClientRoots,
+    root_ca_key: Option<&'static str>,
 }
 
 impl UnaddressableConnector {
@@ -75,12 +76,58 @@ impl UnaddressableConnector {
         Self {
             keys,
             roots: ClientRoots::default(),
+            root_ca_key: None,
         }
     }
 
-    /// The connector, with its client verifying TLS against `roots`.
-    pub(crate) fn trusting(self, roots: ClientRoots) -> Self {
-        Self { roots, ..self }
+    /// The connector, with its client verifying TLS against `roots`, and its
+    /// failed requests naming `root_ca_key` as a [`RootCaKey`] when it is
+    /// set.
+    pub(crate) fn trusting(self, roots: ClientRoots, root_ca_key: Option<&'static str>) -> Self {
+        Self {
+            roots,
+            root_ca_key,
+            ..self
+        }
+    }
+}
+
+/// A failed request from a client whose source accepts a `root_ca` key,
+/// which the hint for a rejected certificate names. Its text and source are
+/// the failure's own.
+#[derive(Debug)]
+pub(crate) struct RootCaKey {
+    key: &'static str,
+    error: HttpError,
+}
+
+impl RootCaKey {
+    /// The key a hint names for the request that failed in `e`, if any.
+    pub(crate) fn of(e: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+        let mut next = Some(e);
+        while let Some(error) = next {
+            if let Some(tagged) = error.downcast_ref::<RootCaKey>() {
+                return Some(tagged.key);
+            }
+            next = error.source();
+        }
+        None
+    }
+}
+
+impl std::fmt::Display for RootCaKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The text `HttpError` wraps, so the failure reads as it did untagged.
+        match std::error::Error::source(&self.error) {
+            Some(source) => std::fmt::Display::fmt(source, f),
+            None => std::fmt::Display::fmt(&self.error, f),
+        }
+    }
+}
+
+impl std::error::Error for RootCaKey {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.error)
     }
 }
 
@@ -117,6 +164,7 @@ impl HttpConnector for UnaddressableConnector {
         Ok(HttpClient::new(FilteringService {
             inner,
             keys: self.keys.clone(),
+            root_ca_key: self.root_ca_key,
         }))
     }
 }
@@ -125,6 +173,7 @@ impl HttpConnector for UnaddressableConnector {
 struct FilteringService {
     inner: HttpClient,
     keys: UnaddressableKeys,
+    root_ca_key: Option<&'static str>,
 }
 
 #[async_trait::async_trait]
@@ -139,7 +188,14 @@ impl HttpService for FilteringService {
         let asked = listing
             .then(|| continuation_token(req.uri().query().unwrap_or_default()))
             .flatten();
-        let response = self.inner.execute(req).await?;
+        let response = self
+            .inner
+            .execute(req)
+            .await
+            .map_err(|error| match self.root_ca_key {
+                Some(key) => HttpError::new(error.kind(), RootCaKey { key, error }),
+                None => error,
+            })?;
         if !response.status().is_success() {
             return Ok(bounded_failure(response).await);
         }

@@ -12,13 +12,11 @@ use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{Feed, Unit};
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
-use spate_core::sink::KeyHashRouter;
 use spate_json::NdjsonFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
 use spate_test::{
-    BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink, wait_until,
+    PipelineRun, SinkScript, TestEncoder, capture_sink, passthrough_runtime, wait_until,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -278,24 +276,7 @@ fn launch_inner(
     );
     let (sink, script) = capture_sink(1, 1);
     pre(&script);
-    let runtime = pipeline
-        .sink(sink)
-        .expect("sink installs")
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(options)
-        .into_runtime(source)
-        .expect("runtime assembles");
+    let runtime = passthrough_runtime(pipeline, source, sink, TestEncoder, options);
     let runtime = match stop_clock {
         Some(clock) => runtime.with_stop_clock(clock),
         None => runtime,

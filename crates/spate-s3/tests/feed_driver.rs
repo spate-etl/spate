@@ -14,14 +14,13 @@ use spate_core::clock::tokio::{Clock as _, TestClock as LaneClock};
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
 use spate_core::feed::{Feed, FeedErrorKind, FeedOrigin, Receipt, STOP_RESERVE, Unit};
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
-use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
+use spate_core::sink::SinkPoolConfig;
 use spate_core::source::{Source, SourceCtx};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
-    BytesPassthrough, FeedScript, PipelineRun, SinkScript, TestEncoder, WriteOutcome, capture_sink,
-    scripted_feed, wait_until,
+    FeedScript, PipelineRun, SinkScript, TestEncoder, WriteOutcome, capture_sink,
+    passthrough_runtime, scripted_feed, wait_until,
 };
 use std::fs;
 use std::num::NonZeroUsize;
@@ -763,27 +762,16 @@ fn launch_one_row_writes(
     pool.batch.linger = Duration::from_millis(10);
     let (sink, script) = capture_sink(1, 1);
     pre(&script);
-    let runtime = pipeline
-        .sink(sink.with_pool_config(pool))
-        .unwrap()
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink.with_pool_config(pool),
+        TestEncoder,
+        RuntimeOptions {
             max_records: 4,
             ..test_options()
-        })
-        .into_runtime(source)
-        .unwrap();
+        },
+    );
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     Launched {
@@ -1007,27 +995,16 @@ fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
     let mut pool = SinkPoolConfig::default();
     pool.batch.linger = Duration::from_millis(10);
     let (sink, sink_script) = capture_sink(1, 1);
-    let runtime = pipeline
-        .sink(sink.with_pool_config(pool))
-        .unwrap()
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink.with_pool_config(pool),
+        TestEncoder,
+        RuntimeOptions {
             event_poll_timeout: Duration::from_secs(60),
             ..test_options()
-        })
-        .into_runtime(source)
-        .unwrap();
+        },
+    );
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
 
@@ -1074,28 +1051,17 @@ fn a_unit_whose_write_outlasts_the_chase_is_acknowledged_before_the_tick() {
     pool.batch.linger = Duration::from_millis(10);
     let (sink, sink_script) = capture_sink(1, 1);
     sink_script.enqueue_global(WriteOutcome::ok().held());
-    let runtime = pipeline
-        .sink(sink.with_pool_config(pool))
-        .unwrap()
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink.with_pool_config(pool),
+        TestEncoder,
+        RuntimeOptions {
             event_poll_timeout: Duration::from_millis(100),
             ..test_options()
-        })
-        .into_runtime(source)
-        .unwrap()
-        .with_chase_window(Duration::ZERO);
+        },
+    )
+    .with_chase_window(Duration::ZERO);
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
 

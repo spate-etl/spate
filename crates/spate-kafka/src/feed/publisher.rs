@@ -124,6 +124,10 @@ impl KafkaFeedPublisher {
         bound: Duration,
     ) -> Result<KafkaFeedPublisher, ConnectError> {
         let config = KafkaFeedConfig::from_section(section)?;
+        crate::security::warn_sasl_plaintext(
+            &config.rdkafka,
+            &spate_core::config::SectionPath::feed(BACKEND),
+        );
         // A publisher's only timed read is the connect bound, which the
         // feed's tests drive on a test clock.
         let clock = SyncClock::system();

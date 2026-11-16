@@ -716,6 +716,10 @@ impl KafkaFeed {
         clock: SyncClock,
     ) -> Result<KafkaFeed, ConnectError> {
         let config = KafkaFeedConfig::from_section(section)?;
+        crate::security::warn_sasl_plaintext(
+            &config.rdkafka,
+            &spate_core::config::SectionPath::feed(BACKEND),
+        );
         let checked = check_topics(&config, io, scope, bound, clock.clone())?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
         let lister = attempt::lister(&config)?;

@@ -708,6 +708,26 @@ mod tests {
         }
     }
 
+    /// A sink over `sasl_plaintext` logs one warning naming its
+    /// `security.protocol` key when it is built.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_sasl_plaintext_sink_logs_one_cleartext_warning() {
+        let body = format!(
+            "  brokers: {}\n  topic: orders\n  rdkafka:\n    security.protocol: \
+             SASL_PLAINTEXT\n    sasl.mechanism: PLAIN\n    sasl.username: u\n    \
+             sasl.password: hunter2\n",
+            crate::testutil::refused_broker()
+        );
+        let cfg: crate::sink::KafkaSinkConfig = spate_test::component_config("kafka", &body)
+            .deserialize_into()
+            .expect("config");
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _sink = crate::sink::build(cfg).expect("sink");
+        });
+        crate::testutil::assert_one_cleartext_warning(&lines, "sink.kafka");
+    }
+
     /// `build_on_clocks` stamps and ages a broker's rejection on the clock
     /// it is given.
     #[cfg(feature = "tls")]

@@ -88,6 +88,14 @@ rdkafka:
   ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
 ```
 
+A `sasl_plaintext` config loads, in any case of the value, and logs one warning
+when the client is built. The source logs it from `open`, and the sink, the
+feed and the feed publisher when they are built or connect:
+
+```text
+source.kafka.rdkafka."security.protocol": is sasl_plaintext; the credential is sent without TLS
+```
+
 Set `sasl.mechanism`: it defaults to `GSSAPI` (Kerberos), which the feature does
 not compile in. A client configured with `GSSAPI` fails at startup with
 `No provider for SASL mechanism GSSAPI`.

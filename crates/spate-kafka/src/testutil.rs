@@ -131,6 +131,26 @@ pub(crate) fn committed_offsets(
         .collect()
 }
 
+/// Asserts that `lines` hold exactly one cleartext-credential warning, for
+/// the `security.protocol` key of the section at `path`, and no password.
+#[cfg(feature = "tls")]
+pub(crate) fn assert_one_cleartext_warning(lines: &[String], path: &str) {
+    let cleartext: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("the credential is sent without TLS"))
+        .collect();
+    assert_eq!(cleartext.len(), 1, "{lines:?}");
+    let want = format!(
+        "{path}.rdkafka.\"security.protocol\": is sasl_plaintext; the credential is sent \
+         without TLS"
+    );
+    assert!(
+        cleartext[0].contains("WARN") && cleartext[0].contains(&want),
+        "{cleartext:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("hunter2")), "{lines:?}");
+}
+
 /// A loopback `host:port` that refuses connections at once.
 ///
 /// The port is bound and released, so the refusal is real. A port nothing has

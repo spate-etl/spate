@@ -58,6 +58,17 @@ Secrets that never enter the config file are better still: a connector
 that resolves ambient cloud credentials, or reads a mounted credentials file,
 gives you nothing to leak.
 
+## A credential sent without TLS
+
+A connector configured to send a credential over a connection without TLS
+loads, and logs one warning when it is built. The warning names the
+credential's key, and the pipeline keeps running. A loopback host gets the same
+warning, and an empty credential logs none. A connector whose secret never
+crosses the connection, because it only signs each request, logs no such
+warning. Each connector's security section, linked from the
+[table above](#where-each-connector-documents-its-security), names the settings
+that warn.
+
 ## What a security failure does at runtime
 
 Every connector applies one rule

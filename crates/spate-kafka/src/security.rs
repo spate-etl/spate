@@ -60,6 +60,23 @@ fn check(
     Ok(())
 }
 
+/// Logs one warning when `rdkafka` selects `sasl_plaintext`, which sends the
+/// SASL login without TLS. Call it after the section's checks pass and before
+/// the client is created.
+pub(crate) fn warn_sasl_plaintext(rdkafka: &BTreeMap<String, String>, at: &SectionPath) {
+    if sends_sasl_without_tls(rdkafka) {
+        at.warn_cleartext_credential(r#"rdkafka."security.protocol""#, "is sasl_plaintext");
+    }
+}
+
+/// Whether `security.protocol` is `sasl_plaintext`. librdkafka matches the
+/// value in any case.
+fn sends_sasl_without_tls(rdkafka: &BTreeMap<String, String>) -> bool {
+    rdkafka
+        .get("security.protocol")
+        .is_some_and(|v| v.eq_ignore_ascii_case("sasl_plaintext"))
+}
+
 /// Whether a `builtin.features` list names a flag librdkafka supports only with OpenSSL.
 fn names_openssl_feature(features: &str) -> bool {
     features.split(',').any(|flag| {
@@ -329,6 +346,25 @@ pub(crate) mod tests {
                     .envs(vars.iter().copied())
                     .env(EXPECT, expected)
             });
+        }
+    }
+
+    /// `sasl_plaintext` in any case sends the SASL login without TLS; every
+    /// other protocol, and none, does not.
+    #[test]
+    fn only_sasl_plaintext_sends_the_login_without_tls() {
+        for (protocol, cleartext) in [
+            (Some("sasl_plaintext"), true),
+            (Some("SASL_PLAINTEXT"), true),
+            (Some("sasl_ssl"), false),
+            (Some("plaintext"), false),
+            (Some("ssl"), false),
+            (None, false),
+        ] {
+            let rdkafka = protocol
+                .map(|p| BTreeMap::from([("security.protocol".to_owned(), p.to_owned())]))
+                .unwrap_or_default();
+            assert_eq!(sends_sasl_without_tls(&rdkafka), cleartext, "{protocol:?}");
         }
     }
 }

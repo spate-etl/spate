@@ -1432,6 +1432,16 @@ mod tests {
         })
     }
 
+    /// A feed section for `brokers`, with the passthrough `rdkafka`.
+    fn feed_section(brokers: &str, rdkafka: &str) -> spate_core::config::FeedSection {
+        serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
+             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \
+             statistics_interval: 0s\n  rdkafka:\n{rdkafka}"
+        ))
+        .unwrap()
+    }
+
     /// [`connect_to`] with the constructor `connect`.
     fn connect_with_to(
         brokers: &str,
@@ -1443,12 +1453,7 @@ mod tests {
             Duration,
         ) -> Option<ConnectError>,
     ) -> Option<ConnectError> {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
-            "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
-             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \
-             statistics_interval: 0s\n  rdkafka:\n{rdkafka}"
-        ))
-        .unwrap();
+        let section = feed_section(brokers, rdkafka);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let io = multi_thread();
@@ -1759,6 +1764,51 @@ mod tests {
                 }
                 other => panic!("expected a refusal, got {other:?}"),
             }
+        }
+
+        /// The log lines of `connect` against a broker that refuses the SASL
+        /// login, over `sasl_plaintext`. The call runs on the test thread,
+        /// where the capture listens, and must return the broker's refusal.
+        fn sasl_plaintext_connect_lines(
+            connect: impl FnOnce(
+                &spate_core::config::FeedSection,
+                &tokio::runtime::Handle,
+            ) -> Option<ConnectError>,
+        ) -> Vec<String> {
+            let brokers = crate::testutil::refuses_sasl_login().to_string();
+            let section = feed_section(&brokers, &SASL_PLAIN.replace("wrong", "hunter2"));
+            let io = multi_thread();
+            spate_test::capture_logs(tracing::Level::INFO, || {
+                let got = connect(&section, io.handle());
+                assert!(matches!(got, Some(ConnectError::Refused { .. })), "{got:?}");
+            })
+        }
+
+        /// Connecting the feed over `sasl_plaintext` logs one warning naming
+        /// its `security.protocol` key.
+        #[test]
+        fn a_sasl_plaintext_feed_logs_one_cleartext_warning() {
+            let lines = sasl_plaintext_connect_lines(|section, io| {
+                crate::feed::KafkaFeed::connect_with(
+                    section,
+                    io,
+                    Scope::All,
+                    LONG,
+                    SyncClock::system(),
+                )
+                .err()
+            });
+            crate::testutil::assert_one_cleartext_warning(&lines, "feed.kafka");
+        }
+
+        /// Connecting the publisher over `sasl_plaintext` logs one warning
+        /// naming its `security.protocol` key.
+        #[test]
+        fn a_sasl_plaintext_publisher_logs_one_cleartext_warning() {
+            let lines = sasl_plaintext_connect_lines(|section, io| {
+                crate::feed::KafkaFeedPublisher::connect_with(section, io, Scope::All, LONG).err()
+            });
+            crate::testutil::assert_one_cleartext_warning(&lines, "feed.kafka");
         }
 
         /// Pins that a broker refusing the SASL login refuses connecting the

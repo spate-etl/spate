@@ -816,14 +816,32 @@ async fn prewarm_loads_subjects_at_startup() {
 const CHILD_REGISTRY_URL: &str = "SPATE_TEST_AVRO_REGISTRY_URL";
 
 /// With an empty system trust store, an `http://` registry builds and
-/// decodes, and an `https://` registry builds. Regression for #624.
+/// decodes. An `https://` registry fails at startup with an error that names
+/// `registry.tls.root_ca` and the trust store, except on macOS and Windows,
+/// where the platform verifier reads the OS store and `SSL_CERT_FILE` does not
+/// empty it. Regression for #624.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_empty_trust_store_does_not_fail_the_build() {
-    const NAME: &str = "an_empty_trust_store_does_not_fail_the_build";
+async fn an_empty_trust_store_fails_only_an_https_build() {
+    const NAME: &str = "an_empty_trust_store_fails_only_an_https_build";
     let runtime = tokio::runtime::Handle::current();
     if let Ok(url) = std::env::var(CHILD_REGISTRY_URL) {
         let https = settings_at("https://registry.invalid".into(), Duration::from_secs(30));
-        AvroDeserializerBuilder::from_settings(&https, &runtime).expect("https registry builds");
+        let built = AvroDeserializerBuilder::from_settings(&https, &runtime);
+        if cfg!(any(target_vendor = "apple", windows)) {
+            built.expect("the platform verifier reads the OS store");
+        } else {
+            let Err(err) = built else {
+                panic!("an https registry with no trust root built");
+            };
+            let err = err.to_string();
+            assert!(
+                err.starts_with(
+                    "avro schema registry client: registry.tls.root_ca: the system trust store \
+                     has no certificates"
+                ),
+                "{err}"
+            );
+        }
         let builder = AvroDeserializerBuilder::from_settings(
             &settings_at(url, Duration::from_secs(30)),
             &runtime,

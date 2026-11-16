@@ -165,7 +165,8 @@ impl<W: ShardWriter> SinkPool<W> {
         let endpoints: Vec<Arc<Vec<W::Endpoint>>> =
             shard_endpoints.into_iter().map(Arc::new).collect();
 
-        let nonce = run_nonce();
+        let seed = crate::rng::fresh_seed();
+        let nonce = token_nonce(seed);
         let sink: Arc<str> = Arc::from(sink_name);
         // Shared with the workers rather than moved into them; `drain` needs
         // the handles too, to report a shard that overruns its deadline.
@@ -191,6 +192,7 @@ impl<W: ShardWriter> SinkPool<W> {
                     metrics: shard_metrics,
                     drain_deadline: drain_rx.clone(),
                     token_prefix: format!("{pipeline_name}-{nonce}-{shard}-"),
+                    seed_base: seed,
                     clock: Arc::clone(&clock),
                 };
                 runtime.spawn(worker.run())
@@ -307,8 +309,8 @@ impl<W: ShardWriter> SinkPool<W> {
     }
 }
 
-/// A short id separating process runs (the wall-clock time, pid, and an
-/// in-process counter), embedded in every deduplication token.
+/// A short id separating process runs, embedded in every deduplication
+/// token: `seed`, a [`fresh_seed`](crate::rng::fresh_seed), in hex.
 ///
 /// Without it, tokens are `{pipeline}-{shard}-{seq}` with `seq` restarting
 /// at 0 on every start. A restarted (or same-named concurrent) pipeline
@@ -318,30 +320,22 @@ impl<W: ShardWriter> SinkPool<W> {
 /// still share their batch's token (idempotent), and crash replay lands
 /// duplicate rows instead of losing them, as at-least-once requires.
 ///
-/// A cross-run collision is improbable. Two runs collide when
-/// `nanos ^ (pid << 48) ^ (n << 40)` gives both the same 64 bits, which needs
-/// their clocks to agree in the low 40 bits, and within the deduplication
-/// window such a collision discards new rows as above.
-fn run_nonce() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = crate::clock::wall_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let pid = u64::from(std::process::id());
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{:x}", nanos ^ (pid << 48) ^ (n << 40))
+/// A cross-run collision is improbable: two runs collide only when their
+/// clocks agree in the low 40 bits, and within the deduplication window such
+/// a collision discards new rows as above.
+fn token_nonce(seed: u64) -> String {
+    format!("{seed:x}")
 }
 
 #[cfg(all(test, not(loom)))]
 mod nonce_tests {
-    use super::run_nonce;
+    use super::token_nonce;
+    use crate::rng::fresh_seed;
 
     #[test]
     fn nonces_differ_within_and_across_calls() {
-        let a = run_nonce();
-        let b = run_nonce();
+        let a = token_nonce(fresh_seed());
+        let b = token_nonce(fresh_seed());
         assert_ne!(a, b, "two pools in one process must not share tokens");
         assert!(!a.is_empty() && a.len() <= 16);
     }

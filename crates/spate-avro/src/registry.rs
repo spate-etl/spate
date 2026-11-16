@@ -39,7 +39,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
-use spate_core::backoff::Backoff;
+use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::SyncClock;
 use spate_core::config::UrlRule;
 use spate_core::error::chain;
@@ -52,8 +52,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 /// Delay between fetches of an id after a transient registry failure, so
-/// repeated NotReady replays cannot hot-loop the registry.
-const FETCH_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
+/// repeated NotReady replays cannot hot-loop the registry. Each id's copy
+/// seeds its own jitter, so ids and replicas that fail together fetch apart.
+const FETCH_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5))
+    .with_jitter(DEFAULT_JITTER)
+    .with_fresh_seed();
 /// Maximum number of schema ids fetched concurrently. Bounds head-of-line
 /// blocking (a slow id no longer stalls the rest) while keeping registry
 /// load and open-socket count modest.
@@ -723,11 +726,9 @@ mod tests {
         Endpoint::new(registry_url(url).unwrap(), None)
     }
 
-    /// An id's fetch delay starts at 200 ms and doubles on each transient
-    /// failure until it holds at the 5 s cap, each measured from the
-    /// failure.
-    #[test]
-    fn id_backoff_doubles_from_200ms_to_the_5s_cap() {
+    /// The fetch delays of one id over seven transient failures a second
+    /// apart, each measured from its failure.
+    fn seven_delays() -> Vec<Duration> {
         let clock = TestClock::frozen();
         let start = clock.now();
         let mut backoff = IdBackoff::first(start);
@@ -738,10 +739,37 @@ mod tests {
             backoff.grow(now);
             delays.push(backoff.next_allowed - now);
         }
-        assert_eq!(
-            delays,
-            [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis)
+        delays
+    }
+
+    /// Whether `delay` lies in the jitter window of a `step_ms` step. The
+    /// floor gives a nanosecond to the `f64` arithmetic the draw is made in.
+    fn within_step(delay: Duration, step_ms: u64) -> bool {
+        let step = Duration::from_millis(step_ms);
+        let floor = step.mul_f64(1.0 - DEFAULT_JITTER) - Duration::from_nanos(1);
+        floor <= delay && delay <= step
+    }
+
+    /// An id's fetch delay starts at 200 ms and doubles on each transient
+    /// failure until it holds at the 5 s cap, each shortened by at most its
+    /// jitter.
+    #[test]
+    fn id_backoff_doubles_from_200ms_to_the_5s_cap() {
+        let delays = seven_delays();
+        let steps = [200, 400, 800, 1600, 3200, 5000, 5000];
+        assert!(
+            delays.iter().zip(steps).all(|(&d, s)| within_step(d, s)),
+            "{delays:?} against steps {steps:?}"
         );
+    }
+
+    /// Two ids failing at the same instants draw different delays, so they
+    /// do not refetch together. With no jitter, or one seed for every copy,
+    /// the two sequences match.
+    #[test]
+    fn two_ids_back_off_apart() {
+        let (first, second) = (seven_delays(), seven_delays());
+        assert_ne!(first, second, "two ids drew alike");
     }
 
     /// An id's backoff refuses a fetch until its clock reaches
@@ -756,7 +784,7 @@ mod tests {
     }
 
     /// A resolved fetch clears the id's backoff, so a later transient
-    /// failure waits 200 ms again.
+    /// failure waits the 200 ms step again.
     #[test]
     fn a_resolved_id_backs_off_from_200ms_again() {
         let clock = TestClock::frozen();
@@ -769,14 +797,12 @@ mod tests {
         settle(&mut backoff, 15, FetchOutcome::Resolved, &sync);
         clock.advance(Duration::from_secs(1));
         settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
-        assert_eq!(
-            backoff[&15].next_allowed,
-            clock.now() + Duration::from_millis(200)
-        );
+        let delay = backoff[&15].next_allowed - clock.now();
+        assert!(within_step(delay, 200), "{delay:?}");
     }
 
     /// A second transient failure steps the id's backoff, so the next fetch
-    /// waits 400 ms from that failure.
+    /// waits the 400 ms step from that failure.
     #[test]
     fn a_second_transient_failure_waits_400ms() {
         let clock = TestClock::frozen();
@@ -785,10 +811,8 @@ mod tests {
         settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
         clock.advance(Duration::from_millis(200));
         settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
-        assert_eq!(
-            backoff[&15].next_allowed,
-            clock.now() + Duration::from_millis(400)
-        );
+        let delay = backoff[&15].next_allowed - clock.now();
+        assert!(within_step(delay, 400), "{delay:?}");
     }
 
     /// A transient failure stamped where the delay would pass the end of the

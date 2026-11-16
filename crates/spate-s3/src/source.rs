@@ -1414,13 +1414,21 @@ mod tests {
         };
         let hint = "add the issuing CA to the system trust store";
         let named = list_error(&url, roots(), false, Some("tls.root_ca")).await;
+        let plain = list_error(&url, roots(), false, None).await;
+        // The request's own failure text, which naming the key leaves whole.
+        let request = |e: &object_store::Error| {
+            let text = e.to_string();
+            let (_, rest) = text.split_once("HTTP error: ").expect("an HTTP error");
+            rest.split(": ").next().unwrap_or_default().to_owned()
+        };
+        assert!(!request(&plain).is_empty(), "{plain}");
+        assert_eq!(request(&named), request(&plain));
         let reason = crate::error::bounded_reason(&named);
         assert!(
             reason.ends_with(&format!("{hint} or `tls.root_ca`")),
             "{reason}"
         );
-        assert!(!reason.contains("HTTP error: HTTP error"), "{reason}");
-        let reason = crate::error::bounded_reason(&list_error(&url, roots(), false, None).await);
+        let reason = crate::error::bounded_reason(&plain);
         assert!(reason.ends_with(hint), "{reason}");
     }
 

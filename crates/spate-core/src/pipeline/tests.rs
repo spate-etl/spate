@@ -6983,7 +6983,7 @@ impl HeldRun {
         self.logs
             .lines()
             .into_iter()
-            .find(|line| line.contains("had not closed by the drain deadline"))
+            .find(|line| line.contains("had not closed by the end of its grace"))
     }
 }
 
@@ -7165,6 +7165,55 @@ fn run_gives_up_on_a_feed_drop_at_the_same_bound() {
     drop(release);
     run.wait_for_the_teardown();
     assert_eq!(run.report().state, ExitState::Completed);
+}
+
+/// A feed whose `Drop` outlasts `run` keeps its series claimed, so a second run
+/// under the same name is refused until the drop returns.
+#[test]
+fn an_abandoned_feed_drop_keeps_its_series_claimed() {
+    let name = test_config(1).pipeline.name;
+    let feed_config = || {
+        let mut cfg = test_config(1);
+        cfg.pipeline.name.clone_from(&name);
+        cfg.feed = feed_section("memory: {}");
+        cfg
+    };
+    let (source, _shared, _script) = FakeSource::new();
+    let (hook, entered, release) = blocking_hook();
+    let run = run_held(
+        feed_config(),
+        HookedSource::new(source),
+        Some(HookedFeed::shared(hook)),
+        None,
+    );
+    run.shutdown.trigger();
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the feed drops");
+    run.clock.wait_for_reads();
+    run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
+    wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
+
+    let (source, _shared, _script) = FakeSource::new();
+    let second = run_held(
+        feed_config(),
+        HookedSource::new(source),
+        Some(HookedFeed::shared(Box::new(|| {}))),
+        None,
+    );
+    // A run that starts would wait for this trigger; a refused one has returned.
+    second.shutdown.trigger();
+    wait_until(spate_test::HANG, "the second run to return", || {
+        second.join.is_finished()
+    });
+    let started = second.join.join().unwrap();
+    drop(release);
+    run.wait_for_the_teardown();
+    assert!(
+        matches!(started, Err(super::runtime::StartError::Metrics(_))),
+        "{:?}",
+        started.map(|report| report.state)
+    );
 }
 
 /// A source `Drop` that outlasts `run` still has the I/O runtime: work it

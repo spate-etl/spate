@@ -80,15 +80,18 @@ open.
 - Bad, because a process that exits after `run` ends the teardown. A group leave
   in progress is lost, and the group waits out its session timeout before it
   reassigns the member's partitions.
-- Bad, because while the teardown holds the source and the feed, their gauge
-  claims stay taken. A second `run` in the same process with the same pipeline
-  name fails with `StartError::Metrics` until the teardown ends, as INV-10
-  requires.
+- Bad, because while the teardown holds the feed, its gauge claim stays taken,
+  and so does the source's when the source kept its stage metrics handle. A
+  second `run` in the same process with the same pipeline name then fails with
+  `StartError::Metrics` until the teardown ends, as INV-10 requires.
 - Bad, because the Kafka source and feed bound their own close by up to 10 s.
   When a silent coordinator holds the final commit until near the drain
   deadline, `run` returns before Kafka's own bound. A process that then exits
   stops a librdkafka client mid-close.
-- Neutral, because INV-1 holds: nothing in the teardown commits.
+- Neutral, because INV-1 holds: the final commit runs before the teardown.
+  After a controller panic the feed drops in the teardown without a close, and
+  a feed that commits in its `Drop` commits only what its own contract allows.
+  The Kafka feed's commit stops at each partition's first unfinished unit.
 
 ### Confirmation
 
@@ -98,8 +101,9 @@ The tests in `crates/spate-core/src/pipeline/tests.rs`:
 `run_gives_up_on_a_feed_drop_at_the_same_bound`,
 `an_abandoned_source_drop_keeps_the_io_runtime`,
 `a_controller_panic_gives_a_blocked_source_drop_the_grace`,
-`the_feed_drops_before_the_io_runtime_stops` and
-`the_io_tasks_stop_before_a_teardown_that_outlasts_run`. The wait itself is
+`the_feed_drops_before_the_io_runtime_stops`,
+`the_io_tasks_stop_before_a_teardown_that_outlasts_run` and
+`an_abandoned_feed_drop_keeps_its_series_claimed`. The wait itself is
 `ThreadHandle::join_by`, tested in `crates/spate-core/src/task.rs`.
 
 ## More information

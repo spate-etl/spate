@@ -6,13 +6,14 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use crate::serve::{read_head, respond, target};
+use crate::serve::{read_head, respond, target, url};
 use crate::serve_each;
 
 /// The content type of every response, as the registry sends it.
 const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
-/// The registry's answer to an id or subject it does not hold.
+/// The registry's answer to a schema id it does not hold. The stub sends it
+/// for every path with no script left.
 const NOT_FOUND: &str = r#"{"error_code":40403,"message":"Schema not found"}"#;
 
 /// A schema-registry stub that answers each request path from a script.
@@ -89,8 +90,8 @@ impl RegistryStub {
 
     /// The stub's `http://` URL.
     #[must_use]
-    pub fn url(&self) -> String {
-        format!("http://{}", self.addr)
+    pub fn endpoint(&self) -> String {
+        url(self.addr)
     }
 
     /// Answers requests for `path`, whatever their query, with `status` and
@@ -107,8 +108,9 @@ impl RegistryStub {
             });
     }
 
-    /// Holds each request for `path` until [`release`](Self::release). A held
-    /// request is recorded once it is let through.
+    /// Holds each request for `path` until [`release`](Self::release). One
+    /// path is held at a time: a later call holds its path in place of the
+    /// last. A held request is recorded once it is let through.
     pub fn hold(&self, path: &str) {
         lock(&self.state.gate).held = Some(path.to_owned());
     }
@@ -119,19 +121,20 @@ impl RegistryStub {
         self.state.changed.notify_all();
     }
 
-    /// Every request received, in the order they arrived.
+    /// Every request let through, in the order each was let through. A held
+    /// request is missing until it is released.
     #[must_use]
     pub fn requests(&self) -> Vec<RegistryRequest> {
         lock(&self.state.requests).clone()
     }
 
-    /// How many requests the stub received.
+    /// How many requests were let through.
     #[must_use]
     pub fn hits(&self) -> usize {
         lock(&self.state.requests).len()
     }
 
-    /// How many requests the stub received for `path`, whatever their query.
+    /// How many requests for `path` were let through, whatever their query.
     #[must_use]
     pub fn path_hits(&self, path: &str) -> usize {
         lock(&self.state.requests)
@@ -263,7 +266,7 @@ mod tests {
     #[test]
     fn a_response_is_framed_for_one_request() {
         let stub = RegistryStub::start();
-        assert_eq!(stub.url(), format!("http://{}", stub.addr()));
+        assert_eq!(stub.endpoint(), format!("http://{}", stub.addr()));
         assert_eq!(
             format!("{stub:?}"),
             format!("RegistryStub {{ addr: {}, .. }}", stub.addr())

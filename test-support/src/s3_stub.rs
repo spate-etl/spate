@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-use crate::serve::{head, read_head, respond, target};
+use crate::serve::{head, read_head, respond, target, url};
 use crate::serve_each;
 
 /// The content type of every S3 stub response.
@@ -143,10 +143,6 @@ fn serve_bucket(
             body,
         )?;
     }
-}
-
-fn url(addr: std::net::SocketAddr) -> String {
-    format!("http://{addr}")
 }
 
 #[cfg(test)]

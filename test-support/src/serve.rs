@@ -51,6 +51,11 @@ pub fn silent_server() -> SocketAddr {
     })
 }
 
+/// The `http://` URL of a server on `addr`.
+pub(crate) fn url(addr: SocketAddr) -> String {
+    format!("http://{addr}")
+}
+
 /// Reads a request up to the end of its headers and returns them, or what
 /// arrived before the client closed.
 pub(crate) fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {

@@ -290,13 +290,9 @@ async fn start_node(pw: &str, net: &str, host: &str, xml: &str) -> Node {
     .start()
     .await
     .unwrap_or_else(|e| panic!("start clickhouse node {host}: {e}"));
-    let port = container.get_host_port_ipv4(8123).await.expect("port");
-    let url = format!("http://127.0.0.1:{port}");
-    let admin = clickhouse::Client::default()
-        .with_url(&url)
-        .with_user("default")
-        .with_password(pw);
-    wait_for_queries(&container, &admin, host).await;
+    let (url, admin) = answering(&container, pw, host)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
     Node {
         _container: container,
         url,

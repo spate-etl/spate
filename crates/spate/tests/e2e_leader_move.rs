@@ -13,7 +13,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use spate_test_support::CLUSTER_NODES;
+use spate_test_support::{CLUSTER_NODES, PartitionState};
 use std::time::Duration;
 use support::*;
 
@@ -49,13 +49,19 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
         // restarted node leads nothing until a test moves a leader to it. One
         // read decides: another node may still answer with the leaders from
         // before a move.
-        let leads = || {
-            h.partition_states(&params.topic)
+        let leads = |states: &Option<Vec<PartitionState>>| {
+            states
+                .as_ref()
                 .is_some_and(|states| states.iter().any(|p| p.leader == node))
         };
-        if !leads() {
+        if !leads(&h.partition_states(&params.topic)) {
             h.transfer_leader(&params.topic, 0, node);
-            wait_until(DEADLINE, &format!("node {node} to lead a partition"), leads);
+            spate_test::wait_for_value(
+                DEADLINE,
+                &format!("node {node} to lead a partition"),
+                || h.partition_states(&params.topic),
+                leads,
+            );
         }
 
         h.stop_broker(node);

@@ -120,8 +120,9 @@ rejoined.
 On Redpanda, `await_brokers` then turns the leader balancer off, so a leader
 moves only when a test moves it or stops its node. The setting is part of the
 cluster's configuration, so it holds when a node restarts.
-`KafkaCluster::leader_balancer` reads it back, and gives `None` on Apache Kafka,
-which has no such setting.
+`KafkaCluster::leader_balancer` reads it back, and gives `None` on Apache Kafka.
+Apache Kafka's controller moves a leader back to its preferred replica on its
+own, and the cluster leaves that on.
 
 `KafkaCluster::stop` stops a node with a two-minute timeout and fails when the
 runtime had to kill it.

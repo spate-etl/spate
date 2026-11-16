@@ -180,17 +180,18 @@ fn node_addresses(network: &str, port: u16) -> impl Iterator<Item = (i32, String
     (1..=CLUSTER_NODES).map(move |node| (node, format!("{}:{port}", node_host(network, node))))
 }
 
-/// The `rpk` option that points it at the admin API on each of `hosts`.
-fn admin_hosts(hosts: impl IntoIterator<Item = String>) -> String {
-    format!(
-        "admin.hosts={}",
-        hosts.into_iter().collect::<Vec<_>>().join(",")
-    )
+/// Every node's address on `port` for a cluster on `network`, comma-separated
+/// in node order.
+fn node_list(network: &str, port: u16) -> String {
+    node_addresses(network, port)
+        .map(|(_, address)| address)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The `rpk` option for the admin API of the node a command runs on.
 fn local_admin() -> String {
-    admin_hosts([format!("localhost:{REDPANDA_ADMIN_PORT}")])
+    format!("admin.hosts=localhost:{REDPANDA_ADMIN_PORT}")
 }
 
 impl KafkaBroker {
@@ -326,11 +327,7 @@ impl KafkaBroker {
                 let (node_id, cluster) = self.member.as_ref().map_or_else(
                     || (String::new(), String::new()),
                     |m| {
-                        let seeds = m
-                            .peers(REDPANDA_RPC_PORT)
-                            .map(|(_, address)| address)
-                            .collect::<Vec<_>>()
-                            .join(",");
+                        let seeds = node_list(&m.network, REDPANDA_RPC_PORT);
                         (
                             format!("rpk redpanda config set redpanda.node_id {} && ", m.node),
                             format!(
@@ -613,7 +610,9 @@ impl KafkaCluster {
     }
 
     /// Whether Redpanda's leader balancer is on, as node 1 reads the cluster's
-    /// configuration, or `None` on Apache Kafka, which has no such flag.
+    /// configuration, or `None` on Apache Kafka. Apache Kafka's controller
+    /// moves a leader back to its preferred replica on its own, and a cluster
+    /// leaves that on.
     ///
     /// # Errors
     ///
@@ -915,9 +914,10 @@ fn node_index(node: i32) -> usize {
 
 /// The command a node of a cluster on `network` runs to move `topic`'s
 /// `partition` to node `node`. `rpk` sends the move to the current leader's
-/// admin API, and finds it only among the hosts it is given. Apache Kafka
-/// moves a leader by reordering a partition's replicas and electing the first,
-/// and neither its image nor rdkafka can ask for that.
+/// admin API, and finds it only among the hosts it is given. The command runs
+/// under [`RPK_TIMEOUT`]. Apache Kafka moves a leader by reordering a
+/// partition's replicas and electing the first, and neither its image nor
+/// rdkafka can ask for that.
 fn transfer_command(
     broker: Broker,
     network: &str,
@@ -927,12 +927,14 @@ fn transfer_command(
 ) -> Result<Vec<String>, String> {
     match broker {
         Broker::Redpanda => Ok([
+            "timeout".to_owned(),
+            RPK_TIMEOUT.to_owned(),
             "rpk".to_owned(),
             "cluster".to_owned(),
             "partitions".to_owned(),
             "transfer-leadership".to_owned(),
             "-X".to_owned(),
-            admin_hosts(node_addresses(network, REDPANDA_ADMIN_PORT).map(|(_, address)| address)),
+            format!("admin.hosts={}", node_list(network, REDPANDA_ADMIN_PORT)),
             "--partition".to_owned(),
             format!("{topic}/{partition}:{node}"),
         ]
@@ -955,8 +957,8 @@ fn transfer_began(what: &str, stdout: &str) -> Result<(), String> {
 }
 
 /// The command a node runs to reach Redpanda's leader balancer flag through
-/// `rpk cluster config` with `action`, under [`RPK_TIMEOUT`]. Apache Kafka has
-/// no such flag.
+/// `rpk cluster config` with `action`, under [`RPK_TIMEOUT`], or `None` on
+/// Apache Kafka.
 fn balancer_command(broker: Broker, action: &[&str]) -> Option<Vec<String>> {
     match broker {
         Broker::Redpanda => Some(
@@ -1205,6 +1207,8 @@ mod tests {
         assert_eq!(
             transfer_command(Broker::Redpanda, "net", "t", 4, 3).unwrap(),
             [
+                "timeout",
+                "20",
                 "rpk",
                 "cluster",
                 "partitions",
@@ -1251,7 +1255,7 @@ mod tests {
     }
 
     /// Redpanda reaches its leader balancer flag through rpk under a bound,
-    /// and Apache Kafka has no such flag.
+    /// and Apache Kafka has no command for it.
     #[test]
     fn only_redpanda_has_a_leader_balancer_flag() {
         assert_eq!(

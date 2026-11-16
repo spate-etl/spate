@@ -714,8 +714,8 @@ without being read.
 A unit's offset finishes only once the write that settles it is confirmed. An
 attempt, tombstone, retry or dead-letter write that fails transiently, or gets
 no report within `delivery_timeout`, is sent again after a backoff from 200 ms
-up to 5 s, each wait shortened at random by up to a fifth, and its partition's
-commits wait for it. A write waiting out its
+up to 5 s, with each wait drawn at random between 80% and 100% of its step,
+and its partition's commits wait for it. A write waiting out its
 backoff is sent only while the worker still owns the unit's partition and the
 feed is running. Otherwise it is dropped, the unit's offset stays unfinished,
 and the unit is read again. A write that

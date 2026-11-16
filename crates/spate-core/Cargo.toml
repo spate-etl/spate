@@ -14,7 +14,8 @@ categories.workspace = true
 [features]
 # Test-only. Off by default and outside the semver surface.
 testing = []
-# `spate_core::tls`: the trust roots a connector's TLS client verifies against.
+# `spate_core::tls`: the trust roots a connector's TLS client verifies against,
+# how a reqwest-based client takes them, and whether an endpoint is https.
 tls-roots = ["dep:base64", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:rustls-webpki"]
 
 [dependencies]

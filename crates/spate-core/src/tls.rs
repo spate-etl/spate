@@ -13,6 +13,12 @@
 //! `object_store` certificate through `from_der`, or one PEM bundle through
 //! [`TrustRoots::to_pem`].
 //!
+//! A reqwest-based client takes its roots from [`client_roots`]. Where
+//! [`PLATFORM_VERIFIER`] is set it keeps reqwest's platform verifier and adds
+//! the `root_ca` certificates. Elsewhere it verifies against the loaded roots
+//! alone. [`is_https`] tells a connector whether an endpoint is called over
+//! TLS.
+//!
 //! Enabled by the `tls-roots` feature.
 
 use base64::Engine as _;
@@ -22,6 +28,7 @@ use rustls_pki_types::pem::PemObject;
 use serde::Deserialize;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 /// A connector's `tls:` section.
 ///
@@ -84,6 +91,19 @@ impl SystemRoots {
     pub fn from_certs(certs: Vec<CertificateDer<'static>>) -> Self {
         SystemRoots {
             certs,
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl Default for SystemRoots {
+    /// A store that yielded nothing, for a client whose operator turned the
+    /// system trust store off. Pass `needs_root` as `false` to
+    /// [`client_roots`] with it, since [`TrustError::NoRoots`] would name a
+    /// store that was never read.
+    fn default() -> Self {
+        SystemRoots {
+            certs: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -229,6 +249,124 @@ pub fn read_root_ca(path: &Path) -> Result<Vec<CertificateDer<'static>>, TrustEr
     Ok(certs)
 }
 
+/// Whether a reqwest-based client keeps reqwest's platform verifier, which
+/// reads the system trust store itself: on Apple platforms, Windows and
+/// Android. Elsewhere that verifier fails to build on an empty store, so the
+/// client verifies against the roots from [`TrustRoots::load`].
+pub const PLATFORM_VERIFIER: bool =
+    cfg!(any(target_vendor = "apple", windows, target_os = "android"));
+
+/// The roots a reqwest-based client verifies servers against, and how it
+/// takes them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientRoots {
+    /// Keep the platform verifier and add these to the roots it reads.
+    Add(Vec<CertificateDer<'static>>),
+    /// Verify against these alone.
+    Only(Vec<CertificateDer<'static>>),
+}
+
+/// The roots a reqwest-based client verifies servers against.
+///
+/// Where [`PLATFORM_VERIFIER`] is set, the client keeps that verifier and
+/// adds the certificates in `root_ca`, and `system` is not called. Elsewhere
+/// it takes the certificates [`TrustRoots::load`] keeps from `system` and
+/// `root_ca` as its only roots. `needs_root` is set when the client verifies a
+/// server against these roots, such as an `https://` endpoint with
+/// certificate checks on. An empty set then fails.
+///
+/// Calling `system` blocks as [`SystemRoots::load`] does, so an async caller
+/// runs this on a blocking thread.
+///
+/// # Errors
+///
+/// - [`TrustError::Unsupported`] when `root_ca` is set on Android, whose
+///   platform verifier takes no added roots.
+/// - [`TrustError::RootCa`] when `root_ca` cannot be used, as
+///   [`read_root_ca`] says.
+/// - [`TrustError::NoRoots`] when `needs_root` is set and no certificate
+///   loads.
+///
+/// # Examples
+///
+/// ```no_run
+/// use spate_core::tls::{
+///     ClientRoots, SystemRoots, TlsSection, TrustError, client_roots, is_https,
+/// };
+///
+/// # fn run(tls: &TlsSection, endpoint: &str) -> Result<(), TrustError> {
+/// let roots = client_roots(SystemRoots::load, tls.root_ca.as_deref(), is_https(endpoint))?;
+/// // reqwest's `tls_certs_merge` takes `Add`, and `tls_certs_only` takes `Only`.
+/// let (certs, only) = match roots {
+///     ClientRoots::Add(certs) => (certs, false),
+///     ClientRoots::Only(certs) => (certs, true),
+/// };
+/// # let _ = (certs, only);
+/// # Ok(())
+/// # }
+/// ```
+pub fn client_roots(
+    system: impl FnOnce() -> SystemRoots,
+    root_ca: Option<&Path>,
+    needs_root: bool,
+) -> Result<ClientRoots, TrustError> {
+    roots_for(Platform::current(), system, root_ca, needs_root)
+}
+
+/// How the platform's reqwest client verifies a server.
+#[derive(Clone, Copy, Debug)]
+enum Platform {
+    /// The platform verifier, which takes no added roots.
+    Android,
+    /// The platform verifier, which takes added roots.
+    Verifier,
+    /// rustls with the roots it is given.
+    Rustls,
+}
+
+impl Platform {
+    fn current() -> Self {
+        if cfg!(target_os = "android") {
+            Platform::Android
+        } else if PLATFORM_VERIFIER {
+            Platform::Verifier
+        } else {
+            Platform::Rustls
+        }
+    }
+}
+
+fn roots_for(
+    platform: Platform,
+    system: impl FnOnce() -> SystemRoots,
+    root_ca: Option<&Path>,
+    needs_root: bool,
+) -> Result<ClientRoots, TrustError> {
+    match platform {
+        Platform::Android if root_ca.is_some() => Err(TrustError::Unsupported),
+        Platform::Android | Platform::Verifier => {
+            let extra = match root_ca {
+                Some(path) => read_root_ca(path)?,
+                None => Vec::new(),
+            };
+            Ok(ClientRoots::Add(extra))
+        }
+        Platform::Rustls => {
+            let mut roots = TrustRoots::load(system(), root_ca)?;
+            if needs_root {
+                roots = roots.require_any()?;
+            }
+            Ok(ClientRoots::Only(roots.into_certs()))
+        }
+    }
+}
+
+/// Whether `url` is an `https://` URL, in any case the URL parser accepts.
+#[must_use]
+pub fn is_https(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
+}
+
 /// The check rustls's `RootCertStore` runs on each root it is given.
 fn usable(cert: &CertificateDer<'_>) -> bool {
     webpki::anchor_from_trusted_cert(cert).is_ok()
@@ -258,6 +396,11 @@ pub enum TrustError {
         /// The errors reading the store.
         errors: Vec<String>,
     },
+    /// `root_ca` is set on Android, whose platform verifier takes no added
+    /// roots. The caller anchors it at its `root_ca` key.
+    #[error("is not supported on Android")]
+    #[non_exhaustive]
+    Unsupported,
 }
 
 fn no_roots(found: usize, errors: &[String]) -> String {
@@ -504,5 +647,127 @@ mod tests {
             err.to_string().contains("unknown field `root_cert`"),
             "{err}"
         );
+    }
+
+    /// A system trust store the client must leave unread.
+    fn unread() -> SystemRoots {
+        panic!("this client reads no system root")
+    }
+
+    /// Without the platform verifier the client verifies against the system
+    /// roots and `root_ca`'s alone, system ones first.
+    #[test]
+    fn rustls_client_takes_system_and_root_ca_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (system, private) = (TestCa::new("system"), TestCa::new("private"));
+        let root_ca = private.write(dir.path());
+        let roots = roots_for(
+            Platform::Rustls,
+            || SystemRoots::from_certs(vec![system.der()]),
+            Some(&root_ca),
+            true,
+        )
+        .unwrap();
+        assert_eq!(roots, ClientRoots::Only(vec![system.der(), private.der()]));
+        let roots =
+            roots_for(Platform::Rustls, SystemRoots::default, Some(&root_ca), true).unwrap();
+        assert_eq!(roots, ClientRoots::Only(vec![private.der()]));
+    }
+
+    /// Without the platform verifier, a client that needs a root fails with
+    /// none, and one that does not keeps the empty set.
+    #[test]
+    fn rustls_https_client_with_no_root_fails() {
+        let err = roots_for(Platform::Rustls, SystemRoots::default, None, true).unwrap_err();
+        assert!(matches!(err, TrustError::NoRoots { .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "the system trust store has no certificates; install a CA bundle, point \
+             SSL_CERT_FILE at one, or set this key to the issuing CA"
+        );
+        let roots = roots_for(Platform::Rustls, SystemRoots::default, None, false).unwrap();
+        assert_eq!(roots, ClientRoots::Only(Vec::new()));
+    }
+
+    /// With the platform verifier the client reads no system root and adds
+    /// `root_ca`'s, whether or not it needs a root.
+    #[test]
+    fn verifier_platforms_add_root_ca_and_read_no_system_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = TestCa::new("private");
+        let root_ca = private.write(dir.path());
+        for needs_root in [true, false] {
+            let roots = roots_for(Platform::Verifier, unread, Some(&root_ca), needs_root).unwrap();
+            assert_eq!(roots, ClientRoots::Add(vec![private.der()]));
+            for platform in [Platform::Verifier, Platform::Android] {
+                let roots = roots_for(platform, unread, None, needs_root).unwrap();
+                assert_eq!(roots, ClientRoots::Add(Vec::new()), "{platform:?}");
+            }
+        }
+    }
+
+    /// Android refuses `root_ca`, before reading it.
+    #[test]
+    fn android_refuses_root_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        for root_ca in [
+            TestCa::new("private").write(dir.path()),
+            dir.path().join("missing.pem"),
+        ] {
+            let err = roots_for(Platform::Android, unread, Some(&root_ca), true).unwrap_err();
+            assert!(matches!(err, TrustError::Unsupported), "{err:?}");
+            assert_eq!(err.to_string(), "is not supported on Android");
+        }
+    }
+
+    /// A `root_ca` that cannot be used fails with its path, whichever
+    /// verifier the client keeps.
+    #[test]
+    fn an_unusable_root_ca_fails_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        for platform in [Platform::Verifier, Platform::Rustls] {
+            let err = roots_for(platform, SystemRoots::default, Some(&missing), false).unwrap_err();
+            assert!(matches!(err, TrustError::RootCa { .. }), "{err:?}");
+            let text = err.to_string();
+            assert!(
+                text.starts_with(&format!("`{}`: ", missing.display())),
+                "{platform:?}: {text}"
+            );
+        }
+    }
+
+    /// `client_roots` takes the roots this platform's client verifies with.
+    #[test]
+    fn client_roots_follows_this_platform() {
+        let system = TestCa::new("system");
+        let roots =
+            client_roots(|| SystemRoots::from_certs(vec![system.der()]), None, false).unwrap();
+        let expected = if PLATFORM_VERIFIER {
+            ClientRoots::Add(Vec::new())
+        } else {
+            ClientRoots::Only(vec![system.der()])
+        };
+        assert_eq!(roots, expected);
+    }
+
+    /// The default store yields no certificate and no error.
+    #[test]
+    fn default_system_roots_hold_nothing() {
+        let system = SystemRoots::default();
+        assert!(system.certs.is_empty());
+        assert!(system.errors.is_empty());
+    }
+
+    /// `is_https` accepts `https` in any case and refuses every other scheme
+    /// and a value that is not a URL.
+    #[test]
+    fn is_https_accepts_any_case_and_refuses_the_rest() {
+        for url in ["https://h", "HTTPS://h", "Https://h:443/p"] {
+            assert!(is_https(url), "{url}");
+        }
+        for url in ["http://h", "s3://b", "httpss://h", "not a url", ""] {
+            assert!(!is_https(url), "{url}");
+        }
     }
 }

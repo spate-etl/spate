@@ -25,7 +25,7 @@
 //! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). The fidelity knobs above do not apply under it |
 //! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker or bucket. A demo and test source: it keeps no durable progress |
 //! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
-//! | `tls-roots` | [`tls`] — the trust roots a TLS client in a third-party connector verifies servers against: the system trust store and a `root_ca` file |
+//! | `tls-roots` | [`tls`] — the trust roots a TLS client in a third-party connector verifies servers against: the system trust store and a `root_ca` file, how a reqwest-based client takes them, and whether an endpoint is `https://` |
 //!
 //! [Kafka security section]: https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#security-tls-mtls-sasl
 //!

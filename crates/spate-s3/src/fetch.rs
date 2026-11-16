@@ -21,7 +21,8 @@
 //! # Retries
 //!
 //! Transient GET failures are retried inside the fetcher with capped
-//! exponential backoff, resuming from the last delivered byte with a
+//! exponential backoff, each wait shortened at random by up to
+//! [`DEFAULT_JITTER`] of it, resuming from the last delivered byte with a
 //! ranged GET **conditioned on the object's ETag**, so a splice of two
 //! different object versions is impossible. Persistent failure (attempt
 //! budget exhausted) and the object-level non-retryable classes (missing
@@ -49,7 +50,7 @@ use object_store::path::Path;
 use object_store::{
     GetOptions, GetRange, GetResult, GetResultPayload, ObjectStore, ObjectStoreExt as _,
 };
-use spate_core::backoff::Backoff;
+use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::error::{ErrorClass, SourceError};
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -176,7 +177,7 @@ pub(crate) struct FetcherParams {
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
-    /// First wait of the read schedule, [`retry_backoff`]; tests shrink it.
+    /// First step of the read schedule, [`read_backoff`]; tests shrink it.
     pub(crate) retry_base: Duration,
     /// `spate_s3_source_get_retries_total`, when metrics are attached.
     pub(crate) retries: Option<spate_core::metrics::Counter>,
@@ -193,9 +194,9 @@ pub(crate) struct FetcherParams {
 /// How many attempts one object GET gets before escalating. Failing fast (a
 /// poisoned unit) beats a backfill wedged invisibly in an endless retry loop.
 pub(crate) const MAX_ATTEMPTS: u32 = 8;
-/// The first wait of the crate's retry schedule.
+/// The first step of the crate's retry schedules.
 pub(crate) const RETRY_BASE: Duration = Duration::from_millis(200);
-/// The longest wait of the crate's retry schedule.
+/// The longest step of the crate's retry schedules.
 pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PAUSE_POLL: Duration = Duration::from_millis(25);
 
@@ -889,12 +890,21 @@ fn object_path(split: &LaneLabel, entry: &ObjectEntry) -> Result<Path, SplitFail
     }
 }
 
-/// The crate's retry schedule: from `base`, doubling to [`BACKOFF_CAP`],
-/// without jitter. The caller bounds its attempts: [`MAX_ATTEMPTS`] for a
-/// read, [`LISTER_PUBLISH_ATTEMPTS`](crate::lister::LISTER_PUBLISH_ATTEMPTS)
-/// for a publish.
+/// The lister's publish schedule: from `base`, doubling to
+/// [`BACKOFF_CAP`], without jitter. The lister bounds it at
+/// [`LISTER_PUBLISH_ATTEMPTS`](crate::lister::LISTER_PUBLISH_ATTEMPTS).
 pub(crate) const fn retry_backoff(base: Duration) -> Backoff {
     Backoff::new(base, BACKOFF_CAP)
+}
+
+/// A read's schedule: [`retry_backoff`] with each wait shortened at random
+/// by up to [`DEFAULT_JITTER`] of it, bounded at [`MAX_ATTEMPTS`]. Each read
+/// seeds its own jitter, so the readers of one store that fail together
+/// retry apart.
+const fn read_backoff(base: Duration) -> Backoff {
+    retry_backoff(base)
+        .with_jitter(DEFAULT_JITTER)
+        .with_fresh_seed()
 }
 
 /// One read's attempt count and the schedule it paces, started together.
@@ -907,7 +917,7 @@ impl ReadBudget {
     const fn new(retry_base: Duration) -> Self {
         Self {
             attempt: 0,
-            backoff: retry_backoff(retry_base),
+            backoff: read_backoff(retry_base),
         }
     }
 }
@@ -1033,12 +1043,27 @@ mod tests {
         }
     }
 
-    /// The time between consecutive instants, in whole milliseconds.
-    fn gaps(instants: &[tokio::time::Instant]) -> Vec<u128> {
-        instants
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).as_millis())
-            .collect()
+    /// The time between consecutive instants.
+    fn gaps(instants: &[tokio::time::Instant]) -> Vec<Duration> {
+        instants.windows(2).map(|pair| pair[1] - pair[0]).collect()
+    }
+
+    /// Asserts that each of `gaps` lies in the jitter window of its step of
+    /// `steps_ms`. Tokio rounds a timer up to the next millisecond, which
+    /// only lengthens a gap, and a step in whole milliseconds bounds the
+    /// rounded wait. The floor gives a nanosecond to the `f64` draw.
+    fn assert_steps(gaps: &[Duration], steps_ms: &[u64]) {
+        let within = |gap: Duration, step: Duration| {
+            step.mul_f64(1.0 - DEFAULT_JITTER) - Duration::from_nanos(1) <= gap && gap <= step
+        };
+        assert!(
+            gaps.len() == steps_ms.len()
+                && gaps
+                    .iter()
+                    .zip(steps_ms)
+                    .all(|(&gap, &ms)| within(gap, Duration::from_millis(ms))),
+            "gaps {gaps:?} against steps {steps_ms:?} ms"
+        );
     }
 
     /// Wraps a store, failing the first `fail_gets` `get_opts` calls with a
@@ -1212,13 +1237,13 @@ mod tests {
             self.ranges.lock().unwrap().clone()
         }
 
-        /// The wait before each GET after the first, in whole milliseconds.
-        fn get_gaps(&self) -> Vec<u128> {
+        /// The wait before each GET after the first.
+        fn get_gaps(&self) -> Vec<Duration> {
             gaps(&self.get_instants.lock().unwrap())
         }
 
         /// [`get_gaps`](Self::get_gaps) over the GETs of one range.
-        fn get_gaps_of(&self, range: RangeKind) -> Vec<u128> {
+        fn get_gaps_of(&self, range: RangeKind) -> Vec<Duration> {
             let ranges = self.ranges.lock().unwrap();
             let instants = self.get_instants.lock().unwrap();
             let of: Vec<_> = ranges
@@ -2337,11 +2362,7 @@ mod tests {
                 assert_eq!(flaky.gets.load(Ordering::Relaxed), 2 * MAX_ATTEMPTS);
                 // Each window waits from the base.
                 for window in [RangeKind::Bounded(0, 8), RangeKind::Bounded(8, 16)] {
-                    assert_eq!(
-                        flaky.get_gaps_of(window),
-                        [1, 2, 4, 8, 16, 32, 64],
-                        "{window:?}"
-                    );
+                    assert_steps(&flaky.get_gaps_of(window), &[1, 2, 4, 8, 16, 32, 64]);
                 }
             } else {
                 assert!(matches!(
@@ -2358,8 +2379,8 @@ mod tests {
     }
 
     /// Pins the read schedule at the production base: a failing read waits
-    /// 200 ms, doubling to the 5 s cap, and its eighth failure poisons the
-    /// unit with no further wait.
+    /// 200 ms, doubling to the 5 s cap, each wait shortened by at most its
+    /// jitter, and its eighth failure poisons the unit with no further wait.
     #[tokio::test(start_paused = true)]
     async fn a_failing_read_backs_off_from_200ms_to_5s_then_poisons() {
         for (failures, completes) in [(MAX_ATTEMPTS - 1, true), (MAX_ATTEMPTS, false)] {
@@ -2375,12 +2396,13 @@ mod tests {
             }));
             let msgs = drain(&mut rx).await;
             task.await.unwrap();
+            let gaps = flaky.get_gaps();
+            assert_steps(&gaps, &[200, 400, 800, 1600, 3200, 5000, 5000]);
             assert_eq!(
-                flaky.get_gaps(),
-                [200, 400, 800, 1600, 3200, 5000, 5000],
+                started.elapsed(),
+                gaps.iter().sum::<Duration>(),
                 "{failures} failures"
             );
-            assert_eq!(started.elapsed(), Duration::from_millis(16_200));
             if completes {
                 assert_eq!(
                     assembled(&msgs),
@@ -2418,7 +2440,7 @@ mod tests {
             vec![("p/a".to_string(), b"0123456789".to_vec())]
         );
         assert_eq!(flaky.recorded_ranges(), [RangeKind::Full; 4]);
-        assert_eq!(flaky.get_gaps(), [1, 2, 4]);
+        assert_steps(&flaky.get_gaps(), &[1, 2, 4]);
     }
 
     /// Pins that an empty chunk does not restart a streaming read's budget:
@@ -2441,7 +2463,32 @@ mod tests {
             SplitFailure::Poison(PoisonKind::RetriesExhausted, _)
         ));
         assert_eq!(flaky.gets.load(Ordering::Relaxed), MAX_ATTEMPTS);
-        assert_eq!(flaky.get_gaps(), [1, 2, 4, 8, 16, 32, 64]);
+        assert_steps(&flaky.get_gaps(), &[1, 2, 4, 8, 16, 32, 64]);
+    }
+
+    /// The waits of a read that fails seven times at the production base.
+    async fn seven_read_waits() -> Vec<Duration> {
+        let flaky = Arc::new(FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await));
+        flaky.fail_gets.store(MAX_ATTEMPTS - 1, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(FetcherParams {
+            retry_base: RETRY_BASE,
+            ..fetcher(store, slice, 64, 64, tx)
+        }));
+        drain(&mut rx).await;
+        task.await.unwrap();
+        flaky.get_gaps()
+    }
+
+    /// Two reads failing at the same instants retry apart. With no jitter, or
+    /// one seed for every read, their waits match.
+    #[tokio::test(start_paused = true)]
+    async fn two_reads_retry_apart() {
+        let (first, second) = tokio::join!(seven_read_waits(), seven_read_waits());
+        assert_steps(&first, &[200, 400, 800, 1600, 3200, 5000, 5000]);
+        assert_ne!(first, second, "two reads drew alike");
     }
 
     /// Pins that `get_retries_total` counts each GET retried, on a ranged
@@ -3993,9 +4040,9 @@ mod tests {
         let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
         assert!(matches!(last_failure(msgs), SplitFailure::Overwritten(_)));
         assert_eq!(store.heads(), MAX_ATTEMPTS as usize);
-        assert_eq!(
-            gaps(&store.head_instants.lock().unwrap()),
-            [1, 2, 4, 8, 16, 32, 64]
+        assert_steps(
+            &gaps(&store.head_instants.lock().unwrap()),
+            &[1, 2, 4, 8, 16, 32, 64],
         );
     }
 

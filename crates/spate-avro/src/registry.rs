@@ -33,11 +33,7 @@
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
 use reqwest::{StatusCode, Url};
-use rustls::crypto::aws_lc_rs;
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
-use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
-use rustls_native_certs::CertificateResult;
+use rustls::AlertDescription;
 use serde::Deserialize;
 use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::SyncClock;
@@ -45,6 +41,7 @@ use spate_core::config::UrlRule;
 use spate_core::error::chain;
 use spate_core::hash::{QualityMap, QualitySet};
 use spate_core::telemetry::RateLimit;
+use spate_core::tls::{CertificateDer, SystemRoots, TrustError, TrustRoots};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -244,25 +241,23 @@ impl Endpoint {
 
     fn failure(&self, e: reqwest::Error) -> Failure {
         match spate_core::tls_rejection!(rustls, &e) {
-            Some(tls) => Failure::Rejected(tls_reason(&self.registry, tls)),
+            Some(tls) => Failure::Rejected(tls_reason(&self.registry, self.base.scheme(), tls)),
             None => Failure::Transient(chain(&e.without_url())),
         }
     }
 }
 
-/// The reason recorded for a TLS rejection by `registry`.
-fn tls_reason(registry: &str, tls: &rustls::Error) -> String {
+/// The reason recorded for a TLS rejection by `registry`, whose URL has
+/// `scheme`.
+fn tls_reason(registry: &str, scheme: &str, tls: &rustls::Error) -> String {
     match tls {
-        rustls::Error::InvalidCertificate(cert) => {
-            let hint = match cert {
-                CertificateError::UnknownIssuer => {
-                    "; add the issuing CA to the system trust store or `registry.tls.root_ca`"
-                }
-                _ => "",
-            };
+        rustls::Error::InvalidCertificate(_) => {
+            // The key is refused unless the registry URL is `https://`; an
+            // `http://` registry reaches TLS through a redirect or a proxy.
+            let key = (scheme == "https").then_some("registry.tls.root_ca");
             format!(
-                "schema registry {registry} presented a certificate the client rejects: \
-                 {cert}{hint}"
+                "schema registry {registry} presented a certificate the client rejects: {}",
+                spate_core::tls_reason!(rustls, tls, key)
             )
         }
         rustls::Error::AlertReceived(AlertDescription::CertificateRequired) => format!(
@@ -284,17 +279,21 @@ fn excerpt(body: &[u8]) -> String {
     text[..end].trim_end().to_owned()
 }
 
-/// The HTTP client for the registry, verifying an `https://` registry
+/// The HTTP client for the registry at a URL with `scheme`, verifying TLS
 /// against the system trust store and `root_ca`.
-pub(crate) fn http_client(root_ca: Option<&Path>) -> Result<reqwest::Client, AvroConfigError> {
-    http_client_with(root_ca, rustls_native_certs::load_native_certs)
+pub(crate) fn http_client(
+    root_ca: Option<&Path>,
+    scheme: &str,
+) -> Result<reqwest::Client, AvroConfigError> {
+    http_client_with(root_ca, scheme, SystemRoots::load)
 }
 
 fn http_client_with(
     root_ca: Option<&Path>,
-    system: impl FnOnce() -> CertificateResult,
+    scheme: &str,
+    system: impl FnOnce() -> SystemRoots,
 ) -> Result<reqwest::Client, AvroConfigError> {
-    client_builder(system, root_ca)?
+    client_builder(system, root_ca, scheme)?
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|e| AvroConfigError::Registry { detail: chain(&e) })
@@ -302,11 +301,13 @@ fn http_client_with(
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
 /// addition to the system roots. On macOS, Windows and Android it keeps
-/// reqwest's platform verifier; elsewhere TLS is verified against
-/// [`root_store`].
+/// reqwest's platform verifier, which reads the system store itself.
+/// Elsewhere TLS is verified against the roots from `spate_core::tls`, and an
+/// `https://` registry with none fails.
 fn client_builder(
-    system: impl FnOnce() -> CertificateResult,
+    system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
+    scheme: &str,
 ) -> Result<reqwest::ClientBuilder, AvroConfigError> {
     let builder = reqwest::Client::builder();
     if cfg!(target_os = "android") && root_ca.is_some() {
@@ -314,84 +315,38 @@ fn client_builder(
             detail: "registry.tls.root_ca is not supported on Android".into(),
         });
     }
-    let extra = match root_ca {
-        Some(path) => read_root_ca(path)?,
-        None => Vec::new(),
-    };
     if cfg!(any(target_vendor = "apple", windows, target_os = "android")) {
-        let certs = extra
-            .iter()
-            .map(|cert| reqwest::Certificate::from_der(cert))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AvroConfigError::Registry {
-                detail: format!("registry.tls.root_ca: {e}"),
-            })?;
-        return Ok(builder.tls_certs_merge(certs));
+        let extra = match root_ca {
+            Some(path) => spate_core::tls::read_root_ca(path).map_err(root_ca_error)?,
+            None => Vec::new(),
+        };
+        return Ok(builder.tls_certs_merge(certificates(extra)?));
     }
-    let mut roots = root_store(system);
-    roots.add_parsable_certificates(extra);
     // An `http://` registry needs these roots too: a redirect to `https://`
     // or an `https://` proxy connects over TLS.
-    Ok(builder.tls_backend_preconfigured(client_config(roots)))
+    let mut roots = TrustRoots::load(system(), root_ca).map_err(root_ca_error)?;
+    if scheme == "https" {
+        roots = roots.require_any().map_err(root_ca_error)?;
+    }
+    Ok(builder.tls_certs_only(certificates(roots.into_certs())?))
 }
 
-/// Every certificate in the PEM file at `path`. Fails when the file cannot be
-/// read, holds no certificate, or holds one that is not a valid trust anchor.
-fn read_root_ca(path: &Path) -> Result<Vec<CertificateDer<'static>>, AvroConfigError> {
-    let certs = CertificateDer::pem_file_iter(path)
-        .map_err(|e| root_ca_error(path, &e.to_string()))?
+fn certificates(
+    certs: Vec<CertificateDer<'static>>,
+) -> Result<Vec<reqwest::Certificate>, AvroConfigError> {
+    certs
+        .iter()
+        .map(|cert| reqwest::Certificate::from_der(cert))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| root_ca_error(path, &e.to_string()))?;
-    if certs.is_empty() {
-        return Err(root_ca_error(path, "no PEM certificates found"));
-    }
-    // The platform verifiers report a malformed certificate without its path.
-    let mut check = RootCertStore::empty();
-    for cert in &certs {
-        check
-            .add(cert.clone())
-            .map_err(|e| root_ca_error(path, &e.to_string()))?;
-    }
-    Ok(certs)
+        .map_err(|e| AvroConfigError::Registry {
+            detail: format!("registry.tls.root_ca: {e}"),
+        })
 }
 
-fn root_ca_error(path: &Path, why: &str) -> AvroConfigError {
+fn root_ca_error(e: TrustError) -> AvroConfigError {
     AvroConfigError::Registry {
-        detail: format!("registry.tls.root_ca `{}`: {why}", path.display()),
+        detail: format!("registry.tls.root_ca: {e}"),
     }
-}
-
-/// The certificates `system` yields, or the Mozilla bundle when none of them
-/// parse.
-fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
-    let loaded = system();
-    if !loaded.errors.is_empty() {
-        tracing::warn!(errors = ?loaded.errors, "deserializer.avro: errors reading the system trust store");
-    }
-    let mut roots = RootCertStore::empty();
-    let (added, unparsable) = roots.add_parsable_certificates(loaded.certs);
-    if added == 0 {
-        let problem = if unparsable == 0 {
-            "the system trust store has no certificates".to_owned()
-        } else {
-            format!("none of the {unparsable} certificates in the system trust store parsed")
-        };
-        tracing::warn!(
-            "deserializer.avro: {problem}; verifying the registry against the Mozilla root bundle"
-        );
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-    roots
-}
-
-fn client_config(roots: RootCertStore) -> ClientConfig {
-    // rustls has no process-wide default provider when a build enables both
-    // `ring` and `aws-lc-rs`.
-    ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports rustls's default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth()
 }
 
 /// What a single fetch resolved to, used to drive per-id backoff.
@@ -717,7 +672,7 @@ mod tests {
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use spate_core::clock::{Clock, TestClock};
-    use spate_test_support::{TestCa, native_certs, pem};
+    use spate_test_support::{TestCa, pem};
 
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
 
@@ -859,7 +814,8 @@ mod tests {
         root_ca: Option<&Path>,
         system: Vec<CertificateDer<'static>>,
     ) -> Result<String, Failure> {
-        let http = http_client_with(root_ca, || native_certs(system)).unwrap();
+        let scheme = url.split(':').next().unwrap();
+        let http = http_client_with(root_ca, scheme, || SystemRoots::from_certs(system)).unwrap();
         let endpoint = endpoint(url);
         endpoint
             .get(&http, endpoint.schema_url(1))
@@ -1029,7 +985,7 @@ mod tests {
                     )
                     .await;
                     let handle = spawn_fetcher(
-                        http_client(None).unwrap(),
+                        http_client(None, "http").unwrap(),
                         Arc::new(endpoint(&url)),
                         Rejection::default(),
                         Duration::from_secs(60),
@@ -1084,7 +1040,7 @@ mod tests {
                 )
                 .await;
                 spawn_fetcher(
-                    http_client(None).unwrap(),
+                    http_client(None, "http").unwrap(),
                     Arc::new(endpoint(&url)),
                     Rejection::default(),
                     Duration::from_secs(60),
@@ -1193,39 +1149,15 @@ mod tests {
         assert_eq!(endpoint.registry(), "https://sr:8081/registry");
     }
 
-    /// A store that yielded only certificates rustls refuses says so, and an
-    /// empty one keeps its own line, and both take the Mozilla bundle.
-    /// Regression for #1445.
+    /// An `http://` registry builds a client with no usable system root,
+    /// so a plaintext pipeline runs on an image with no CA bundle.
     #[test]
-    fn an_unparsable_store_is_not_called_empty() {
-        let unparsable = rustls::pki_types::CertificateDer::from(vec![0u8; 8]);
-        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-            let certs = vec![unparsable.clone(), unparsable];
-            let roots = root_store(|| native_certs(certs));
-            assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
-        });
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(
-            lines[0].contains("none of the 2 certificates in the system trust store parsed"),
-            "{lines:?}"
-        );
-        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-            root_store(|| native_certs(Vec::new()));
-        });
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("has no certificates"), "{lines:?}");
-    }
-
-    /// An empty system store falls back to the Mozilla bundle, and a
-    /// non-empty one keeps it out.
-    #[test]
-    fn an_empty_system_store_falls_back_to_the_mozilla_roots() {
-        let roots = root_store(CertificateResult::default);
-        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
-        assert_eq!(
-            root_store(|| native_certs(vec![TestCa::new("sr").der()])).len(),
-            1
-        );
+    fn an_http_registry_builds_with_an_empty_system_store() {
+        let unparsable = CertificateDer::from(vec![0u8; 8]);
+        for system in [Vec::new(), vec![unparsable]] {
+            http_client_with(None, "http", || SystemRoots::from_certs(system))
+                .expect("an http registry needs no root");
+        }
     }
 
     /// A `root_ca` that is missing, holds no certificate, or holds a malformed
@@ -1238,9 +1170,10 @@ mod tests {
         let malformed = dir.path().join("malformed.pem");
         std::fs::write(&malformed, pem("CERTIFICATE", b"not DER")).unwrap();
         for path in [dir.path().join("missing.pem"), empty, malformed] {
-            let err = http_client_with(Some(&path), CertificateResult::default)
-                .expect_err("the root CA is rejected")
-                .to_string();
+            let err =
+                http_client_with(Some(&path), "https", || SystemRoots::from_certs(Vec::new()))
+                    .expect_err("the root CA is rejected")
+                    .to_string();
             assert!(err.contains("registry.tls.root_ca"), "{err}");
             assert!(err.contains(&path.display().to_string()), "{err}");
         }
@@ -1279,7 +1212,8 @@ mod tests {
             (A::DecodeError, false),
         ] {
             let addr = spate_test::tls_alert_server(b"", u8::from(alert));
-            match fetch(&format!("https://{addr}"), None, vec![]).await {
+            let unrelated = vec![TestCa::new("unrelated").der()];
+            match fetch(&format!("https://{addr}"), None, unrelated).await {
                 Err(Failure::Rejected(reason)) => {
                     assert!(is_rejection, "{alert:?} rejected: {reason}");
                     assert!(reason.contains(&format!("{alert:?}")), "{reason}");
@@ -1306,24 +1240,10 @@ mod tests {
     mod system_store {
         use super::*;
 
-        /// `root_ca` adds to the system roots: a registry signed by a CA in
-        /// the system store stays trusted.
-        #[tokio::test]
-        async fn root_ca_is_merged_with_the_system_roots() {
-            let dir = tempfile::tempdir().unwrap();
-            let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
-            let url = serve(&system, None).await;
-            let fetched = fetch(&url, Some(&extra.write(dir.path())), vec![system.der()]).await;
-            assert_eq!(fetched.expect("the system CA is trusted"), SCHEMA);
-        }
-
-        /// An `http://` registry that redirects to `https://` is verified
-        /// against the system roots.
-        #[tokio::test]
-        async fn an_http_registry_redirected_to_https_is_trusted() {
+        /// An `http://` server on `127.0.0.1` that answers every request with
+        /// a `307` to the same path under `target`, and returns its URL.
+        async fn redirect_to(target: String) -> String {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let registry = TestCa::new("registry");
-            let target = serve(&registry, None).await;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             tokio::spawn(async move {
@@ -1339,7 +1259,27 @@ mod tests {
                     let _ = tcp.write_all(response.as_bytes()).await;
                 }
             });
-            let url = format!("http://127.0.0.1:{port}");
+            format!("http://127.0.0.1:{port}")
+        }
+
+        /// `root_ca` adds to the system roots: a registry signed by a CA in
+        /// the system store stays trusted.
+        #[tokio::test]
+        async fn root_ca_is_merged_with_the_system_roots() {
+            let dir = tempfile::tempdir().unwrap();
+            let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
+            let url = serve(&system, None).await;
+            let fetched = fetch(&url, Some(&extra.write(dir.path())), vec![system.der()]).await;
+            assert_eq!(fetched.expect("the system CA is trusted"), SCHEMA);
+        }
+
+        /// An `http://` registry that redirects to `https://` is verified
+        /// against the system roots.
+        #[tokio::test]
+        async fn an_http_registry_redirected_to_https_is_trusted() {
+            let registry = TestCa::new("registry");
+            let target = serve(&registry, None).await;
+            let url = redirect_to(target).await;
             let fetched = fetch(&url, None, vec![registry.der()]).await;
             assert_eq!(fetched.expect("the redirect target is trusted"), SCHEMA);
         }
@@ -1353,6 +1293,47 @@ mod tests {
             let fetched = fetch(&url, None, vec![registry.der()]).await;
             assert_eq!(fetched.expect("the registry's CA is trusted"), SCHEMA);
             rejected(fetch(&url, None, vec![other.der()]).await);
+        }
+
+        /// An `https://` registry with no usable system root and no `root_ca`
+        /// fails at client build, at `registry.tls.root_ca`, with the fixes
+        /// named.
+        #[test]
+        fn an_https_registry_with_no_trust_root_fails() {
+            let unparsable = CertificateDer::from(vec![0u8; 8]);
+            for (system, problem) in [
+                (Vec::new(), "the system trust store has no certificates"),
+                (
+                    vec![unparsable],
+                    "none of the 1 certificates in the system trust store parsed",
+                ),
+            ] {
+                let err = http_client_with(None, "https", || SystemRoots::from_certs(system))
+                    .expect_err("no root to verify against")
+                    .to_string();
+                assert_eq!(
+                    err,
+                    format!(
+                        "avro schema registry client: registry.tls.root_ca: {problem}; install a \
+                         CA bundle, point SSL_CERT_FILE at one, or set this key to the issuing CA"
+                    )
+                );
+            }
+        }
+
+        /// An `http://` registry redirected to an `https://` one whose CA is
+        /// not trusted is rejected with a hint that leaves out
+        /// `registry.tls.root_ca`, which an `http://` URL refuses.
+        #[tokio::test]
+        async fn a_redirect_to_an_unknown_ca_omits_the_root_ca_hint() {
+            let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
+            let target = serve(&registry, None).await;
+            let url = redirect_to(target).await;
+            let reason = rejected(fetch(&url, None, vec![other.der()]).await);
+            assert!(
+                reason.ends_with("add the issuing CA to the system trust store"),
+                "{reason}"
+            );
         }
     }
 }

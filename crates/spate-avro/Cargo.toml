@@ -20,11 +20,9 @@ testing = []
 apache-avro = { workspace = true }
 ouroboros = { workspace = true }
 bytes = { workspace = true }
-spate-core = { workspace = true }
+spate-core = { workspace = true, features = ["tls-roots"] }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
-webpki-roots = { workspace = true }
 humantime-serde = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
@@ -41,7 +39,7 @@ gungraun = { workspace = true }
 proptest = { workspace = true }
 spate-bench = { workspace = true }
 # `testing`: `clock::TestClock`.
-spate-core = { workspace = true, features = ["testing"] }
+spate-core = { workspace = true, features = ["testing", "tls-roots"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
 http-body-util = { workspace = true }

@@ -139,28 +139,9 @@ impl RegistrySection {
     }
 }
 
-/// Trust settings for an `https://` registry.
-///
-/// ```yaml
-/// deserializer:
-///   avro:
-///     registry:
-///       url: https://registry.internal:8081
-///       tls:
-///         root_ca: /etc/spate/registry-ca.pem
-/// ```
-///
-/// Construct with [`TlsSection::default`] and set the fields. The struct is
-/// `#[non_exhaustive]` so new knobs can be added without breaking callers.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct TlsSection {
-    /// PEM bundle of root CAs trusted in addition to the system trust store.
-    /// Requires an `https://` URL.
-    #[serde(default)]
-    pub root_ca: Option<PathBuf>,
-}
+/// Trust settings for an `https://` registry: `registry.tls.root_ca`, which
+/// requires an `https://` URL.
+pub use spate_core::tls::TlsSection;
 
 // Hand-written: `password` and the URL userinfo are credentials. The
 // destructure lists every field so a new one cannot reach `Debug` unredacted.
@@ -284,7 +265,9 @@ impl AvroDeserializerBuilder {
     /// [`AvroConfigError::SchemaLoad`] for a schema that cannot be loaded,
     /// [`AvroConfigError::Invalid`] for settings the mode rejects, registry URL credentials, a
     /// registry password without a username, or a `negative_cache_ttl` under `100ms`, and
-    /// [`AvroConfigError::Registry`] for a registry client that cannot be built.
+    /// [`AvroConfigError::Registry`] for a registry client that cannot be built, which on Linux
+    /// and other non-Apple Unix includes an `https://` registry when neither the system trust
+    /// store nor `registry.tls.root_ca` holds a usable certificate.
     pub fn from_settings(
         settings: &AvroSettings,
         runtime: &tokio::runtime::Handle,
@@ -380,8 +363,8 @@ impl AvroDeserializerBuilder {
                     );
                 }
                 let rejection = Rejection::default();
+                let http = http_client(registry.tls.root_ca.as_deref(), url.scheme())?;
                 let endpoint = Arc::new(Endpoint::new(url, basic_auth));
-                let http = http_client(registry.tls.root_ca.as_deref())?;
                 let handle = spawn_fetcher(
                     http.clone(),
                     Arc::clone(&endpoint),
@@ -922,7 +905,10 @@ mod tests {
                 .deserialize_into()
                 .unwrap();
         let registry = settings.registry.unwrap();
-        assert_eq!(registry.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
+        assert_eq!(
+            registry.tls.root_ca,
+            Some(std::path::PathBuf::from("/etc/ca.pem"))
+        );
 
         let err = component("registry: {url: https://sr, tls: {bogus: 1}}")
             .deserialize_into::<AvroSettings>()

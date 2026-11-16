@@ -88,8 +88,9 @@ rdkafka:
   ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
 ```
 
-A non-empty `sasl.password` with `sasl_plaintext`, in any case of the value,
-loads, and logs one warning when the client is built. The source logs it from
+A non-empty `sasl.password` with `security.protocol: sasl_plaintext`, the
+protocol in any letter case, loads, and logs one warning when the client is
+built. The source logs it from
 `open`, and the sink, the feed and the feed publisher when they are built or
 connect:
 

@@ -2,7 +2,7 @@
 //! credentials, timeouts and retries.
 
 use crate::config::SqsFeedConfig;
-use crate::config::{BACKEND, NAME, is_https};
+use crate::config::{BACKEND, NAME};
 use crate::credentials::SharedLoad;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -21,7 +21,7 @@ use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use aws_types::service_config::ServiceConfigKey;
 use spate_core::config::SectionPath;
 use spate_core::feed::ConnectError;
-use spate_core::tls::{SystemRoots, TrustError, TrustRoots};
+use spate_core::tls::{SystemRoots, TrustError, TrustRoots, is_https};
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -883,14 +883,7 @@ mod tests {
     /// fetch as transient once the request timeout elapses.
     #[tokio::test(start_paused = true)]
     async fn a_registry_that_never_answers_times_out() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
-            }
-        });
+        let addr = spate_test_support::silent_server();
         let start = tokio::time::Instant::now();
         let fetched = tokio::time::timeout(
             REQUEST_TIMEOUT * 2,

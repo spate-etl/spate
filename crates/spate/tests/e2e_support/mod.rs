@@ -24,11 +24,6 @@
 
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -38,7 +33,6 @@ use spate::avro::AvroDeserializerBuilder;
 use spate::clickhouse::{ClickHouseEncoder, config};
 use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
-use spate::hash::FastMap;
 use spate::kafka::KafkaSource;
 use spate::ops::{ChunkConfig, chain_owned};
 use spate::pipeline::{
@@ -47,15 +41,15 @@ use spate::pipeline::{
 use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
-    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, PartitionState, container_image, http,
-    ready,
+    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, PartitionState, RegistryStub,
+    container_image, http, ready,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use testcontainers::runners::SyncRunner;
@@ -73,10 +67,6 @@ pub const SCHEMA_ID: u32 = 42;
 pub const SCHEMA_JSON: &str = r#"{"type":"record","name":"Event","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}"#;
 pub const CH_PASSWORD: &str = "e2e";
 
-/// Schemas the stub registry serves, by id. Shared with the server task so a
-/// scenario whose row shape is not [`Event`] can publish its own.
-type Schemas = Arc<Mutex<FastMap<u32, String>>>;
-
 /// Globally-unique record id: partition-billions + sequence, room for the long
 /// run's volume on one partition. With a fresh topic and a single ordered producer
 /// per partition, `seq` equals the Kafka offset, which the sampler relies on.
@@ -91,7 +81,7 @@ enum Brokers {
 }
 
 pub struct Harness {
-    /// Runtime for the stub registry, ClickHouse queries, and Kafka admin.
+    /// Runtime for ClickHouse queries and Kafka admin.
     pub rt: tokio::runtime::Runtime,
     kafka: Brokers,
     replication: i32,
@@ -100,7 +90,10 @@ pub struct Harness {
     pub ch_url: String,
     pub registry_url: String,
     schema: Schema,
-    schemas: Schemas,
+    /// Serves `SCHEMA_JSON` under `SCHEMA_ID` and each schema a scenario
+    /// registers. Anything else, such as a pre-warm's subject lookup, gets a
+    /// 404, which a pre-warm logs and moves past.
+    registry: RegistryStub,
 }
 
 impl Harness {
@@ -177,12 +170,9 @@ impl Harness {
         let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
         let ch_url = format!("http://127.0.0.1:{ch_port}");
 
-        let schemas: Schemas = Arc::new(Mutex::new(FastMap::from_iter([(
-            SCHEMA_ID,
-            SCHEMA_JSON.to_string(),
-        )])));
-        let registry_addr = rt.block_on(serve_stub_registry(Arc::clone(&schemas)));
-        let registry_url = format!("http://{registry_addr}");
+        let registry = RegistryStub::start();
+        registry.script(&schema_path(SCHEMA_ID), 200, schema_body(SCHEMA_JSON), 0);
+        let registry_url = registry.endpoint();
 
         Harness {
             rt,
@@ -193,17 +183,15 @@ impl Harness {
             ch_url,
             registry_url,
             schema: Schema::parse_str(SCHEMA_JSON).expect("schema"),
-            schemas,
+            registry,
         }
     }
 
     /// Publish one more schema in the stub registry, so a scenario whose
     /// record shape is not [`Event`] can frame payloads against its own id.
     pub fn register_schema(&self, id: u32, json: &str) {
-        self.schemas
-            .lock()
-            .expect("registry schemas")
-            .insert(id, json.to_string());
+        self.registry
+            .script(&schema_path(id), 200, schema_body(json), 0);
     }
 
     // ── ClickHouse ─────────────────────────────────────────────────────
@@ -1201,64 +1189,14 @@ fn docker(args: &[&str]) {
     );
 }
 
-/// Minimal Confluent-compatible registry: serves the registered schemas from
-/// `/schemas/ids/{id}`, with `SCHEMA_JSON` under `SCHEMA_ID` out of the box,
-/// and 404s everything else, including the subject lookups a `prewarm_subjects`
-/// list makes (a pre-warm miss is logged, never fatal).
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the stub server's tasks end when the test's runtime drops"
-)]
-async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind stub registry");
-    let addr = listener.local_addr().expect("stub addr");
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let schemas = Arc::clone(&schemas);
-            tokio::spawn(async move {
-                let io = hyper_util::rt::TokioIo::new(stream);
-                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-                    let schemas = Arc::clone(&schemas);
-                    async move {
-                        let found = req
-                            .uri()
-                            .path()
-                            .strip_prefix("/schemas/ids/")
-                            .and_then(|rest| rest.split('/').next())
-                            .and_then(|id| id.parse::<u32>().ok())
-                            .and_then(|id| {
-                                schemas.lock().expect("registry schemas").get(&id).cloned()
-                            });
-                        let (status, body) = if let Some(schema) = found {
-                            (
-                                StatusCode::OK,
-                                serde_json::json!({ "schema": schema }).to_string(),
-                            )
-                        } else {
-                            (
-                                StatusCode::NOT_FOUND,
-                                r#"{"error_code":40403,"message":"Schema not found"}"#.to_string(),
-                            )
-                        };
-                        Ok::<_, std::convert::Infallible>(
-                            Response::builder()
-                                .status(status)
-                                .header("content-type", "application/vnd.schemaregistry.v1+json")
-                                .body(Full::new(Bytes::from(body)))
-                                .expect("response"),
-                        )
-                    }
-                });
-                let _ = http1::Builder::new().serve_connection(io, service).await;
-            });
-        }
-    });
-    addr
+/// The registry path that serves schema `id`.
+fn schema_path(id: u32) -> String {
+    format!("/schemas/ids/{id}")
+}
+
+/// The registry's answer for a schema fetched by id.
+fn schema_body(schema: &str) -> String {
+    serde_json::json!({ "schema": schema }).to_string()
 }
 
 /// Blocking HTTP GET against the pipeline's admin server.

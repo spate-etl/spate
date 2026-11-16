@@ -30,9 +30,6 @@ bytes = { workspace = true }
 clickhouse = { workspace = true }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["cargo", "elasticmq", "kafka", "kafka-client", "s3"] }
-http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true }
 metrics = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
 rdkafka = { workspace = true }

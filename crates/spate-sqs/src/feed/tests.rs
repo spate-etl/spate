@@ -2321,7 +2321,9 @@ async fn a_failed_hand_back_call_is_retried_within_its_bound() {
             .fail_next_visibility_call(CallError::retryable("InternalError"));
     }
     feed.hand_back(d.receipt).unwrap();
-    step(Duration::from_secs(90)).await;
+    // Each retry wakes at its own instant: a coarser step stamps a retry due
+    // just before the deadline with the end of the step.
+    pass(Duration::from_secs(90)).await;
     // Each call is recorded by both, in the same order.
     let calls = queue.inner.visibility();
     let at = queue.visibility_at.lock().unwrap().clone();
@@ -2739,9 +2741,11 @@ async fn a_failing_delete_at_close_is_retried_only_until_within() {
     let within = Duration::from_secs(2);
     let bound = Instant::now() + within;
     let mut closed = feed.close(within).unwrap();
-    step(within).await;
+    // Each retry wakes at its own instant, as in
+    // `a_failed_hand_back_call_is_retried_within_its_bound`.
+    pass(within).await;
     assert!(closed.try_outcome().unwrap().is_err());
-    step(Duration::from_secs(3)).await;
+    pass(Duration::from_secs(3)).await;
     let sent = queue.deletes_at.lock().unwrap().clone();
     assert!(sent.len() > 1, "the delete was not retried");
     assert!(

@@ -173,8 +173,7 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   After some fatal errors, such as a broker fencing a member, a consumer's close
   never returns. It goes on in the background the same way, and librdkafka's
   main thread then holds one core until the process exits. `run` waits for the
-  source's close until 3 seconds past the drain deadline, or past a final
-  commit that ends later
+  source's close only for its grace
   ([Graceful shutdown](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography)),
   and a process that exits once `run` returns stops a close still in progress.
 - A rebalance *error* (an event that is neither an assignment nor a

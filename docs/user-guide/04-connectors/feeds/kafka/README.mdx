@@ -817,8 +817,7 @@ leave can run past the drain deadline on the feed's consumer thread, and
 dropping the feed waits for it. Dropping the feed also waits for the depth
 thread, which sends no request once the feed has stopped: a depth read in
 flight ends after the request it is on, 5 seconds at most. `run` waits for the
-drop until 3 seconds past the drain deadline, or past a final commit that ends
-later
+drop only for its grace
 ([the drain choreography](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography)).
 A worker killed or exited before its leave is answered keeps its partitions
 until `session.timeout.ms` lapses (see [No lease](#no-lease)).

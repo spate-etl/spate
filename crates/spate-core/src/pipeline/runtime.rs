@@ -76,9 +76,10 @@ impl Default for RuntimeOptions {
 /// upkeep cadence.
 const IO_BUSY_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How long past the drain deadline, or past the final commit when that ends
-/// later, `run` waits for the source and the feed to close and the io runtime
-/// to stop. At the defaults the drain deadline leaves 5 s before an
+/// How long `run` waits for the source and the feed to close and the io
+/// runtime to stop. The wait counts from the drain deadline, or from the
+/// teardown's start when that is later, as after a final commit past the
+/// deadline or a controller panic, which leaves no deadline. At the defaults the drain deadline leaves 5 s before an
 /// orchestrator's kill; the pool's backstop takes 1 s of it, and this leaves
 /// 1 s of the rest to the final commit.
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
@@ -358,8 +359,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// drain has ended, the source and the feed close and the I/O runtime
     /// shuts down, waiting at most 2s for its tasks.
     ///
-    /// `run` waits for that teardown until 3s past the drain deadline, or past
-    /// the final commit when that ends later. A teardown still running then is
+    /// `run` waits for that teardown for 3s from the drain deadline, or from
+    /// the teardown's start when that is later, as after a final commit past
+    /// the deadline or a controller panic. A teardown still running then is
     /// logged at `WARN` and left to finish on a thread of its own, holding the
     /// source, the feed and the I/O runtime, and `run` returns.
     ///
@@ -925,7 +927,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 source = %source_ct,
                 feed = feed_backend.as_deref(),
                 grace = ?CLOSE_GRACE,
-                "the source or the feed had not closed by the drain deadline and its grace; \
+                "the source or the feed had not closed by the end of its grace; \
                  they close in the background with the io runtime, and a group the source \
                  belonged to may wait out its session timeout"
             );

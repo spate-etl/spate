@@ -113,9 +113,8 @@ them wherever your source resumes from instead.
   positions; the runtime calls it at shutdown and revocation.
 - **`Drop`** closes your client. After the final commit the runtime drops
   the source and then the feed, both while the I/O runtime still runs.
-  `run` waits for them until 3s past the drain deadline, or 3s past a final
-  commit that ends later. A `Drop` still running then goes on in the
-  background, and `run` returns
+  `run` waits for them for a short grace. A `Drop` still running after it
+  goes on in the background, and `run` returns
   ([Graceful shutdown](../03-guides/graceful-shutdown.mdx#the-drain-choreography)).
 - **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
   and restart fetching for specific lanes. Sources that can't pause rely on

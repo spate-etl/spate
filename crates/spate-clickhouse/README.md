@@ -56,8 +56,9 @@ and neither the system trust store nor `tls.root_ca` holds a usable
 certificate. `tls.root_ca` names a PEM bundle
 of CAs trusted beside the system store.
 
-A non-empty `password`, or `password` under `settings`, with an `http://` URL
-loads, and logs one warning that the credential is sent without TLS.
+A non-empty `password` with an `http://` replica or `distributed_check.endpoint`
+loads, and logs one warning that the credential is sent without TLS. So does a
+non-empty `password` under `settings` with an `http://` replica.
 
 `compression` applies to the wire only. The sink compresses insert bodies on the
 pipeline threads as each chunk seals, and the table's column `CODEC`s are

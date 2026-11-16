@@ -145,6 +145,9 @@ impl Rig {
             pool,
         )
         .with_component_type("count");
+        // Built here without the `with_metrics` that
+        // `spate_test::passthrough_runtime` adds, so the timed chain makes no
+        // metric calls.
         let runtime = pipeline
             .sink(sink)
             .expect("the sink installs")

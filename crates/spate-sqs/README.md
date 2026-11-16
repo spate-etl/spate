@@ -111,7 +111,9 @@ pages cover the framework's side.
   stop or held by a worker that crashed.
 
 A batch of deletes or fails that fails transiently is sent again, backing off
-from 200 ms up to 5 s, until the earliest deadline among its units.
+from 200 ms up to 5 s, until the earliest deadline among its units. Each wait
+is drawn at random between 80% and 100% of its step, so feeds that fail
+together spread their retries.
 [Visibility and renewal](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#visibility-and-renewal),
 [Failing a unit](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#failing-a-unit)
 and

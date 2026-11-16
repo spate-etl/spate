@@ -263,6 +263,11 @@ mod tests {
     #[test]
     fn a_response_is_framed_for_one_request() {
         let stub = RegistryStub::start();
+        assert_eq!(stub.url(), format!("http://{}", stub.addr()));
+        assert_eq!(
+            format!("{stub:?}"),
+            format!("RegistryStub {{ addr: {}, .. }}", stub.addr())
+        );
         stub.script("/schemas/ids/1", 200, "{}", 0);
         assert_eq!(
             get(stub.addr(), "/schemas/ids/1", ""),
@@ -289,10 +294,12 @@ mod tests {
             body(&get(stub.addr(), "/schemas/ids/5?deleted=true", "")),
             "five"
         );
+        get(stub.addr(), "/schemas/ids/6", "");
         assert_eq!(stub.requests()[0].target, "/schemas/ids/5?deleted=true");
         assert_eq!(stub.path_hits("/schemas/ids/5"), 1);
-        assert_eq!(stub.path_hits("/schemas/ids/6"), 0);
-        assert_eq!(stub.hits(), 1);
+        assert_eq!(stub.path_hits("/schemas/ids/6"), 1);
+        assert_eq!(stub.path_hits("/schemas/ids/7"), 0);
+        assert_eq!(stub.hits(), 2);
     }
 
     /// Requests are recorded in order, each with its `Authorization` values
@@ -326,6 +333,9 @@ mod tests {
         stub.script("/b", 200, "b", 0);
         stub.hold("/a");
         std::thread::scope(|scope| {
+            // A failed assertion lets the held request through, so the scope's
+            // join does not wait for its read to time out.
+            let _release = Release(&stub);
             let held = scope.spawn(|| get(stub.addr(), "/a", ""));
             let gate = stub
                 .state
@@ -340,5 +350,15 @@ mod tests {
             assert_eq!(body(&held.join().unwrap()), "a");
         });
         assert_eq!(stub.path_hits("/a"), 1);
+        assert_eq!(lock(&stub.state.gate).waiting, 0);
+    }
+
+    /// Releases the stub's gate when dropped.
+    struct Release<'a>(&'a RegistryStub);
+
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.0.release();
+        }
     }
 }

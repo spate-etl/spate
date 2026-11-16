@@ -9,12 +9,17 @@
 //! thread.
 
 use std::any::Any;
+use std::convert::Infallible;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use crossbeam_channel::RecvTimeoutError;
 use tokio::task::{JoinError, JoinHandle, coop};
+
+use crate::clock::Clock;
 
 #[cfg(not(loom))]
 mod bound;
@@ -206,14 +211,55 @@ pub fn panic_text(payload: &(dyn Any + Send)) -> &str {
     }
 }
 
+/// How often a wait on a thread's end reads its clock.
+const TICK: Duration = Duration::from_millis(50);
+
+/// How [`wait_for`] ended.
+enum Waited<R> {
+    /// The thread signalled its end.
+    Done,
+    /// The check returned a value.
+    Checked(R),
+    /// The deadline passed.
+    Elapsed,
+}
+
+/// Wait until `done` disconnects, `check` returns a value, or `clock` reads
+/// `deadline`, reading the clock at least once a `tick` of real time.
+///
+/// The end is looked for before `check` runs and before the deadline is
+/// read, so a thread that has ended by the deadline counts as done.
+fn wait_for<R>(
+    done: &crossbeam_channel::Receiver<()>,
+    deadline: Option<Instant>,
+    clock: &dyn Clock,
+    tick: Duration,
+    mut check: impl FnMut() -> Option<R>,
+) -> Waited<R> {
+    loop {
+        let left = deadline.map_or(tick, |d| d.saturating_duration_since(clock.now()));
+        if done.recv_timeout(left.min(tick)) != Err(RecvTimeoutError::Timeout) {
+            return Waited::Done;
+        }
+        if let Some(value) = check() {
+            return Waited::Checked(value);
+        }
+        if deadline.is_some_and(|d| clock.now() >= d) {
+            return Waited::Elapsed;
+        }
+    }
+}
+
 /// An owned OS thread, joined when the handle drops.
 ///
-/// Dropping the handle blocks until the thread ends, so only an owner whose
-/// thread ends on a bounded signal holds one. A panic in the thread was
-/// logged when it happened; the drop discards it.
+/// Dropping the handle blocks until the thread ends, so an owner whose thread
+/// might not end waits with [`join_by`](Self::join_by) instead. A panic in the
+/// thread was logged when it happened; the drop discards it.
 #[must_use = "dropping a ThreadHandle blocks until its thread ends"]
 pub struct ThreadHandle<T> {
     inner: Option<std::thread::JoinHandle<T>>,
+    /// Disconnects when the thread's function returns or unwinds.
+    done: crossbeam_channel::Receiver<()>,
 }
 
 impl<T> ThreadHandle<T> {
@@ -225,7 +271,49 @@ impl<T> ThreadHandle<T> {
     pub fn join(mut self) -> std::thread::Result<T> {
         match self.inner.take() {
             Some(inner) => inner.join(),
-            None => unreachable!("only `join` and `drop` take the handle, each once"),
+            None => unreachable!("only `join`, `join_by` and `drop` take the handle, each once"),
+        }
+    }
+
+    /// Whether the thread has ended.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    /// Wait for the thread to end until `clock` reads `deadline`, and return
+    /// its result.
+    ///
+    /// The wait returns as soon as the thread ends, and reads `clock` every
+    /// 50 ms of real time, so it can return up to that long after the
+    /// deadline. A thread that has ended by then is joined. One that has not
+    /// is left running with no owner, holding everything it owns, and `None`
+    /// is returned.
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err)` carries the panic payload when the thread panicked.
+    pub fn join_by(
+        mut self,
+        deadline: Instant,
+        clock: &dyn Clock,
+    ) -> Option<std::thread::Result<T>> {
+        match wait_for(
+            &self.done,
+            Some(deadline),
+            clock,
+            TICK,
+            || None::<Infallible>,
+        ) {
+            Waited::Done => Some(self.join()),
+            Waited::Checked(never) => match never {},
+            Waited::Elapsed => {
+                // A `JoinHandle` dropped unjoined detaches its thread.
+                drop(self.inner.take());
+                None
+            }
         }
     }
 }
@@ -266,6 +354,7 @@ where
     let dispatch = tracing::dispatcher::get_default(|d| {
         (!d.is::<tracing::subscriber::NoSubscriber>()).then(|| d.clone())
     });
+    let (finished, done) = crossbeam_channel::bounded::<()>(0);
     #[expect(
         clippy::disallowed_methods,
         reason = "the returned `ThreadHandle` joins the thread when dropped"
@@ -273,6 +362,8 @@ where
     let inner = std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || {
+            // Dropped when this closure returns or unwinds, which wakes `join_by`.
+            let _finished = finished;
             let run = move || match catch_unwind(AssertUnwindSafe(f)) {
                 Ok(output) => output,
                 Err(payload) => {
@@ -289,13 +380,16 @@ where
                 None => run(),
             }
         })?;
-    Ok(ThreadHandle { inner: Some(inner) })
+    Ok(ThreadHandle {
+        inner: Some(inner),
+        done,
+    })
 }
 
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
     use tokio::sync::oneshot;
@@ -624,5 +718,159 @@ mod tests {
             total
         });
         assert_eq!(total, 15);
+    }
+
+    /// A frozen test clock that counts the reads made on one thread, so a test
+    /// knows a waiter there has read the time it set.
+    struct CountedClock {
+        clock: Arc<crate::clock::TestClock>,
+        reader: Mutex<Option<std::thread::ThreadId>>,
+        reads: AtomicUsize,
+    }
+
+    impl CountedClock {
+        fn new() -> Arc<Self> {
+            Arc::new(CountedClock {
+                clock: crate::clock::TestClock::frozen(),
+                reader: Mutex::new(None),
+                reads: AtomicUsize::new(0),
+            })
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        /// Wait until the reader has read the clock again.
+        fn wait_for_a_read(&self) {
+            let seen = self.reads();
+            spate_test::wait_until(spate_test::HANG, "the waiter reads the clock", || {
+                self.reads() > seen + 1
+            });
+        }
+    }
+
+    impl Clock for CountedClock {
+        fn now(&self) -> Instant {
+            let mut reader = self.reader.lock().unwrap();
+            let me = std::thread::current().id();
+            if *reader.get_or_insert(me) == me {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+            }
+            self.clock.now()
+        }
+    }
+
+    /// A thread that runs until its sender drops, then reports its end.
+    fn held_thread() -> (ThreadHandle<u8>, mpsc::Sender<()>, mpsc::Receiver<()>) {
+        let (release, released) = mpsc::channel::<()>();
+        let (ended_tx, ended) = mpsc::channel::<()>();
+        let handle = spawn_thread("spate-held", move || {
+            let _ = released.recv();
+            let _ = ended_tx.send(());
+            7
+        })
+        .unwrap();
+        (handle, release, ended)
+    }
+
+    /// `is_finished` reads false while the thread runs and true once it ends.
+    #[test]
+    fn is_finished_turns_true_when_the_thread_ends() {
+        let (handle, release, _ended) = held_thread();
+        assert!(!handle.is_finished());
+        drop(release);
+        spate_test::wait_until(spate_test::HANG, "the thread to end", || {
+            handle.is_finished()
+        });
+        assert_eq!(handle.join().unwrap(), 7);
+    }
+
+    /// The clock never moves, so only the thread's end can return the wait.
+    #[test]
+    fn join_by_returns_the_result_of_a_thread_that_ends_in_time() {
+        let clock = CountedClock::new();
+        let (handle, release, _ended) = held_thread();
+        let deadline = clock.now() + Duration::from_secs(1);
+        drop(release);
+        let joined = handle.join_by(deadline, &*clock);
+        assert_eq!(joined.map(Result::unwrap), Some(7));
+    }
+
+    /// The wait holds until the clock reaches the deadline, then leaves the
+    /// thread running on its own.
+    #[test]
+    fn join_by_gives_up_at_the_deadline_and_leaves_the_thread_running() {
+        let clock = CountedClock::new();
+        let (handle, release, ended) = held_thread();
+        let deadline = clock.clock.now() + Duration::from_secs(1);
+        let waiter = {
+            let clock = Arc::clone(&clock);
+            spawn_thread("spate-waiter", move || {
+                handle.join_by(deadline, &*clock).map(Result::unwrap)
+            })
+            .unwrap()
+        };
+        // Bound after the waiter so it drops first: a failed assertion then
+        // releases the thread, and the waiter it unblocks can be joined.
+        let release = release;
+        clock.wait_for_a_read();
+        clock
+            .clock
+            .advance(Duration::from_secs(1) - Duration::from_millis(1));
+        clock.wait_for_a_read();
+        assert!(!waiter.is_finished(), "the wait ended before its deadline");
+        clock.clock.advance(Duration::from_millis(1));
+        assert_eq!(waiter.join().unwrap(), None);
+        assert!(
+            ended.try_recv().is_err(),
+            "the thread ended before it was released"
+        );
+        drop(release);
+        ended
+            .recv_timeout(spate_test::HANG)
+            .expect("the thread left running ends once released");
+    }
+
+    /// A thread that has ended is joined even when the clock already reads
+    /// past the deadline.
+    #[test]
+    fn join_by_joins_a_thread_that_ended_by_the_deadline() {
+        let clock = CountedClock::new();
+        let (handle, release, _ended) = held_thread();
+        let deadline = clock.now();
+        drop(release);
+        spate_test::wait_until(spate_test::HANG, "the thread to end", || {
+            handle.is_finished()
+        });
+        clock.clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            handle.join_by(deadline, &*clock).map(Result::unwrap),
+            Some(7)
+        );
+    }
+
+    /// With a tick far longer than the hang bound, only the end signal can
+    /// return the wait in time.
+    #[test]
+    fn wait_for_returns_when_the_end_is_signalled() {
+        let clock = CountedClock::new();
+        let (finished, done) = crossbeam_channel::bounded::<()>(0);
+        let (result_tx, result) = mpsc::channel();
+        let waiter = spawn_thread("spate-waiter", move || {
+            let waited = wait_for(&done, None, &*clock, spate_test::HANG * 10, || None::<()>);
+            let _ = result_tx.send(matches!(waited, Waited::Done));
+        })
+        .unwrap();
+        drop(finished);
+        let waited = result.recv_timeout(spate_test::HANG);
+        if waited.is_err() {
+            // Joining would hold the failure for the waiter's whole tick.
+            let clock = crate::clock::TestClock::frozen();
+            let _ = waiter.join_by(clock.now(), &*clock);
+            panic!("the wait did not return on the end signal");
+        }
+        assert_eq!(waited, Ok(true));
+        waiter.join().unwrap();
     }
 }

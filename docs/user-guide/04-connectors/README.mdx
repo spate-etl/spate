@@ -99,9 +99,10 @@ other sources.
   is acknowledged and its attempt record is tombstoned, or after the write
   moving it to the retry or dead-letter topic is confirmed; a unit a stopping
   worker has not finished is read again by the next owner of its partition once
-  the worker leaves the group, and one whose worker crashed once the session
-  timeout lapses. The attempt cap counts every read, each recorded before it
-  starts, and a unit at the cap moves to the dead-letter topic unread. See
+  the worker leaves the group, and one whose worker crashed or exited before
+  its leave was answered once the session timeout lapses. The attempt cap
+  counts every read, each recorded before it starts, and a unit at the cap
+  moves to the dead-letter topic unread. See
   [the connector page](feeds/kafka/README.mdx) and
   [how a stop runs](feeds/kafka/README.mdx#stop).
 - **Memory / Capture (test)** — deterministic, in-process, and honest about

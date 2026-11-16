@@ -120,7 +120,10 @@ source, that factory, the `SinkRuntime` and the budget:
 Without `with_io_runtime`, `run` builds a runtime of its own and the process
 carries `2 × io_threads`
 workers. `run` owns that runtime's shutdown either way, so tasks you
-spawned on it earlier keep running until then.
+spawned on it earlier keep running until then. The runtime shuts down after the
+source and the feed close, and a close that outlasts `run`'s grace keeps it
+running after `run` returns (see
+[Graceful shutdown](graceful-shutdown.mdx#the-drain-choreography)).
 
 From the shutdown handle on, a manual assembly drives exactly as a builder
 assembly does: push records, wait for the watermark, trigger the drain and

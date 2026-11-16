@@ -455,8 +455,9 @@ impl Pipeline {
 
     /// A handle to the I/O runtime, for connector edge work that must
     /// start before the chain exists (schema-registry fetchers, ...).
-    /// Valid until `run` returns; once the pipeline has started, that
-    /// includes the source's `Drop`.
+    /// Valid until the I/O runtime shuts down, which `run` does after the
+    /// source's and the feed's `Drop` once the pipeline has started, even when
+    /// they outlast `run`.
     #[must_use]
     pub fn io_handle(&self) -> tokio::runtime::Handle {
         self.io.handle().clone()
@@ -750,7 +751,8 @@ impl Pipeline {
     /// Finish assembly into a [`PipelineRuntime`], for callers that need
     /// [`shutdown_handle`](PipelineRuntime::shutdown_handle) before a
     /// spawned `run` (tests, embedded pipelines). The I/O runtime moves
-    /// into it and is shut down when `run` returns.
+    /// into it, and `run` shuts it down once the source and the feed have
+    /// closed, which can be after `run` returns.
     ///
     /// # Errors
     ///

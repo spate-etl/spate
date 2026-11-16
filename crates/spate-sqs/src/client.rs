@@ -44,13 +44,23 @@ pub(crate) async fn sdk_queue(
     credentials: Option<SharedCredentialsProvider>,
     step: &std::sync::Mutex<&'static str>,
 ) -> Result<SdkQueue, ConnectError> {
+    sdk_queue_with(config, credentials, step, SystemRoots::load).await
+}
+
+/// [`sdk_queue`], trusting what `system` yields as the system trust store.
+async fn sdk_queue_with(
+    config: &SqsFeedConfig,
+    credentials: Option<SharedCredentialsProvider>,
+    step: &std::sync::Mutex<&'static str>,
+    system: impl FnOnce() -> SystemRoots + Send + 'static,
+) -> Result<SdkQueue, ConnectError> {
     let set = |s| {
         *step
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = s
     };
     set("loading the trust roots");
-    let roots = trust_roots(SystemRoots::load, config.tls.root_ca.clone()).await?;
+    let roots = trust_roots(system, config.tls.root_ca.clone()).await?;
     let http = http_client(&roots)?;
     set("resolving the AWS region");
     let region = match config.region.clone() {
@@ -322,6 +332,41 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    /// The check for a usable root reads the endpoint the feed calls: an
+    /// `http://` `endpoint` connects on an empty store, and the region's
+    /// endpoint, which is `https://`, fails at `tls.root_ca`.
+    #[tokio::test]
+    async fn the_root_check_follows_the_endpoint_called() {
+        let connect = |endpoint: Option<&str>| {
+            let config = SqsFeedConfig {
+                queue_url: "https://sqs.eu-west-2.amazonaws.com/000000000000/jobs".to_owned(),
+                visibility: Duration::from_secs(60),
+                region: Some("eu-west-2".to_owned()),
+                endpoint: endpoint.map(str::to_owned),
+                tls: spate_core::tls::TlsSection::default(),
+            };
+            async move {
+                let step = std::sync::Mutex::new("starting");
+                let credentials =
+                    aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+                sdk_queue_with(
+                    &config,
+                    Some(SharedCredentialsProvider::new(credentials)),
+                    &step,
+                    || SystemRoots::from_certs(Vec::new()),
+                )
+                .await
+                .map(|queue| queue.root_ca_key)
+            }
+        };
+        assert_eq!(connect(Some("http://127.0.0.1:1")).await.unwrap(), None);
+        let Err(ConnectError::Config(ConfigError::Component { context, .. })) = connect(None).await
+        else {
+            panic!("expected a config error");
+        };
+        assert_eq!(context, "feed.sqs.tls.root_ca");
     }
 
     /// Service config that answers only the SQS endpoint key, with `sqs`.

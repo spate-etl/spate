@@ -41,7 +41,7 @@ use spate_core::config::UrlRule;
 use spate_core::error::chain;
 use spate_core::hash::{QualityMap, QualitySet};
 use spate_core::telemetry::RateLimit;
-use spate_core::tls::{CertificateDer, SystemRoots, TrustError, TrustRoots};
+use spate_core::tls::{CertificateDer, ClientRoots, SystemRoots, TrustError, client_roots};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -300,35 +300,21 @@ fn http_client_with(
 }
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
-/// addition to the system roots. On macOS, Windows and Android it keeps
-/// reqwest's platform verifier, which reads the system store itself.
-/// Elsewhere TLS is verified against the roots from `spate_core::tls`, and an
-/// `https://` registry with none fails.
+/// addition to the system roots, as [`client_roots`] decides. An `https://`
+/// registry with no root fails.
 fn client_builder(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
     scheme: &str,
 ) -> Result<reqwest::ClientBuilder, AvroConfigError> {
-    let builder = reqwest::Client::builder();
-    if cfg!(target_os = "android") && root_ca.is_some() {
-        return Err(AvroConfigError::Invalid {
-            detail: "registry.tls.root_ca is not supported on Android".into(),
-        });
-    }
-    if cfg!(any(target_vendor = "apple", windows, target_os = "android")) {
-        let extra = match root_ca {
-            Some(path) => spate_core::tls::read_root_ca(path).map_err(root_ca_error)?,
-            None => Vec::new(),
-        };
-        return Ok(builder.tls_certs_merge(certificates(extra)?));
-    }
     // An `http://` registry needs these roots too: a redirect to `https://`
     // or an `https://` proxy connects over TLS.
-    let mut roots = TrustRoots::load(system(), root_ca).map_err(root_ca_error)?;
-    if scheme == "https" {
-        roots = roots.require_any().map_err(root_ca_error)?;
-    }
-    Ok(builder.tls_certs_only(certificates(roots.into_certs())?))
+    let roots = client_roots(system, root_ca, scheme == "https").map_err(root_ca_error)?;
+    let builder = reqwest::Client::builder();
+    Ok(match roots {
+        ClientRoots::Add(certs) => builder.tls_certs_merge(certificates(certs)?),
+        ClientRoots::Only(certs) => builder.tls_certs_only(certificates(certs)?),
+    })
 }
 
 fn certificates(
@@ -1233,9 +1219,12 @@ mod tests {
         assert!(reason.contains("requires a client certificate"), "{reason}");
     }
 
-    #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
+    /// The client takes `system` only where `PLATFORM_VERIFIER` is unset;
+    /// elsewhere reqwest's platform verifier reads the OS store, so the tests
+    /// that inject system roots return at once.
     mod system_store {
         use super::*;
+        use spate_core::tls::PLATFORM_VERIFIER;
 
         /// An `http://` server on `127.0.0.1` that answers every request with
         /// a `307` to the same path under `target`, and returns its URL. It is
@@ -1265,6 +1254,9 @@ mod tests {
         /// the system store stays trusted.
         #[tokio::test]
         async fn root_ca_is_merged_with_the_system_roots() {
+            if PLATFORM_VERIFIER {
+                return;
+            }
             let dir = tempfile::tempdir().unwrap();
             let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
             let url = serve(&system, None).await;
@@ -1276,6 +1268,9 @@ mod tests {
         /// against the system roots.
         #[tokio::test]
         async fn an_http_registry_redirected_to_https_is_trusted() {
+            if PLATFORM_VERIFIER {
+                return;
+            }
             let registry = TestCa::new("registry");
             let target = serve(&registry, None).await;
             let url = redirect_to(target).await;
@@ -1287,6 +1282,9 @@ mod tests {
         /// roots, and rejected when it is not.
         #[tokio::test]
         async fn an_https_registry_is_verified_against_the_system_roots() {
+            if PLATFORM_VERIFIER {
+                return;
+            }
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
             let url = serve(&registry, None).await;
             let fetched = fetch(&url, None, vec![registry.der()]).await;
@@ -1296,7 +1294,8 @@ mod tests {
 
         /// An `https://` registry with no usable system root and no `root_ca`
         /// fails at client build, at `registry.tls.root_ca`, with the fixes
-        /// named.
+        /// named. With the platform verifier it builds, because that verifier
+        /// reads the OS store.
         #[test]
         fn an_https_registry_with_no_trust_root_fails() {
             let unparsable = CertificateDer::from(vec![0u8; 8]);
@@ -1307,9 +1306,12 @@ mod tests {
                     "none of the 1 certificates in the system trust store parsed",
                 ),
             ] {
-                let err = http_client_with(None, "https", || SystemRoots::from_certs(system))
-                    .expect_err("no root to verify against")
-                    .to_string();
+                let built = http_client_with(None, "https", || SystemRoots::from_certs(system));
+                if PLATFORM_VERIFIER {
+                    built.expect("the platform verifier reads the OS store");
+                    continue;
+                }
+                let err = built.expect_err("no root to verify against").to_string();
                 assert_eq!(
                     err,
                     format!(
@@ -1326,6 +1328,9 @@ mod tests {
         /// an `http://` URL refuses.
         #[tokio::test]
         async fn a_redirect_to_an_unknown_ca_omits_the_root_ca_hint() {
+            if PLATFORM_VERIFIER {
+                return;
+            }
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
             let target = serve(&registry, None).await;
             let url = redirect_to(target).await;

@@ -707,7 +707,7 @@ async fn an_empty_trust_store_fails_only_an_https_build() {
     if let Ok(url) = std::env::var(CHILD_REGISTRY_URL) {
         let https = settings_at("https://registry.invalid".into(), Duration::from_secs(30));
         let built = AvroDeserializerBuilder::from_settings(&https, &runtime);
-        if cfg!(any(target_vendor = "apple", windows)) {
+        if spate_core::tls::PLATFORM_VERIFIER {
             built.expect("the platform verifier reads the OS store");
         } else {
             let Err(err) = built else {

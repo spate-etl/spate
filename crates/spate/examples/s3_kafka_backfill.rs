@@ -36,6 +36,7 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+use spate::NO_EVENT_TIME_MS;
 use spate::feed::{Feed, Unit};
 use spate::json::NdjsonFramer;
 use spate::kafka::feed::KafkaFeed;
@@ -89,7 +90,7 @@ fn unit_over(data: &Path, name: &str) -> Result<Unit, Box<dyn std::error::Error>
         key: path.to_string_lossy().trim_start_matches('/').to_owned(),
         size: std::fs::metadata(&path)?.len(),
         etag: None,
-        last_modified_ms: 1,
+        last_modified_ms: NO_EVENT_TIME_MS,
     };
     Ok(Unit::new(
         name,

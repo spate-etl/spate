@@ -52,6 +52,7 @@ use object_store::{
 };
 use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::record::NO_EVENT_TIME_MS;
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
@@ -69,7 +70,23 @@ pub(crate) struct ObjectEntry {
     /// ETag from the listing, if the store reports one.
     pub(crate) etag: Option<String>,
     /// Last-modified time (ms since epoch), used as the records' event time.
+    /// [`NO_EVENT_TIME_MS`] when the object has none.
     pub(crate) last_modified_ms: i64,
+}
+
+/// The event time an object's records carry for a store time of `ms`
+/// milliseconds since the epoch. `object_store` gives the epoch for a HEAD with
+/// no `Last-Modified`, and no object dates from it, so the epoch reads as no
+/// event time.
+pub(crate) fn event_time_ms(ms: i64) -> i64 {
+    if ms == 0 { NO_EVENT_TIME_MS } else { ms }
+}
+
+/// The event time for an RFC 3339 time a notification or a listing carries,
+/// [`NO_EVENT_TIME_MS`] when it does not parse.
+pub(crate) fn event_time_rfc3339(t: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(t)
+        .map_or(NO_EVENT_TIME_MS, |t| event_time_ms(t.timestamp_millis()))
 }
 
 /// Messages a fetcher streams to its lane, strictly in stream order.
@@ -81,7 +98,8 @@ pub(crate) enum ChunkMsg {
         ordinal: u32,
         /// Object key.
         key: String,
-        /// The object's last-modified time (ms since epoch).
+        /// The object's last-modified time (ms since epoch), or
+        /// [`NO_EVENT_TIME_MS`] when it has none.
         last_modified_ms: i64,
     },
     /// The next bytes of the current object (at most `chunk_bytes` each).
@@ -131,7 +149,9 @@ pub(crate) struct Overwrite {
     pub(crate) etag: Option<String>,
     /// The current size in bytes.
     pub(crate) size: u64,
-    /// The current last-modified time (ms since epoch).
+    /// The current last-modified time (ms since epoch), or
+    /// [`NO_EVENT_TIME_MS`] when the HEAD carried none. The re-enqueued body
+    /// then holds no `eventTime`, since no time maps to it.
     pub(crate) last_modified_ms: i64,
 }
 
@@ -842,7 +862,7 @@ async fn head_after_overwrite(
                     key: entry.key.clone(),
                     etag,
                     size: meta.size,
-                    last_modified_ms: meta.last_modified.timestamp_millis(),
+                    last_modified_ms: event_time_ms(meta.last_modified.timestamp_millis()),
                 }));
             }
             Err(e) => {
@@ -3822,6 +3842,32 @@ mod tests {
                 last_modified_ms: 1_760_000_000_000,
             }
         );
+    }
+
+    /// Pins that the epoch, which `object_store` gives for a missing
+    /// `Last-Modified`, reads as no event time, and any other time as itself.
+    #[test]
+    fn the_epoch_reads_as_no_event_time() {
+        assert_eq!(event_time_ms(0), NO_EVENT_TIME_MS);
+        assert_eq!(event_time_ms(1), 1);
+        assert_eq!(event_time_ms(1_760_000_000_000), 1_760_000_000_000);
+    }
+
+    /// Pins that a HEAD answering at the epoch, as one with no
+    /// `Last-Modified` does, reports the overwrite with no event time.
+    #[tokio::test]
+    async fn an_overwrite_whose_head_has_no_time_carries_no_event_time() {
+        let (inner, entry) = thirty_bytes().await;
+        let answer = ObjectMeta {
+            last_modified: chrono::DateTime::UNIX_EPOCH,
+            ..meta(Some("new"), 99)
+        };
+        let store = Arc::new(HeadStore::new(inner, 2).head_answers(vec![Ok(answer)]));
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        let SplitFailure::Overwritten(overwrite) = last_failure(msgs) else {
+            panic!("not an overwrite");
+        };
+        assert_eq!(overwrite.last_modified_ms, NO_EVENT_TIME_MS);
     }
 
     /// Pins that a failed precondition on a lister's unit or on a read that

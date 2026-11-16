@@ -223,7 +223,9 @@ impl Lister {
                 key: meta.location.to_string(),
                 size: meta.size,
                 etag: meta.e_tag,
-                last_modified_ms: meta.last_modified.timestamp_millis(),
+                last_modified_ms: crate::fetch::event_time_ms(
+                    meta.last_modified.timestamp_millis(),
+                ),
             };
             let fits =
                 addressable(&entry.key) && entry.key.len() as u64 <= LOCATION_OBJECT_MAX_BYTES;
@@ -556,6 +558,7 @@ mod tests {
     use spate_core::feed::{
         Confirmer, Delivery, FeedError, FeedWaker, Receipt, Unit, confirmation,
     };
+    use spate_core::record::NO_EVENT_TIME_MS;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -2370,6 +2373,25 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, ["data/d//dbl.ndjson", "data/a"]);
+    }
+
+    /// Pins that a listed object whose `LastModified` the store sent as the
+    /// epoch is published with no event time.
+    #[test]
+    fn a_listed_object_at_the_epoch_has_no_event_time() {
+        let rt = runtime();
+        let page = list_page(&[("data/a", 7)], None)
+            .replace("2026-10-11T13:38:17.000Z", "1970-01-01T00:00:00.000Z");
+        let endpoint = crate::test_servers::listing_server(vec![page]);
+        let job = Job::new();
+        let (feed, script) = spate_test::scripted_feed();
+        stub_source(&rt, &endpoint)
+            .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+            .list_once(&scripted_section(), Arc::new(feed))
+            .unwrap();
+        let published = script.published();
+        let object = &SplitDescriptor::decode(&published[0].body).unwrap().objects[0];
+        assert_eq!(object.last_modified_ms, NO_EVENT_TIME_MS);
     }
 
     /// Pins that the end marker's log line counts each object the S3 client

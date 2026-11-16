@@ -618,10 +618,12 @@ The records read for a notification take its `eventTime` as their event time,
 or an EventBridge event's `time`, and those read for a listed object take the
 listing's `LastModified`. The
 records of a unit the source re-enqueued take the `LastModified` its HEAD
-reported. A
-notification with no event time, or one that does not parse, gives its records
-event time 0, which under `metrics.e2e_basis: event` counts their end-to-end
-latency from 1970.
+reported. A notification with no event time, or one that does not parse, gives
+its records no event time, and so does a HEAD with no `Last-Modified`. A time
+at the epoch, `1970-01-01T00:00:00Z`, also reads as no event time, since
+`object_store` reports a missing `Last-Modified` as the epoch. Under
+`metrics.e2e_basis: event`, a batch in which no record has an event time is
+aged from ingest.
 
 A notification names an object, and its read pins the ETag the notification
 carries. An object deleted before it is read fails that read on every delivery,

@@ -14,7 +14,7 @@
 //! [`re_enqueue_body`] writes the notification a worker publishes for a key
 //! overwritten while it was read.
 
-use crate::fetch::{ObjectEntry, Overwrite};
+use crate::fetch::{ObjectEntry, Overwrite, event_time_rfc3339};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
@@ -24,6 +24,7 @@ use crate::split::{
 use object_store::path::Path;
 use serde::Deserialize;
 use spate_core::feed::Unit;
+use spate_core::record::NO_EVENT_TIME_MS;
 use std::iter::Peekable;
 use std::sync::Arc;
 
@@ -715,8 +716,7 @@ fn announced_part(
     };
     let last_modified_ms = event_time
         .as_deref()
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map_or(0, |t| t.timestamp_millis());
+        .map_or(NO_EVENT_TIME_MS, event_time_rfc3339);
     let entry = ObjectEntry {
         key,
         size,
@@ -1421,9 +1421,9 @@ mod tests {
     }
 
     /// Pins that an event with no `time`, or one that does not parse as
-    /// RFC 3339, gives its records event time 0.
+    /// RFC 3339, gives its records no event time.
     #[test]
-    fn an_eventbridge_event_time_that_is_absent_or_unparsed_is_zero() {
+    fn an_eventbridge_event_time_that_is_absent_or_unparsed_is_none() {
         let mut absent = object_created("data/a.ndjson", 10);
         absent
             .as_object_mut()
@@ -1433,7 +1433,7 @@ mod tests {
         unparsed["time"] = "yesterday".into();
         for event in [absent, unparsed] {
             let parts = announced(decoded_event(&event, &scope()));
-            assert_eq!(parts[0].4, 0, "{event}");
+            assert_eq!(parts[0].4, NO_EVENT_TIME_MS, "{event}");
         }
     }
 
@@ -2002,7 +2002,8 @@ mod tests {
 
     /// Pins that a message's created records give one part each, in record
     /// order, that a qualifying object is cut into ranges, and that
-    /// `eventTime` becomes the object's time, 0 when absent or unreadable.
+    /// `eventTime` becomes the object's time, `NO_EVENT_TIME_MS` when absent
+    /// or unreadable.
     #[test]
     fn a_message_with_several_records_gives_one_part_each() {
         let parts = read(decoded(&[
@@ -2047,8 +2048,20 @@ mod tests {
             let Decoded::Read(cursors) = decoded(&[record]) else {
                 panic!("not read");
             };
-            assert_eq!(cursors[0].object[0].last_modified_ms, 0);
+            assert_eq!(cursors[0].object[0].last_modified_ms, NO_EVENT_TIME_MS);
         }
+    }
+
+    /// Pins that an `eventTime` at the epoch, as an earlier version wrote for
+    /// a re-enqueue whose HEAD had no time, reads as no event time.
+    #[test]
+    fn an_event_time_at_the_epoch_reads_as_none() {
+        let mut record = created("data/a.ndjson", 10);
+        record["eventTime"] = serde_json::json!("1970-01-01T00:00:00Z");
+        let Decoded::Read(cursors) = decoded(&[record]) else {
+            panic!("not read");
+        };
+        assert_eq!(cursors[0].object[0].last_modified_ms, NO_EVENT_TIME_MS);
     }
 
     proptest! {
@@ -2587,5 +2600,22 @@ mod tests {
             read(decode(&body, &scope(), packing())),
             [("data/a.ndjson".to_owned(), None, None)]
         );
+    }
+
+    /// Pins that a re-enqueued unit for an overwrite with no event time
+    /// decodes with none.
+    #[test]
+    fn a_re_enqueued_unit_keeps_no_event_time() {
+        let overwrite = Overwrite {
+            key: "data/a.ndjson".to_owned(),
+            etag: None,
+            size: 10,
+            last_modified_ms: NO_EVENT_TIME_MS,
+        };
+        let body = re_enqueue_body("bucket", &overwrite, 1);
+        let Decoded::Read(cursors) = decode(&body, &scope(), packing()) else {
+            panic!("not read");
+        };
+        assert_eq!(cursors[0].object[0].last_modified_ms, NO_EVENT_TIME_MS);
     }
 }

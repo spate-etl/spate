@@ -1,7 +1,8 @@
 //! Mapping `object_store` failures into the framework's error taxonomy.
 
+use crate::listing::{Hinted, TrustHint};
 use crate::unit::Origin;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::{ErrorClass, SourceError, find_source};
 use std::fmt;
 
 /// Classify an `object_store` error for a **data** operation (list / GET).
@@ -30,7 +31,7 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
     match e {
         _ if list_rejected(e)
             || delete_rejected(e)
-            || spate_core::error::find_source::<crate::listing::ListingStalled>(e).is_some()
+            || find_source::<crate::listing::ListingStalled>(e).is_some()
             || spate_core::tls_rejection!(rustls, e).is_some() =>
         {
             ErrorClass::Fatal
@@ -150,10 +151,33 @@ pub(crate) fn bounded_reason(e: &object_store::Error) -> String {
         text.push('…');
     }
     if let Some(tls) = spate_core::tls_rejection!(rustls, e) {
-        let key = crate::listing::RootCaKey::of(e);
-        text = format!("{text}: {}", spate_core::tls_reason!(rustls, tls, key));
+        let hint = find_source::<Hinted>(e).map(|hinted| hinted.hint);
+        text = format!("{text}: {}", tls_reason(tls, hint));
     }
     text
+}
+
+/// The reason for the TLS rejection `tls`, with a hint to add an unknown
+/// issuer where the client making the request trusts it: the system trust
+/// store unless `hint` says the client reads none, and its `root_ca` key.
+fn tls_reason(tls: &rustls::Error, hint: Option<TrustHint>) -> String {
+    match hint {
+        Some(TrustHint {
+            root_ca_key,
+            system_roots: false,
+        }) => match root_ca_key {
+            Some(key)
+                if matches!(
+                    tls,
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+                ) =>
+            {
+                format!("{tls}; add the issuing CA to `{key}`")
+            }
+            _ => tls.to_string(),
+        },
+        hint => spate_core::tls_reason!(rustls, tls, hint.and_then(|hint| hint.root_ca_key)),
+    }
 }
 
 /// Whether `e`, failing a read of a part from `origin`, means the key was
@@ -220,6 +244,49 @@ pub(crate) fn poison_kind(e: &object_store::Error) -> crate::lane_ctx::PoisonKin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hint for an unknown issuer names where the client takes a CA
+    /// from: the system trust store unless it reads none, and the key.
+    #[test]
+    fn the_hint_names_where_the_client_trusts_a_ca() {
+        let unknown = rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+        let expired = rustls::Error::InvalidCertificate(rustls::CertificateError::Expired);
+        let hint = |root_ca_key, system_roots| {
+            Some(TrustHint {
+                root_ca_key,
+                system_roots,
+            })
+        };
+        let key = Some("tls.root_ca");
+        let cases = [
+            (
+                &unknown,
+                None,
+                "; add the issuing CA to the system trust store",
+            ),
+            (
+                &unknown,
+                hint(key, true),
+                "; add the issuing CA to the system trust store or `tls.root_ca`",
+            ),
+            (
+                &unknown,
+                hint(None, true),
+                "; add the issuing CA to the system trust store",
+            ),
+            (
+                &unknown,
+                hint(key, false),
+                "; add the issuing CA to `tls.root_ca`",
+            ),
+            (&unknown, hint(None, false), ""),
+            (&expired, hint(key, false), ""),
+            (&expired, hint(key, true), ""),
+        ];
+        for (tls, hint, suffix) in cases {
+            assert_eq!(tls_reason(tls, hint), format!("{tls}{suffix}"), "{hint:?}");
+        }
+    }
 
     /// Pins that only a `DeleteObjects` entry refused with `AccessDenied` is
     /// fatal: another code on a delete, or `AccessDenied` on another request,

@@ -15,7 +15,7 @@
 use crate::config::{ENDPOINT_KEYS, S3SourceConfig, is_https, s3_store_key, store_endpoint};
 use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
-use crate::listing::{ClientRoots, UnaddressableConnector, UnaddressableKeys};
+use crate::listing::{ClientRoots, TrustHint, UnaddressableConnector, UnaddressableKeys};
 use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
@@ -967,10 +967,12 @@ fn build_store(
         PLATFORM_VERIFIER,
     )
     .map_err(|e| format!("source.s3.tls.root_ca: {e}"))?;
-    let root_ca_key = root_ca_key(options);
+    let hint = trust_hint(options, no_system);
     let store = builder
         .with_http_connector(
-            UnaddressableConnector::new(unaddressable.clone()).trusting(roots, root_ca_key),
+            UnaddressableConnector::new(unaddressable.clone())
+                .trusting(roots)
+                .hinting(hint),
         )
         .build()
         .map_err(|e| e.to_string())?;
@@ -998,13 +1000,17 @@ fn calls_https(builder: &AmazonS3Builder) -> bool {
         .is_none_or(|endpoint| is_https(&endpoint))
 }
 
-/// The key a rejected certificate's hint names: `tls.root_ca`, unless the
-/// `store` options set an endpoint that is not `https://`, where the config
+/// Where the client the `store` options build trusts a CA from. It reads
+/// the system trust store unless `no_system`, and takes `tls.root_ca` unless
+/// the options set an endpoint that is not `https://`, where the config
 /// refuses that key.
-fn root_ca_key(options: &std::collections::BTreeMap<String, String>) -> Option<&'static str> {
-    store_endpoint(options)
-        .is_none_or(is_https)
-        .then_some("tls.root_ca")
+fn trust_hint(options: &std::collections::BTreeMap<String, String>, no_system: bool) -> TrustHint {
+    TrustHint {
+        root_ca_key: store_endpoint(options)
+            .is_none_or(is_https)
+            .then_some("tls.root_ca"),
+        system_roots: !no_system,
+    }
 }
 
 /// Whether `builder`'s client verifies its store against the system roots
@@ -1032,7 +1038,8 @@ fn needs_root(builder: &AmazonS3Builder) -> bool {
 /// With `platform_verifier` the client keeps that verifier and adds
 /// `root_ca`'s. So does a client whose options set
 /// `disable_system_certificates`, which then trusts `root_ca`'s alone, and
-/// with none fails each `https` call at the handshake.
+/// with none fails each `https` call at the handshake unless certificate
+/// checks are off.
 ///
 /// # Errors
 ///
@@ -1322,6 +1329,39 @@ mod tests {
         assert!(build_store(&url, &options, None, unread).is_ok());
     }
 
+    /// A store built to trust `tls.root_ca` alone names only that key in the
+    /// hint for an unknown issuer.
+    #[tokio::test]
+    async fn a_built_store_names_where_its_client_trusts_a_ca() {
+        use crate::test_servers::TestCa;
+        use futures_util::StreamExt as _;
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let endpoint = crate::test_servers::serve(&server, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root_ca = other.write(dir.path());
+        let options = map(&[
+            ("endpoint", endpoint.as_str()),
+            ("aws_access_key_id", "AKIDTEST"),
+            ("aws_secret_access_key", "secret"),
+            ("region", "us-east-1"),
+            ("disable_system_certificates", "true"),
+        ]);
+        let url = Url::parse("s3://b/data/").unwrap();
+        let built = build_store(&url, &options, Some(&root_ca), unread).expect("build the store");
+        let e = built
+            .store
+            .list(None)
+            .next()
+            .await
+            .expect("an entry or an error")
+            .expect_err("the server's CA is not trusted");
+        let reason = crate::error::bounded_reason(&e);
+        assert!(
+            reason.ends_with("UnknownIssuer; add the issuing CA to `tls.root_ca`"),
+            "{reason}"
+        );
+    }
+
     /// The store is built with the config's `tls.root_ca`.
     #[test]
     fn the_store_takes_the_configs_root_ca() {
@@ -1371,14 +1411,19 @@ mod tests {
 
     /// The error a listing fails with through a store at `url`, with
     /// `roots`, `disable_system_certificates` set to `no_system`, and
-    /// `root_ca_key` named in its client's failures.
+    /// its client's failures carrying `hint`.
     async fn list_error(
         url: &str,
         roots: ClientRoots,
         no_system: bool,
-        root_ca_key: Option<&'static str>,
+        hint: Option<TrustHint>,
     ) -> object_store::Error {
         use futures_util::StreamExt as _;
+        let mut connector =
+            UnaddressableConnector::new(UnaddressableKeys::default()).trusting(roots);
+        if let Some(hint) = hint {
+            connector = connector.hinting(hint);
+        }
         let store = crate::test_servers::builder_at(url)
             .with_config(
                 AmazonS3ConfigKey::Client(ClientConfigKey::NoSystemCertificates),
@@ -1386,10 +1431,7 @@ mod tests {
             )
             .with_access_key_id("AKIDTEST")
             .with_secret_access_key("secret")
-            .with_http_connector(
-                UnaddressableConnector::new(UnaddressableKeys::default())
-                    .trusting(roots, root_ca_key),
-            )
+            .with_http_connector(connector)
             .build()
             .expect("build the S3 store");
         store
@@ -1401,10 +1443,11 @@ mod tests {
     }
 
     /// A certificate from an unknown issuer fails with a hint to add its CA
-    /// to the system trust store, or to `tls.root_ca` when the store accepts
-    /// that key. Naming the key leaves the failure's own text whole.
+    /// where the client trusts one: the system trust store unless
+    /// `disable_system_certificates` drops it, and `tls.root_ca`. The hint
+    /// leaves the failure's own text whole.
     #[tokio::test]
-    async fn an_unknown_issuer_names_root_ca_when_the_store_accepts_it() {
+    async fn an_unknown_issuer_names_where_the_client_trusts_a_ca() {
         use crate::test_servers::TestCa;
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
         let url = crate::test_servers::serve(&server, None).await;
@@ -1412,8 +1455,13 @@ mod tests {
             certs: certificates(&[other.der()]).unwrap(),
             only: true,
         };
-        let hint = "add the issuing CA to the system trust store";
-        let named = list_error(&url, roots(), false, Some("tls.root_ca")).await;
+        let system = "add the issuing CA to the system trust store";
+        let hint = |system_roots| TrustHint {
+            root_ca_key: Some("tls.root_ca"),
+            system_roots,
+        };
+        let named = list_error(&url, roots(), false, Some(hint(true))).await;
+        let narrowed = list_error(&url, roots(), true, Some(hint(false))).await;
         let plain = list_error(&url, roots(), false, None).await;
         // The request's own failure text, which naming the key leaves whole.
         let request = |e: &object_store::Error| {
@@ -1425,26 +1473,32 @@ mod tests {
         assert_eq!(request(&named), request(&plain));
         let reason = crate::error::bounded_reason(&named);
         assert!(
-            reason.ends_with(&format!("{hint} or `tls.root_ca`")),
+            reason.ends_with(&format!("{system} or `tls.root_ca`")),
+            "{reason}"
+        );
+        let reason = crate::error::bounded_reason(&narrowed);
+        assert!(
+            reason.ends_with("UnknownIssuer; add the issuing CA to `tls.root_ca`"),
             "{reason}"
         );
         let reason = crate::error::bounded_reason(&plain);
-        assert!(reason.ends_with(hint), "{reason}");
+        assert!(reason.ends_with(system), "{reason}");
     }
 
     /// The hint names `tls.root_ca` unless `store` sets an endpoint that is
-    /// not `https://`, as the config check refuses the key there.
+    /// not `https://`, as the config check refuses the key there, and the
+    /// system trust store unless `disable_system_certificates` drops it.
     #[test]
-    fn the_hint_names_root_ca_where_the_config_accepts_it() {
-        assert_eq!(root_ca_key(&map(&[])), Some("tls.root_ca"));
+    fn the_hint_names_where_the_config_lets_a_ca_in() {
+        let key = |pairs: &[(&str, &str)]| trust_hint(&map(pairs), false).root_ca_key;
+        assert_eq!(key(&[]), Some("tls.root_ca"));
         assert_eq!(
-            root_ca_key(&map(&[("endpoint", "HTTPS://127.0.0.1:9000")])),
+            key(&[("endpoint", "HTTPS://127.0.0.1:9000")]),
             Some("tls.root_ca")
         );
-        assert_eq!(
-            root_ca_key(&map(&[("endpoint", "http://127.0.0.1:9000")])),
-            None
-        );
+        assert_eq!(key(&[("endpoint", "http://127.0.0.1:9000")]), None);
+        assert!(trust_hint(&map(&[]), false).system_roots);
+        assert!(!trust_hint(&map(&[]), true).system_roots);
     }
 
     /// The client verifies a server against the roots it is given:

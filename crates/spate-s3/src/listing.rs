@@ -68,7 +68,7 @@ impl UnaddressableKeys {
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
     roots: ClientRoots,
-    root_ca_key: Option<&'static str>,
+    hint: Option<TrustHint>,
 }
 
 impl UnaddressableConnector {
@@ -76,46 +76,44 @@ impl UnaddressableConnector {
         Self {
             keys,
             roots: ClientRoots::default(),
-            root_ca_key: None,
+            hint: None,
         }
     }
 
-    /// The connector, with its client verifying TLS against `roots`, and its
-    /// failed requests naming `root_ca_key` as a [`RootCaKey`] when it is
-    /// set.
-    pub(crate) fn trusting(self, roots: ClientRoots, root_ca_key: Option<&'static str>) -> Self {
+    /// The connector, with its client verifying TLS against `roots`.
+    pub(crate) fn trusting(self, roots: ClientRoots) -> Self {
+        Self { roots, ..self }
+    }
+
+    /// The connector, with its client's failed requests carrying `hint` as a
+    /// [`Hinted`] error.
+    pub(crate) fn hinting(self, hint: TrustHint) -> Self {
         Self {
-            roots,
-            root_ca_key,
+            hint: Some(hint),
             ..self
         }
     }
 }
 
-/// A failed request from a client whose source accepts a `root_ca` key,
-/// which the hint for a rejected certificate names. Its text and source are
-/// the failure's own.
+/// Where a client's trusted CAs come from, which the hint for a rejected
+/// certificate names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrustHint {
+    /// The key that adds a CA, when the source accepts one.
+    pub(crate) root_ca_key: Option<&'static str>,
+    /// Whether the client trusts the system trust store.
+    pub(crate) system_roots: bool,
+}
+
+/// A failed request, with the [`TrustHint`] of the client that made it. Its
+/// text and source are the failure's own.
 #[derive(Debug)]
-pub(crate) struct RootCaKey {
-    key: &'static str,
+pub(crate) struct Hinted {
+    pub(crate) hint: TrustHint,
     error: HttpError,
 }
 
-impl RootCaKey {
-    /// The key a hint names for the request that failed in `e`, if any.
-    pub(crate) fn of(e: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
-        let mut next = Some(e);
-        while let Some(error) = next {
-            if let Some(tagged) = error.downcast_ref::<RootCaKey>() {
-                return Some(tagged.key);
-            }
-            next = error.source();
-        }
-        None
-    }
-}
-
-impl std::fmt::Display for RootCaKey {
+impl std::fmt::Display for Hinted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The text `HttpError` wraps, so the failure reads as it did untagged.
         match std::error::Error::source(&self.error) {
@@ -125,7 +123,7 @@ impl std::fmt::Display for RootCaKey {
     }
 }
 
-impl std::error::Error for RootCaKey {
+impl std::error::Error for Hinted {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         std::error::Error::source(&self.error)
     }
@@ -164,7 +162,7 @@ impl HttpConnector for UnaddressableConnector {
         Ok(HttpClient::new(FilteringService {
             inner,
             keys: self.keys.clone(),
-            root_ca_key: self.root_ca_key,
+            hint: self.hint,
         }))
     }
 }
@@ -173,7 +171,7 @@ impl HttpConnector for UnaddressableConnector {
 struct FilteringService {
     inner: HttpClient,
     keys: UnaddressableKeys,
-    root_ca_key: Option<&'static str>,
+    hint: Option<TrustHint>,
 }
 
 #[async_trait::async_trait]
@@ -192,8 +190,8 @@ impl HttpService for FilteringService {
             .inner
             .execute(req)
             .await
-            .map_err(|error| match self.root_ca_key {
-                Some(key) => HttpError::new(error.kind(), RootCaKey { key, error }),
+            .map_err(|error| match self.hint {
+                Some(hint) => HttpError::new(error.kind(), Hinted { hint, error }),
                 None => error,
             })?;
         if !response.status().is_success() {

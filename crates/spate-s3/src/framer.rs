@@ -87,6 +87,10 @@ impl Codec {
 
 /// One object's decode state: the codec-specific decompressor wrapping the
 /// framer's [`Write`] shim.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per framer, built once per object; a box would add an allocation per object"
+)]
 enum Sink {
     Plain(FramerWriter),
     Gzip(MultiGzDecoder<FramerWriter>),

@@ -54,8 +54,8 @@ sink:
   clickhouse:
     table: orders_local            # or db.orders_local
     shards:
-      - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
-      - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
+      - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
+      - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
     user: default
     password: ${CLICKHOUSE_PASSWORD}
     batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
@@ -140,6 +140,18 @@ authenticating over it. Keep the password out of the file with `${VAR}`
 [interpolation](../../../03-guides/configuring-pipelines.mdx#environment-interpolation).
 A replica or `distributed_check.endpoint` URL that carries credentials is
 rejected at load.
+
+A non-empty `password` with an `http://` replica or `distributed_check.endpoint`
+logs one warning when the sink is built. So does a non-empty `password` under
+`settings` with an `http://` replica: settings travel to each replica as URL
+parameters, and ClickHouse reads a `password` parameter as a login. Settings
+never reach `distributed_check.endpoint`. The pipeline keeps running, and a
+loopback host gets the same warning.
+
+```text
+sink.clickhouse.password: a replica or distributed_check.endpoint uses http://; the credential is sent without TLS
+sink.clickhouse.settings.password: a replica uses http://; the credential is sent without TLS
+```
 
 ```yaml
 sink:

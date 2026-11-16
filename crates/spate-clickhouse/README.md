@@ -28,9 +28,9 @@ sink:
     table: orders_local            # or analytics.orders_local
     database: analytics            # for an unqualified table
     shards:                        # one entry per shard
-      - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
+      - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
         weight: 1                  # Distributed-parity weight, at least 1
-      - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
+      - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
     user: spate
     password: ${CLICKHOUSE_PASSWORD}
     compression: lz4               # off | none | lz4 | zstd | zstd:<1-22>
@@ -55,6 +55,9 @@ manages (listed under [Writes and retries](#writes-and-retries)), when
 and neither the system trust store nor `tls.root_ca` holds a usable
 certificate. `tls.root_ca` names a PEM bundle
 of CAs trusted beside the system store.
+
+A non-empty `password`, or `password` under `settings`, with an `http://` URL
+loads, and logs one warning that the credential is sent without TLS.
 
 `compression` applies to the wire only. The sink compresses insert bodies on the
 pipeline threads as each chunk seals, and the table's column `CODEC`s are

@@ -1,7 +1,9 @@
-//! The counting allocator behind the allocation snapshots.
+//! The counting allocator behind the allocation snapshots and the
+//! allocation tests.
 //!
-//! A snapshot target is a harness-free `[[bench]]` binary named
-//! `benches/<name>_alloc.rs` that installs [`Counting`] as its global
+//! A test binary that installs [`Counting`] counts one stretch of its own
+//! code with [`count`]. A snapshot target is a harness-free `[[bench]]` binary
+//! named `benches/<name>_alloc.rs` that installs [`Counting`] as its global
 //! allocator and hands its cases to [`main_with`]. `cargo xtask bench alloc`
 //! runs it in the release profile and compares what it prints with the
 //! committed file.
@@ -13,6 +15,16 @@
 //!   shrinks the block.
 //! - `bytes` is the requested size of each `alloc` and `alloc_zeroed`, plus
 //!   `new_size - old_size` of each growing `realloc`.
+//!
+//! The wall-clock benches count with their own allocator,
+//! `spate_bench::alloc`. Both charge a growing `realloc` its growth in bytes,
+//! so a doubling push-loop does not read as quadratic. Their call counts
+//! differ. The bench folds a growing `realloc` into its allocation count and
+//! drops a shrinking or equal one, so a per-iteration `shrink_to_fit` does not
+//! read as an allocation regression against its floor. This one keeps
+//! `reallocs` as a figure of its own, so a test or a snapshot sees every
+//! `realloc` the code makes. The call counts of one are not compared with the
+//! other's.
 //!
 //! Freeing is not counted. Sizes are the requested `Layout` sizes, so the
 //! platform `malloc` changes no figure. Only the Rust global allocator is seen:
@@ -153,14 +165,29 @@ pub struct NotInstalled;
 /// counters unmoved.
 pub fn measure(mut f: impl FnMut()) -> Result<Counts, NotInstalled> {
     f();
+    count(f).map(|((), counts)| counts)
+}
+
+/// Runs `f` once, counted, and returns its value and what it allocated on the
+/// calling thread.
+///
+/// Nothing is warmed up first: a caller that wants the steady state runs its
+/// own uncounted passes. A `count` or [`measure`] inside `f` closes the window
+/// when it returns, so the two do not nest.
+///
+/// # Errors
+///
+/// [`NotInstalled`], with `f` not run, when an allocation inside an open
+/// window leaves the counters unmoved.
+pub fn count<R>(f: impl FnOnce() -> R) -> Result<(R, Counts), NotInstalled> {
     if !installed() {
         return Err(NotInstalled);
     }
     let before = Counts::read();
     set_window(true);
-    f();
+    let value = f();
     set_window(false);
-    Ok(Counts::read().since(before))
+    Ok((value, Counts::read().since(before)))
 }
 
 /// Whether an allocation in an open window moves the counters.
@@ -246,7 +273,9 @@ pub fn main_with(f: impl FnOnce(&mut Report)) {
 mod tests {
     use std::alloc::{GlobalAlloc, Layout};
 
-    use super::{Counting, Counts, NotInstalled, Report, WINDOW, main_with, measure, set_window};
+    use super::{
+        Counting, Counts, NotInstalled, Report, WINDOW, count, main_with, measure, set_window,
+    };
 
     fn layout(size: usize) -> Layout {
         Layout::from_size_align(size, 8).expect("valid layout")
@@ -299,6 +328,14 @@ mod tests {
         assert_eq!(measure(|| runs += 1), Err(NotInstalled));
         assert!(!WINDOW.with(std::cell::Cell::get));
         assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn count_refuses_an_allocator_that_is_not_installed() {
+        let mut runs = 0;
+        assert_eq!(count(|| runs += 1), Err(NotInstalled));
+        assert!(!WINDOW.with(std::cell::Cell::get));
+        assert_eq!(runs, 0);
     }
 
     #[test]

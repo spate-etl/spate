@@ -117,14 +117,15 @@ impl Harness {
     }
 
     /// [`Self::up`] with a three-node cluster of the selected broker. Waits
-    /// until a client sees all three nodes, since none of them is ready alone.
+    /// until a client sees all three nodes, since none of them is ready alone,
+    /// and Redpanda's leader balancer is off.
     ///
     /// # Panics
     ///
     /// When a node exits first, naming it; when the wait hangs,
-    /// with the node ids metadata last listed. On a panic while the cluster
-    /// runs, the cluster also writes each node's state, health and log tail
-    /// to stderr.
+    /// with the node ids metadata last listed; when the balancer cannot be
+    /// turned off, with rpk's output. On a panic while the cluster runs, the
+    /// cluster also writes each node's state, health and log tail to stderr.
     pub fn up_cluster() -> Self {
         let cluster = KafkaCluster::start(&spate_test::unique_name("e2e-kafka"))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -286,7 +287,8 @@ impl Harness {
         }
     }
 
-    /// Move the leadership of `topic`'s `partition` to cluster node `node`.
+    /// Begin moving the leadership of `topic`'s `partition` to cluster node
+    /// `node`. Panics when rpk begins no transfer.
     pub fn transfer_leader(&self, topic: &str, partition: i32, node: i32) {
         self.cluster()
             .transfer_leadership(topic, partition, node)

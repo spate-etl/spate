@@ -13,7 +13,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use spate_test_support::CLUSTER_NODES;
+use spate_test_support::{CLUSTER_NODES, PartitionState};
 use std::time::Duration;
 use support::*;
 
@@ -45,21 +45,24 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
     });
 
     for (node, wave) in (1..=CLUSTER_NODES).zip(waves) {
-        // Redpanda places leaders unevenly, and leaves a restarted node leading
-        // nothing until its balancer runs.
-        let states = h.partition_states(&params.topic).expect("partition states");
-        if states.iter().all(|p| p.leader != node) {
+        // Redpanda places leaders unevenly, and with its balancer off a
+        // restarted node leads nothing until a test moves a leader to it. One
+        // read decides: another node may still answer with the leaders from
+        // before a move.
+        let leads = |states: &Option<Vec<PartitionState>>| {
+            states
+                .as_ref()
+                .is_some_and(|states| states.iter().any(|p| p.leader == node))
+        };
+        if !leads(&h.partition_states(&params.topic)) {
             h.transfer_leader(&params.topic, 0, node);
-            wait_until(DEADLINE, "the moved leader", || {
-                h.partition_states(&params.topic)
-                    .is_some_and(|states| states.iter().any(|p| p.leader == node))
-            });
+            spate_test::wait_for_value(
+                DEADLINE,
+                &format!("node {node} to lead a partition"),
+                || h.partition_states(&params.topic),
+                leads,
+            );
         }
-        let states = h.partition_states(&params.topic).expect("partition states");
-        assert!(
-            states.iter().any(|p| p.leader == node),
-            "node {node} leads a partition before it stops: {states:?}"
-        );
 
         h.stop_broker(node);
         wait_until(DEADLINE, "every partition to lead elsewhere", || {

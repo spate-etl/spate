@@ -16,7 +16,7 @@ use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::{KAFKA_PORT, KafkaBroker, KafkaCluster};
+use spate_test_support::{Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -702,6 +702,77 @@ fn real_broker_an_error_source_starts_at_its_commit_after_a_clean_leader_move() 
             .is_ok_and(|(start, _)| start == 5)
     });
     assert_eq!(starts_under_error(&brokers, "retained", first), [5, 6, 7]);
+}
+
+/// On Redpanda a cluster runs with its leader balancer off, a transfer moves
+/// a partition's leader to the node it names, and a transfer the broker
+/// refuses is an error. On Apache Kafka the cluster reads no balancer flag
+/// and has no transfer.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_leadership_transfer_moves_the_leader() {
+    const ONE_REPLICA: &str = "orders-one-replica";
+    let cluster =
+        KafkaCluster::start(&spate_test::unique_name("transfer")).unwrap_or_else(|e| panic!("{e}"));
+    cluster
+        .await_brokers(Duration::from_secs(120))
+        .unwrap_or_else(|e| panic!("{e}"));
+    if Broker::selected().unwrap_or_else(|e| panic!("{e}")) != Broker::Redpanda {
+        assert_eq!(cluster.leader_balancer(), Ok(None));
+        let err = cluster.transfer_leadership(TOPIC, 0, 1).unwrap_err();
+        assert!(err.contains("Apache Kafka"), "{err}");
+        return;
+    }
+    // Node 1 reads its own copy of the cluster's configuration.
+    spate_test::wait_for_value(
+        HANG,
+        "the leader balancer off",
+        || cluster.leader_balancer().unwrap_or_else(|e| panic!("{e}")),
+        |on| *on == Some(false),
+    );
+
+    support::create_visible(
+        cluster.bootstrap(),
+        &[
+            rdkafka::admin::NewTopic::new(TOPIC, 1, rdkafka::admin::TopicReplication::Fixed(3)),
+            rdkafka::admin::NewTopic::new(
+                ONE_REPLICA,
+                1,
+                rdkafka::admin::TopicReplication::Fixed(1),
+            ),
+        ],
+    );
+    // Each decision uses the read its wait accepted.
+    let first = |topic: &str| cluster.partition_states(topic).map(|states| states[0]);
+    let settled = spate_test::wait_for_value(
+        HANG,
+        "a leader and three in sync",
+        || first(TOPIC),
+        |p| p.is_some_and(|p| p.leader > 0 && p.in_sync == 3),
+    );
+    let target = settled.expect("partition state").leader % CLUSTER_NODES + 1;
+    cluster
+        .transfer_leadership(TOPIC, 0, target)
+        .unwrap_or_else(|e| panic!("{e}"));
+    spate_test::wait_for_value(
+        HANG,
+        "the moved leader",
+        || first(TOPIC),
+        |p| p.is_some_and(|p| p.leader == target),
+    );
+
+    // A node with no replica of the partition cannot lead it.
+    let led = spate_test::wait_for_value(
+        HANG,
+        "a leader for the one replica",
+        || first(ONE_REPLICA),
+        |p| p.is_some_and(|p| p.leader > 0),
+    );
+    let outside = led.expect("partition state").leader % CLUSTER_NODES + 1;
+    let err = cluster
+        .transfer_leadership(ONE_REPLICA, 0, outside)
+        .unwrap_err();
+    assert!(err.contains("rpk began no transfer"), "{err}");
 }
 
 /// The first three offsets a source under `auto.offset.reset: error` reads

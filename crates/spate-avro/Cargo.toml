@@ -26,6 +26,7 @@ rustls = { workspace = true }
 humantime-serde = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+simdutf8 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }

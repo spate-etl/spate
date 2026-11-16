@@ -1,0 +1,3 @@
+**The datum Avro deserializer validates long strings with SIMD** (`spate-avro`)
+
+`AvroDatumDeserializer` checks that strings are valid UTF-8 with the `simdutf8` crate, which uses SIMD on x86_64 and aarch64. A string of 64 bytes or more now takes fewer instructions to validate, and the drop is largest on non-ASCII text. This also covers `bytes` and `fixed` fields decoded into a string. Previously every string was validated by the standard library, which has no SIMD path. Shorter strings still go to the standard library's check, and the value and serde deserializers are unchanged. The same input is accepted and rejected as before, with the same error messages.

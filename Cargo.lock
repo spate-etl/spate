@@ -4193,6 +4193,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "simdutf8",
  "spate-avro",
  "spate-bench",
  "spate-core",

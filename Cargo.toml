@@ -87,6 +87,9 @@ hashbrown = { version = "0.17.1", default-features = false }
 # search arrived in 2.6. Default features carry `std`, which the runtime AVX2
 # check on x86_64 needs.
 memchr = "2.7.2"
+# Default features carry `std`, which the runtime AVX2 and SSE4.2 check on
+# x86_64 needs.
+simdutf8 = "0.1.5"
 twox-hash = { version = "2.1.4", default-features = false, features = ["xxhash64"] }
 # Split identity in spate-s3. Ids are persisted and a collision drops work
 # silently, so this must resist adversarially-named keys.

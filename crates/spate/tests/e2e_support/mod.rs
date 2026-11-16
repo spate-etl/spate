@@ -48,6 +48,7 @@ use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
     CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, PartitionState, container_image, http,
+    ready,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -151,18 +152,30 @@ impl Harness {
             .with_env_var("CLICKHOUSE_PASSWORD", CH_PASSWORD)
             .start()
             .unwrap_or_else(|e| panic!("start ClickHouse container {ch_image}:{ch_tag}: {e}"));
-        let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
-        let ch_url = format!("http://127.0.0.1:{ch_port}");
         // GenericImage has no ready condition. `/ping` answers before the
         // entrypoint has necessarily applied `CLICKHOUSE_PASSWORD`, so wait for
-        // a query as the user the pipeline connects as.
-        let ch_addr = SocketAddr::from(([127, 0, 0, 1], ch_port));
+        // a query as the user the pipeline connects as. Each probe looks up
+        // the port, so a server that exits before Docker maps it fails as an
+        // exit.
         let query = format!("/?user=default&password={CH_PASSWORD}&query=SELECT%201");
-        wait_until(
-            Duration::from_secs(60),
-            "clickhouse to answer a query",
-            || http(ch_addr, "GET", &query).is_ok_and(|(status, _)| status == 200),
-        );
+        ready(
+            "ClickHouse",
+            spate_test::HANG,
+            || {
+                let port = ch
+                    .get_host_port_ipv4(8123)
+                    .map_err(|e| format!("HTTP port: {e}"))?;
+                match http(SocketAddr::from(([127, 0, 0, 1], port)), "GET", &query) {
+                    Ok((200, _)) => Ok(()),
+                    Ok((status, body)) => Err(format!("status {status}: {body}")),
+                    Err(e) => Err(e.to_string()),
+                }
+            },
+            &ch,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
+        let ch_url = format!("http://127.0.0.1:{ch_port}");
 
         let schemas: Schemas = Arc::new(Mutex::new(FastMap::from_iter([(
             SCHEMA_ID,

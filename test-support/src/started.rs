@@ -29,9 +29,10 @@ const PROBE_EVERY: Duration = Duration::from_millis(50);
 /// # Errors
 ///
 /// Fails once Docker reports the container exited, or once `deadline`
-/// passes, with the last probe's error. Before it returns the error it
-/// writes it to stderr with the last 200 lines of the container's stdout and
-/// stderr.
+/// passes, with the last probe's error. The deadline is checked after each
+/// probe returns, so a probe bounds its own call. Before it returns the error
+/// it writes it to stderr with the last 200 lines of the container's stdout
+/// and stderr.
 #[cfg(feature = "container")]
 pub fn ready(
     what: &str,
@@ -58,7 +59,7 @@ pub fn ready(
 pub async fn ready_async<I, F, Fut>(
     what: &str,
     deadline: Duration,
-    mut probe: F,
+    probe: F,
     container: &ContainerAsync<I>,
 ) -> Result<(), String>
 where
@@ -66,33 +67,22 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    let mut schedule = Schedule::new(what, deadline, Instant::now());
-    loop {
-        let failure = match probe().await {
-            Ok(()) => return Ok(()),
-            Err(failure) => failure,
-        };
-        let failed = match schedule.after_failure(&failure, Instant::now()) {
-            Err(failed) => Some(failed),
-            Ok(true) => match container.is_running().await {
-                Ok(false) => {
-                    let code = container.exit_code().await.ok().flatten();
-                    Some(schedule.ended(&exit_clause(code), &failure))
-                }
-                // Docker not answering leaves the deadline to decide.
-                _ => None,
-            },
-            Ok(false) => None,
-        };
-        if let Some(failed) = failed {
-            return Err(reported(
-                what,
-                failed,
-                container.stdout_to_vec().await,
-                container.stderr_to_vec().await,
-            ));
+    let failed = wait_async(what, deadline, probe, || async {
+        match container.is_running().await {
+            Ok(false) => Some(exit_clause(container.exit_code().await.ok().flatten())),
+            // Docker not answering leaves the deadline to decide.
+            _ => None,
         }
-        tokio::time::sleep(PROBE_EVERY).await;
+    })
+    .await;
+    match failed {
+        Ok(()) => Ok(()),
+        Err(failure) => Err(reported(
+            what,
+            failure,
+            container.stdout_to_vec().await,
+            container.stderr_to_vec().await,
+        )),
     }
 }
 
@@ -135,6 +125,36 @@ pub(crate) fn wait(
             return Err(schedule.ended(&ended, &failure));
         }
         std::thread::sleep(PROBE_EVERY);
+    }
+}
+
+/// [`wait`] with a probe and an `ended` that return futures. It yields to the
+/// runtime between probes.
+#[cfg(feature = "container")]
+pub(crate) async fn wait_async<P, PF, E, EF>(
+    what: &str,
+    deadline: Duration,
+    mut probe: P,
+    mut ended: E,
+) -> Result<(), String>
+where
+    P: FnMut() -> PF,
+    PF: Future<Output = Result<(), String>>,
+    E: FnMut() -> EF,
+    EF: Future<Output = Option<String>>,
+{
+    let mut schedule = Schedule::new(what, deadline, Instant::now());
+    loop {
+        let failure = match probe().await {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if schedule.after_failure(&failure, Instant::now())?
+            && let Some(ended) = ended().await
+        {
+            return Err(schedule.ended(&ended, &failure));
+        }
+        tokio::time::sleep(PROBE_EVERY).await;
     }
 }
 
@@ -294,6 +314,47 @@ mod tests {
         );
         assert_eq!(asked, 2);
         assert!(probes >= 2, "{probes} probes");
+    }
+
+    /// [`wait_async`] ends as [`wait`] does: ready without asking Docker, on
+    /// the deadline, and on an exit Docker reports after a retried probe.
+    #[cfg(feature = "container")]
+    #[tokio::test]
+    async fn the_async_wait_ends_as_the_blocking_one_does() {
+        let refused = || async { refused() };
+        let mut asked = 0;
+        let ready = wait_async(
+            "Store",
+            Duration::from_secs(60),
+            || async { Ok(()) },
+            || {
+                asked += 1;
+                async { None }
+            },
+        )
+        .await;
+        assert_eq!((ready, asked), (Ok(()), 0));
+        assert_eq!(
+            wait_async("ClickHouse", Duration::ZERO, refused, || async { None }).await,
+            Err("ClickHouse was not ready within 0ns: connection refused".to_owned())
+        );
+        let mut asked = 0;
+        let failure = wait_async("ClickHouse", Duration::from_secs(60), refused, || {
+            asked += 1;
+            let ended = (asked > 1).then(|| exit_clause(Some(232)));
+            async move { ended }
+        })
+        .await;
+        assert_eq!(
+            (failure, asked),
+            (
+                Err(
+                    "ClickHouse exited with code 232 before it was ready: connection refused"
+                        .to_owned()
+                ),
+                2
+            )
+        );
     }
 
     /// A failed start's report returns the failure it was given.

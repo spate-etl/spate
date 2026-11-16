@@ -20,14 +20,15 @@ use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_core::task::spawn_thread;
 use spate_test::{HANG, WriteOutcome, wait_until};
+use spate_test_s3_feed::{data_dir, recs, sorted, stage, written};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
-    bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark,
+    bounded_section, committed, direct, direct_on, exists, feed_yaml, high_watermark,
     high_watermarks, hold_open, launch, launch_bounded, launch_customized, launch_on,
-    launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
-    read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
+    launch_stopping, list_once, produce_copy, produce_raw, publish, publisher_on_mock,
+    read_attempts, read_depth, read_topic, run_to_exit,
 };
 use support::{
     Marker, MockKafka, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker,
@@ -96,7 +97,7 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
         committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(written(&worker.script), sorted(rows));
-    assert_eq!(worker.recording.seen.lock().unwrap().as_slice(), [1]);
+    assert_eq!(worker.recording.deliveries().as_slice(), [1]);
     assert_eq!(worker.stop(), ExitState::Completed);
 }
 
@@ -133,7 +134,7 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
         Unit::new("unreadable", b"not a descriptor".to_vec()),
     );
     wait_until(HANG, "the reader takes the unit", || {
-        !worker.recording.seen.lock().unwrap().is_empty()
+        !worker.recording.deliveries().is_empty()
     });
 
     clock.commit_window();
@@ -192,7 +193,7 @@ fn a_unit_that_reports_failure_reaches_the_dead_letter_topic_at_the_cap() {
             (Some("2"), Some("units/0/0"))
         ]
     );
-    assert_eq!(worker.recording.seen.lock().unwrap().as_slice(), [1, 2, 3]);
+    assert_eq!(worker.recording.deliveries().as_slice(), [1, 2, 3]);
 
     wait_until(HANG, "every offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
@@ -1039,7 +1040,7 @@ fn a_publisher_writes_the_unit_to_the_work_topic() {
     ));
     let publisher = publisher.unwrap();
     let unit = Unit::new("u", b"body".to_vec());
-    publish_to(&publisher, unit.clone());
+    spate_test_s3_feed::publish(&publisher, unit.clone());
     let read = read_topic(&brokers, WORK, 1);
     assert_eq!(read[0].key.as_deref(), Some(unit.id.as_bytes()));
     assert_eq!(read[0].payload.as_deref(), Some(&unit.body[..]));
@@ -1061,7 +1062,7 @@ fn a_publish_only_handle_charges_no_attempt() {
     let (publisher, _io) = publisher_on_mock(&yaml);
     let publisher = publisher.unwrap();
     for i in 0..3 {
-        publish_to(&publisher, Unit::new(format!("u{i}"), b"body".to_vec()));
+        spate_test_s3_feed::publish(&publisher, Unit::new(format!("u{i}"), b"body".to_vec()));
     }
     let worker = direct(&yaml);
     for _ in 0..3 {

@@ -4403,6 +4403,7 @@ dependencies = [
  "spate-kafka",
  "spate-s3",
  "spate-test",
+ "spate-test-s3-feed",
  "spate-test-support",
  "tempfile",
  "testcontainers",

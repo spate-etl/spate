@@ -263,8 +263,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // the controller thread touches the Source.
         let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
         if let Some(t) = bp.tick(&budget, queues_low) {
-            let owned: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
-            apply_transition(t, &owned, &events, &bp_metrics, &mut pause_started);
+            let owned = lanes.iter().map(SourceLane::id).collect();
+            apply_transition(t, owned, &events, &bp_metrics, &mut pause_started);
         }
         if bp.is_paused() {
             std::thread::sleep(params.poll_timeout);
@@ -354,12 +354,19 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         }
         skipped_streak = 0;
 
-        let owned_ids: Vec<LaneId> = lanes.iter().map(SourceLane::id).collect();
         // The poll result borrows the lane's buffers, so the fatal is latched
         // here and acted on once this block ends.
         let fatal_reported = {
+            // The batch holds the polled lane mutably, so a transition reads
+            // the other lanes' IDs through this split, and only when it fires.
+            let (before, rest) = lanes.split_at_mut(lane_idx);
+            let (lane, after) = rest
+                .split_first_mut()
+                .expect("lane_idx is below lanes.len()");
+            let polled_id = lane.id();
+            let owned = || lane_ids_around(before, polled_id, after);
             let poll_started = Stopwatch::start(&SystemClock);
-            let polled = lanes[lane_idx].poll(params.max_records, lane_timeout);
+            let polled = lane.poll(params.max_records, lane_timeout);
             source_metrics.poll_duration(poll_started.elapsed(&SystemClock));
 
             let mut fatal_reported = false;
@@ -384,7 +391,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         &queues,
                         &params,
                         &events,
-                        &owned_ids,
+                        &owned,
                         &health,
                         &bp_metrics,
                         &mut pause_started,
@@ -562,7 +569,7 @@ fn drive_batch(
     queues: &[ShardQueues],
     params: &DriverParams,
     events: &crossbeam_channel::Sender<DriverEvent>,
-    owned: &[LaneId],
+    owned: &dyn Fn() -> Vec<LaneId>,
     health: &HealthState,
     bp_metrics: &BackpressureMetrics,
     pause_started: &mut Option<Stopwatch>,
@@ -601,7 +608,7 @@ fn drive_batch(
                     bp.on_send_rejected();
                     let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
                     if let Some(t) = bp.tick(budget, queues_low) {
-                        apply_transition(t, owned, events, bp_metrics, pause_started);
+                        apply_transition(t, owned(), events, bp_metrics, pause_started);
                     }
                 }
                 std::thread::sleep(params.blocked_retry);
@@ -723,9 +730,20 @@ fn idle_flush(
     }
 }
 
+/// The IDs of every lane the thread holds, in rotation order, while the lane
+/// at the split is borrowed for its poll.
+fn lane_ids_around<L: SourceLane>(before: &[L], polled: LaneId, after: &[L]) -> Vec<LaneId> {
+    before
+        .iter()
+        .map(SourceLane::id)
+        .chain(std::iter::once(polled))
+        .chain(after.iter().map(SourceLane::id))
+        .collect()
+}
+
 fn apply_transition(
     t: Transition,
-    owned: &[LaneId],
+    owned: Vec<LaneId>,
     events: &crossbeam_channel::Sender<DriverEvent>,
     bp_metrics: &BackpressureMetrics,
     pause_started: &mut Option<Stopwatch>,
@@ -734,9 +752,7 @@ fn apply_transition(
         Transition::Pause => {
             *pause_started = Some(Stopwatch::start(&SystemClock));
             bp_metrics.pause_started();
-            let _ = events.send(DriverEvent::PauseLanes {
-                lanes: owned.to_vec(),
-            });
+            let _ = events.send(DriverEvent::PauseLanes { lanes: owned });
         }
         Transition::Resume => {
             let paused_for = pause_started
@@ -744,9 +760,7 @@ fn apply_transition(
                 .map(|s| s.elapsed(&SystemClock))
                 .unwrap_or_default();
             bp_metrics.pause_ended(paused_for);
-            let _ = events.send(DriverEvent::ResumeLanes {
-                lanes: owned.to_vec(),
-            });
+            let _ = events.send(DriverEvent::ResumeLanes { lanes: owned });
         }
     }
 }
@@ -754,7 +768,28 @@ fn apply_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::DefaultLane;
     use bytesize::ByteSize;
+
+    fn lanes(ids: &[u32]) -> Vec<DefaultLane> {
+        ids.iter().map(|&id| DefaultLane(LaneId(id))).collect()
+    }
+
+    /// Wherever the split falls, the IDs come back in rotation order with the
+    /// polled lane in its place.
+    #[test]
+    fn lane_ids_around_keeps_rotation_order_at_every_split() {
+        let all = vec![LaneId(0), LaneId(1), LaneId(2)];
+        assert_eq!(lane_ids_around(&lanes(&[0]), LaneId(1), &lanes(&[2])), all);
+        assert_eq!(
+            lane_ids_around(&lanes(&[]), LaneId(0), &lanes(&[1, 2])),
+            all
+        );
+        assert_eq!(
+            lane_ids_around(&lanes(&[0, 1]), LaneId(2), &lanes(&[])),
+            all
+        );
+    }
 
     /// Each setting reaches the driver field the runtime reads it from. Every
     /// value differs, so a field read from the wrong setting fails.

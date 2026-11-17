@@ -462,6 +462,42 @@ pub trait Source: Send {
     }
 }
 
+/// A lane on every provided default; its batches are never built.
+#[cfg(test)]
+pub(crate) struct DefaultLane(pub(crate) LaneId);
+
+/// The batch type `DefaultLane` names and never returns.
+#[cfg(test)]
+pub(crate) struct NoBatch;
+
+#[cfg(test)]
+impl<'a> PayloadBatch<'a> for NoBatch {
+    fn next_payload(&mut self) -> Option<RawPayload<'a>> {
+        None
+    }
+    fn ack(&self) -> &AckRef {
+        unreachable!("`DefaultLane` never returns a batch")
+    }
+}
+
+#[cfg(test)]
+impl SourceLane for DefaultLane {
+    type Batch<'a> = NoBatch;
+    fn id(&self) -> LaneId {
+        self.0
+    }
+    fn partition(&self) -> PartitionId {
+        PartitionId(0)
+    }
+    fn poll(
+        &mut self,
+        _max_records: usize,
+        _timeout: Duration,
+    ) -> Result<Option<NoBatch>, SourceError> {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SourceCtx, StopSignal};
@@ -513,44 +549,12 @@ mod tests {
         assert_eq!(ctx.threads, NonZeroUsize::new(4));
     }
 
-    /// A lane on every provided default; its batches are never built.
-    struct DefaultLane;
-
-    /// The batch type `DefaultLane` names and never returns.
-    struct NoBatch;
-
-    impl<'a> super::PayloadBatch<'a> for NoBatch {
-        fn next_payload(&mut self) -> Option<crate::record::RawPayload<'a>> {
-            None
-        }
-        fn ack(&self) -> &crate::checkpoint::AckRef {
-            unreachable!("`DefaultLane` never returns a batch")
-        }
-    }
-
-    impl super::SourceLane for DefaultLane {
-        type Batch<'a> = NoBatch;
-        fn id(&self) -> super::LaneId {
-            super::LaneId(0)
-        }
-        fn partition(&self) -> crate::record::PartitionId {
-            crate::record::PartitionId(0)
-        }
-        fn poll(
-            &mut self,
-            _max_records: usize,
-            _timeout: Duration,
-        ) -> Result<Option<NoBatch>, crate::error::SourceError> {
-            Ok(None)
-        }
-    }
-
     /// Pins that a lane which does not override `finished` reports that it
     /// has not finished, before and after a poll that returns nothing.
     #[test]
     fn a_lane_is_unfinished_unless_it_says_so() {
-        use super::SourceLane;
-        let mut lane = DefaultLane;
+        use super::{DefaultLane, LaneId, SourceLane};
+        let mut lane = DefaultLane(LaneId(0));
         assert!(!lane.finished());
         assert!(lane.poll(1, Duration::ZERO).unwrap().is_none());
         assert!(!lane.finished());

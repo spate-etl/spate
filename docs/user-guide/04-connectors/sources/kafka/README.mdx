@@ -377,8 +377,8 @@ framework invariant, not a tuning choice. See
 
 A partition leader move can leave librdkafka fetching the partition from the
 broker that led it before. Every fetch then fails with
-`NOT_LEADER_OR_FOLLOWER`, and the client never moves the partition to its
-leader ([confluentinc/librdkafka#5629](https://github.com/confluentinc/librdkafka/issues/5629)).
+`NOT_LEADER_OR_FOLLOWER`, and the client never moves the partition to its leader
+([confluentinc/librdkafka#5629](https://github.com/confluentinc/librdkafka/issues/5629)).
 The defect has been seen on Redpanda. The partition stops being consumed while
 the group stays healthy. The partition's fetch state in the statistics stays
 `active`, so `spate_kafka_source_partition_not_fetching` reads 0.

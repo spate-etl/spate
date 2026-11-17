@@ -4,6 +4,7 @@
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 
+use crate::checks::read;
 use crate::run::{Error, Outcome};
 
 /// The build output, relative to the repository root.
@@ -82,10 +83,6 @@ fn description_problems(build: &Path) -> Result<(usize, Vec<String>), Error> {
         }
     }
     Ok((urls.len(), problems))
-}
-
-fn read(path: &Path) -> Result<String, Error> {
-    std::fs::read_to_string(path).map_err(|e| Error::msg(format!("{}: {e}", path.display())))
 }
 
 /// The URLs a sitemap lists, in order.
@@ -195,15 +192,30 @@ fn description_of(html: &str) -> Option<String> {
     None
 }
 
-/// An attribute value as the page shows it. The build escapes only the quote
-/// the value is written in, as `&quot;` or `&apos;`, and writes every other
-/// character as itself.
+/// An attribute value as the page shows it, decoded in one pass. The build
+/// writes the value's own quote as `&quot;` or `&apos;`, an `&` that would
+/// read as an escape as `&amp;`, and every other character as itself.
 fn decoded(attr: &Attr<'_>) -> String {
-    match attr.quote {
-        Some('"') => attr.value.replace("&quot;", "\""),
-        Some('\'') => attr.value.replace("&apos;", "'"),
-        _ => attr.value.to_owned(),
+    let quote = match attr.quote {
+        Some('"') => Some(("&quot;", '"')),
+        Some('\'') => Some(("&apos;", '\'')),
+        _ => None,
+    };
+    let mut shown = String::with_capacity(attr.value.len());
+    let mut rest = attr.value;
+    while let Some(at) = rest.find('&') {
+        shown.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let escape = match quote {
+            Some((escape, c)) if rest.starts_with(escape) => Some((escape, c)),
+            _ => rest.starts_with("&amp;").then_some(("&amp;", '&')),
+        };
+        let (written, c) = escape.unwrap_or(("&", '&'));
+        shown.push(c);
+        rest = &rest[written.len()..];
     }
+    shown.push_str(rest);
+    shown
 }
 
 /// Fails unless `count` reaches the floor.
@@ -408,16 +420,20 @@ mod tests {
         assert_eq!(description_of(html).as_deref(), Some("a > b, and c < d"));
     }
 
-    /// Each escape is one character, decoded once, and only in the quote it
-    /// escapes.
+    /// Each escape is one character, decoded once, and a quote escape only in
+    /// the quote it escapes.
     #[test]
-    fn the_quote_escape_decodes_once() {
+    fn each_escape_decodes_once() {
         let read = |html: &str| description_of(html).unwrap();
         assert_eq!(read(r#"<meta name=description content="&quot;">"#), "\"");
         assert_eq!(read("<meta name=description content='&apos;'>"), "'");
         assert_eq!(
             read(r#"<meta name=description content="&amp;quot;">"#),
-            "&amp;quot;"
+            "&quot;"
+        );
+        assert_eq!(
+            read("<meta name=description content='R&D, &amp;lt; &amp;amp;'>"),
+            "R&D, &lt; &amp;"
         );
         assert_eq!(
             read(r#"<meta name=description content="&apos;">"#),

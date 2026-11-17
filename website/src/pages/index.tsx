@@ -12,7 +12,7 @@ import {
   Hero,
   Delivery,
   WhyFast,
-  SUBLINE,
+  META_DESCRIPTION,
 } from '../components/home/sections';
 import {faq} from '../data/faq';
 import {githubUrl} from '../repoUrl';
@@ -29,7 +29,7 @@ export default function Home(): React.JSX.Element {
       '@context': 'https://schema.org',
       '@type': 'SoftwareSourceCode',
       name: 'Spate',
-      description: SUBLINE,
+      description: META_DESCRIPTION,
       url: siteConfig.url,
       codeRepository: githubUrl,
       programmingLanguage: 'Rust',
@@ -48,7 +48,7 @@ export default function Home(): React.JSX.Element {
     },
   ];
   return (
-    <SiteLayout title={TITLE} description={SUBLINE} exactTitle className="home">
+    <SiteLayout title={TITLE} description={META_DESCRIPTION} exactTitle className="home">
       <Head>
         <script type="application/ld+json">{JSON.stringify(ld)}</script>
       </Head>

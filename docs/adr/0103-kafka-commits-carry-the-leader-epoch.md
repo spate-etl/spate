@@ -1,5 +1,5 @@
 ---
-description: "Kafka feed and source commits carry the leader epoch of the record before them, and an assignment seeks to the commit so a truncated partition is read from the point of truncation."
+description: "Kafka commits carry the leader epoch of the record before them, and an assignment seeks to the commit, so a truncated partition is read from the truncation."
 ---
 
 # ADR-0103 — Kafka commits carry the leader epoch, and an assignment validates it

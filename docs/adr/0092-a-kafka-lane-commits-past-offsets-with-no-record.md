@@ -1,5 +1,5 @@
 ---
-description: "A Kafka lane reads the position on an empty poll and retires offsets with no record through the checkpoint tracker, so lag reaches zero past a transaction marker."
+description: "A Kafka lane reads its position on an empty poll and the checkpoint tracker retires offsets with no record, so lag reaches zero past a transaction marker."
 ---
 
 # ADR-0092 — A Kafka lane retires offsets with no record through the checkpoint tracker

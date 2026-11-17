@@ -14,7 +14,7 @@ for the day it goes live:
 ```yaml
 ---
 title: Sentence-case title
-description: "What the reader learns, in 160 characters or fewer."
+description: "What the reader learns, in one or two sentences of 50 to 160 characters."
 slug: short-slug
 authors: [marcus]
 tags: [engineering]
@@ -35,7 +35,7 @@ with this front matter:
 ```yaml
 ---
 title: Spate X.Y
-description: "One sentence on what the release ships."
+description: "One sentence on what the release ships, between 50 and 160 characters long."
 slug: releases/X.Y
 authors: [marcus]
 tags: [release]
@@ -50,8 +50,8 @@ deploy from `main` does not publish it early.
 The rest is automatic. `cargo xtask release assemble` refuses an `X.Y.0`
 unless exactly one post carries `slug: releases/X.Y`, and the release commit
 removes the `draft: true` line. A `draft` key written any other way, a merge
-key (`<<`), a key that is not a plain string, or front matter that does not
-parse as YAML stops `assemble`. The post goes live at `/blog/releases/X.Y`
+key (`<<`), a key that is not a plain string, front matter that does not parse
+as YAML, or a `description` outside 50 to 160 characters stops `assemble`. The post goes live at `/blog/releases/X.Y`
 with the first site deploy after the release pull request merges, normally the
 one the release dispatches, and the GitHub release body links it.
 [`RELEASING.md`](../../RELEASING.md) has the release itself.

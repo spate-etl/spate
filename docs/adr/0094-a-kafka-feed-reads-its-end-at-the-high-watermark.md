@@ -1,5 +1,5 @@
 ---
-description: "The Kafka feed's depth client owns isolation.level at read_uncommitted, so a bounded job counts writes behind an open transaction and waits for it with no bound of its own."
+description: "The Kafka feed's depth client owns isolation.level at read_uncommitted, so a bounded job counts open-transaction writes and waits with no bound of its own."
 ---
 
 # ADR-0094 — A Kafka feed reads its end at the high watermark

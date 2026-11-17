@@ -1,5 +1,5 @@
 ---
-description: "The checks a review of a pull request runs, so you can run them first: invariants by number, a test that fails at base, mutants, reuse, docs in the same commit, the changelog fragment and the body."
+description: "The checks a pull request review runs, so you can run them first: invariants, a test that fails at base, mutants, reuse, docs, the changelog and the body."
 ---
 
 # Before you open a pull request

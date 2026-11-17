@@ -1,5 +1,5 @@
 ---
-description: "A Kafka feed partition whose group commit is above its end, as after an unclean leader election, counts from its log start and holds a bounded job with no bound of its own."
+description: "A Kafka feed partition committed above its end, as after an unclean leader election, counts from its log start and holds a bounded job with no bound of its own."
 ---
 
 # ADR-0100 — A Kafka commit above a partition's end holds a bounded job

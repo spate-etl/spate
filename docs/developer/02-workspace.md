@@ -1,5 +1,5 @@
 ---
-description: "The published crates and the unpublished members, what belongs in spate-core, where the engine's properties are written down, and where the rest of the repository lives."
+description: "The published crates and the unpublished members, what belongs in spate-core, where the engine's properties are written down, and where everything else lives."
 ---
 
 # The workspace

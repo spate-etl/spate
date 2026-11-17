@@ -113,8 +113,8 @@ Write it on a pull request and merge it before the dispatch, with
 [`handbook/blog-posts.md`](handbook/blog-posts.md) the shape and the voice.
 
 The gate and the publication are automatic. `assemble` refuses a minor release
-unless exactly one post carries the slug, and the release commit removes the
-`draft: true` line. The post goes live at `/blog/releases/X.Y` with the first
+unless exactly one post carries the slug, with a `description` of 50 to 160
+characters. The release commit removes the `draft: true` line. The post goes live at `/blog/releases/X.Y` with the first
 site deploy after the release pull request merges, normally the one the release
 dispatches. The GitHub release body links it there, under the site named by
 `[workspace.package] homepage`.

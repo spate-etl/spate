@@ -70,6 +70,10 @@ function SplitSection({
 export const HEADLINE = 'Write the transform. Spate owns delivery.';
 export const SUBLINE =
   'At-least-once streaming ETL for Rust. Transformations are ordinary functions compiled into one loop. Delivery, backpressure, checkpointing and drain belong to the framework, and each property is numbered and tested.';
+// The hero line runs past what a search result shows, so the page
+// description is a shorter one.
+export const META_DESCRIPTION =
+  'At-least-once streaming ETL for Rust. Transformations are ordinary functions; delivery, backpressure, checkpointing and drain belong to the framework.';
 
 function Section({
   id,

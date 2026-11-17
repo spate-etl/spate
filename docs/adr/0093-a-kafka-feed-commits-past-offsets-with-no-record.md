@@ -1,5 +1,5 @@
 ---
-description: "The Kafka feed reads each partition's position before a commit and raises its commit point past offsets with no record, so a bounded job ends after a transaction."
+description: "The Kafka feed reads each partition's position before a commit and commits past offsets with no record, so a bounded job ends after a transaction."
 ---
 
 # ADR-0093 — A Kafka feed commits past offsets with no record from the consumer's position

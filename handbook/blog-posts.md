@@ -77,8 +77,7 @@ terms.
 
 The `description` field is the summary search results and link previews show.
 
-- Keep it to 160 characters or fewer, which is about where search results cut
-  it.
+- Keep it to 50 to 160 characters. Search results cut it at about 160.
 - Lead with what the reader learns, with the number when there is one.
 - Name the tools the post is about.
 

@@ -39,7 +39,7 @@
 //! //     controller.on_send_rejected();
 //! //     (stash the undeliverable record; NEVER block)
 //! // - once per iteration, with a reading of whether every shard queue is
-//! //   below 50% full, which the controller calls only when it decides:
+//! //   at or below 50% full, which the controller calls only when it decides:
 //! let queues_below_low = || true;
 //! match controller.tick(&budget, queues_below_low) {
 //!     Some(Transition::Pause) => { /* source.pause(&owned_lanes) */ }
@@ -373,9 +373,10 @@ mod tests {
     }
 
     /// The queue reading costs an atomic load per shard, so it is taken only
-    /// on a tick whose answer can decide a resume.
+    /// while paused, with no rejection pending and usage at or below the low
+    /// watermark.
     #[test]
-    fn reads_the_queues_only_when_a_resume_depends_on_them() {
+    fn reads_the_queues_only_while_paused_at_or_below_low() {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         let reads = Cell::new(0);

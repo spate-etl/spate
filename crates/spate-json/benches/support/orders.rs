@@ -123,9 +123,7 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 // The records above are flat and their strings are short. A log or event
 // pipeline decodes lines of a few hundred bytes, nested two or three levels,
 // made mostly of strings, into a struct with `String`, `Vec<String>` and map
-// fields. Allocating those fields and validating those strings is most of
-// what such a decode costs, so it is the shape a choice of decode backend has
-// to be measured on.
+// fields. That is the shape a choice of decode backend is measured on.
 // ---------------------------------------------------------------------------
 
 /// std's map with std's SipHash-1-3, keyed by a fixed key in place of a fresh
@@ -133,8 +131,8 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 ///
 /// The hashing and allocation are those of the `HashMap<String, String>` a
 /// user's record declares. A random key makes the counted case vary by up to
-/// 0.8% from run to run under the `simd` backend, all of it in glibc malloc.
-/// A fixed key keeps it repeating to the instruction.
+/// 0.8% from run to run under the `simd` backend, almost all of it in glibc
+/// malloc. A fixed key keeps it repeating to the instruction.
 #[expect(
     clippy::disallowed_types,
     reason = "the bench measures decoding the std map a user's record declares"
@@ -145,7 +143,7 @@ pub(crate) type Labels =
 /// One event line: a request log entry with its host, request and client.
 ///
 /// Three objects deep (`Event`, `Request`, `Client`), with one integer among
-/// nineteen string values. `tests/bench_fixtures.rs` pins the corpus bytes and
+/// eighteen string values. `tests/bench_fixtures.rs` pins the corpus bytes and
 /// the line shape.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub(crate) struct Event {

@@ -81,7 +81,7 @@
 //!
 //! - `ndjson_events` — [`RECORDS`] lines of about 600 bytes, each a request
 //!   log entry nested three objects deep, mostly strings, decoded into a
-//!   struct with `String`, `Vec<String>` and `HashMap<String, String>` fields.
+//!   struct with `String`, `Vec<String>` and string-to-string `HashMap` fields.
 //!   That is the line a log or event pipeline decodes, and the one the choice
 //!   between the two decode backends is read on. Its framing, policy and
 //!   record count are `ndjson_clean`'s, so the pair differs in the record and

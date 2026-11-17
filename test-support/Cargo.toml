@@ -22,11 +22,12 @@ tls = [
     "dep:tokio",
     "dep:tokio-rustls",
 ]
-# `KafkaBroker`.
+# `KafkaBroker`, `SingleBroker` and `KafkaCluster`.
 kafka = ["dep:testcontainers"]
-# `KafkaCluster::await_brokers` and `partition_states`, which read the
-# cluster's metadata through a Kafka client.
-kafka-client = ["kafka", "dep:rdkafka"]
+# What a test does through a Kafka client: `create_topics`, `producer`,
+# `transactional_producer` and `send`, and `KafkaCluster::await_brokers` and
+# `partition_states`, which read the cluster's metadata.
+kafka-client = ["kafka", "dep:rdkafka", "dep:tokio"]
 # `S3Store`. A notifying store reaches the broker on `BROKER_FROM_INSIDE`.
 s3 = ["container", "kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
@@ -63,7 +64,7 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]
 name = "containers"
-required-features = ["elasticmq", "kafka", "s3"]
+required-features = ["elasticmq", "kafka-client", "s3"]
 
 [[test]]
 name = "events"

@@ -15,7 +15,10 @@
 //! drop under `on_error: skip` passes the skip warning's rate limiter, which
 //! reads the wall clock, so whether a pass emits an event depends on time.
 //! The keyed cases are left out too: hashing the key allocates nothing, so
-//! each would repeat its keyless twin's counts.
+//! each would repeat its keyless twin's counts. So is `ndjson_events`: the
+//! counted tier's DHAT rows give its allocations under both backends on both
+//! architectures, and `ndjson_clean` already holds this framing's allocations
+//! to a snapshot.
 
 use serde_json::Value;
 use spate_core::deser::Owned;

@@ -5455,14 +5455,10 @@ mod tests {
                     Ok(SourceEvent::LanesRevoked { .. })
                 )
             });
-            let committed = members[0]
-                .committed_offsets(tpl_of(&[0, 1]), Duration::from_secs(10))
-                .expect("committed");
+            let committed = spate_test_support::committed_offsets(&*members[0], "orders", 2, HANG)
+                .unwrap_or_else(|e| panic!("{e}"));
             assert!(
-                committed
-                    .elements()
-                    .iter()
-                    .all(|e| matches!(e.offset(), Offset::Offset(0))),
+                committed.iter().all(|o| matches!(o, Offset::Offset(0))),
                 "the next start reads from the start commit: {committed:?}"
             );
         }
@@ -5509,13 +5505,10 @@ mod tests {
             drop_source: impl FnOnce() + Send + 'static,
         ) -> (C, Vec<String>) {
             let (lines, captured) = mpsc::channel();
-            let returned = returns_within(HANG, move || {
-                let _ = lines.send(capture_logs(level, drop_source));
-            });
-            if !returned {
-                std::mem::forget(cluster);
-                panic!("dropping the source did not return");
-            }
+            let cluster =
+                crate::testutil::assert_returns(cluster, HANG, "dropping the source", move || {
+                    let _ = lines.send(capture_logs(level, drop_source));
+                });
             (cluster, captured.recv().expect("the captured lines"))
         }
 
@@ -5771,7 +5764,10 @@ mod tests {
             }
             other => panic!("expected the lost member's failure, got {other:?}"),
         }
-        let read_back = crate::testutil::committed_offsets(&brokers, "lost-first", "orders", 0..4);
+        let reader = spate_test_support::consumer(&brokers, &[("group.id", "lost-first")])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let read_back = spate_test_support::committed_offsets(&reader, "orders", 4, HANG)
+            .unwrap_or_else(|e| panic!("{e}"));
         for p in owned {
             assert_eq!(
                 read_back[usize::try_from(p).expect("partition")],

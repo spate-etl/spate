@@ -232,11 +232,10 @@ impl<C: Clock> WatermarkController<C> {
     /// Evaluate the state machine once per poll iteration.
     ///
     /// `queues_below_low` reads the driver's downstream queues and returns
-    /// whether all of them are below the low-watermark fill ratio. It is
+    /// whether all of them are at or below the low-watermark fill ratio. It is
     /// called at most once, and only while paused with no rejection since the
-    /// last tick and usage at or below the low watermark, the one state in
-    /// which the answer can decide a resume. Returns a transition for the
-    /// driver to apply, or `None`.
+    /// last tick and usage at or below the low watermark. Returns a transition
+    /// for the driver to apply, or `None`.
     pub fn tick(
         &mut self,
         budget: &InflightBudget,

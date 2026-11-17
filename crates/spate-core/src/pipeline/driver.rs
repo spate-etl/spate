@@ -752,8 +752,9 @@ fn split_for_poll<L: SourceLane>(
     (lane, ids)
 }
 
-/// Whether every shard queue of every installed sink is below `ratio` of its
-/// capacity, the reading the backpressure controller takes before a resume.
+/// Whether every shard queue of every installed sink is at or below `ratio`
+/// of its capacity, the reading the backpressure controller takes before a
+/// resume.
 fn queues_below_low(queues: &[ShardQueues], ratio: f64) -> bool {
     queues.iter().all(|q| q.all_below(ratio))
 }

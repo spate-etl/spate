@@ -3,7 +3,7 @@
 use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, SectionPath, UrlRule, redact};
-use spate_core::tls::TlsSection;
+use spate_core::tls::{TlsSection, is_https};
 use std::fmt;
 use std::time::Duration;
 use url::Url;
@@ -44,11 +44,6 @@ const URL: UrlRule<'static> =
 pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
     URL.check(queue_url)
         .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", e.to_string()))
-}
-
-/// Whether `url` is an `https://` URL.
-pub(crate) fn is_https(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
 }
 
 /// The keys under `feed: { sqs: … }`.

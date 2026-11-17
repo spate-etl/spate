@@ -577,6 +577,19 @@ mod tests {
     }
 
     #[test]
+    fn a_request_waits_no_longer_than_the_bound() {
+        let bound = Duration::from_secs(3);
+        let mut handed = None;
+        read_again("a read", bound, |timeout| {
+            handed = Some(timeout);
+            Ok(())
+        })
+        .unwrap();
+        let handed = handed.unwrap();
+        assert!(handed > Duration::ZERO && handed <= bound, "{handed:?}");
+    }
+
+    #[test]
     fn the_list_names_each_partition_of_the_topic() {
         let list = partition_list("t", 3);
         let named: Vec<(String, i32)> = list

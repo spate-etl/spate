@@ -150,11 +150,13 @@ fn kafka_broker_round_trips_a_record() {
     assert_eq!(payload.as_deref(), Some(&b"one"[..]));
 }
 
-/// A topic created a second time is refused with the broker's error for it.
+/// A topic created a second time is refused with the broker's error for it,
+/// on a broker reached at its host port.
 #[test]
 #[ignore = "requires Docker"]
 fn a_topic_created_twice_is_refused_the_second_time() {
     let broker = SingleBroker::start(KafkaBroker::selected()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(broker.bootstrap(), format!("127.0.0.1:{}", broker.port()));
     let topic = || NewTopic::new("twice", 1, TopicReplication::Fixed(1));
     create_topics(broker.bootstrap(), &[topic()], HANG).unwrap_or_else(|e| panic!("{e}"));
     let again = create_topics(broker.bootstrap(), &[topic()], HANG).unwrap_err();

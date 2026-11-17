@@ -10,24 +10,20 @@
 //! aliases over `std` types only, and one whole unit of a stage's work per
 //! function.
 
-use crate::admin::{HealthState, HealthThresholds};
-use crate::backpressure::{InflightBudget, WatermarkController};
 use crate::checkpoint::{AckMsg, AckRef, AdvanceCounter, PendingGate};
 use crate::clock::{Clock, TestClock};
 use crate::config::{BackpressureSection, CheckpointSection};
 use crate::error::SourceError;
-use crate::metrics::{BackpressureMetrics, ComponentLabels, SourceMetrics};
+use crate::metrics::ComponentLabels;
 use crate::ops::{PushOutcome, RunnableChain};
-use crate::pipeline::driver::{
-    DriverContext, DriverExit, DriverParams, backpressure_params, run_driver,
-};
+use crate::pipeline::driver::{Detached, DriverContext, DriverExit, run_driver};
 use crate::pipeline::{DriverEvent, RuntimeOptions, ThreadControl};
 use crate::record::{PartitionId, RawPayload};
 use crate::sink::{EncodedChunk, ShardQueues, shard_queues};
 use crate::source::{DrainBarrier, LaneId, PayloadBatch, SourceLane};
 use std::any::Any;
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -74,9 +70,30 @@ pub fn poll_loop(polls: usize, lanes: usize, shards: usize, payloads: Option<usi
     let checkpoint = CheckpointSection::default();
     let clock = TestClock::frozen();
 
-    let (control_tx, control_rx) = crossbeam_channel::unbounded();
-    let (events_tx, events_rx) = crossbeam_channel::unbounded();
     let (queues, receivers) = shard_queues(shards, QUEUE_CAPACITY);
+    let batches = Arc::new(AtomicU64::new(0));
+    let received = Arc::new(AtomicU64::new(0));
+    let (ctx, detached) = DriverContext::detached(
+        &options,
+        &backpressure,
+        &checkpoint,
+        Box::new(DrainingChain {
+            batches: Arc::clone(&batches),
+            payloads: Arc::clone(&received),
+        }),
+        vec![queues.clone()],
+        &ComponentLabels::new("bench", "driver-0", "driver"),
+        clock.clone(),
+    );
+    let Detached {
+        control: control_tx,
+        events: events_rx,
+        budget,
+        health,
+    } = detached;
+    // The run then frees the thread's last references to these, inside what
+    // the caller measures.
+    drop((budget, health));
     let barrier = DrainBarrier::new(1);
     let stop = Arc::new(Mutex::new(Some(ThreadControl::Shutdown {
         barrier: barrier.clone(),
@@ -113,27 +130,6 @@ pub fn poll_loop(polls: usize, lanes: usize, shards: usize, payloads: Option<usi
             .expect("the receiver is held below");
     }
 
-    let batches = Arc::new(AtomicU64::new(0));
-    let received = Arc::new(AtomicU64::new(0));
-    let labels = ComponentLabels::new("bench", "driver-0", "driver");
-    let ctx = DriverContext {
-        params: DriverParams::new(0, &options, &backpressure, &checkpoint),
-        control: control_rx,
-        events: events_tx,
-        chain: Box::new(DrainingChain {
-            batches: Arc::clone(&batches),
-            payloads: Arc::clone(&received),
-        }),
-        bp: WatermarkController::new(backpressure_params(&backpressure)),
-        budget: Arc::new(InflightBudget::new()),
-        queues: vec![queues.clone()],
-        health: HealthState::with_clock(1, HealthThresholds::default(), clock.clone()),
-        bp_metrics: BackpressureMetrics::new(&labels),
-        source_metrics: SourceMetrics::shadow(&labels),
-        shutdown: Arc::new(AtomicBool::new(false)),
-        clock: clock.clone(),
-        stop_clock: clock,
-    };
     // Boxed now so that returning it allocates nothing.
     let kept = Box::new(Kept {
         events: events_rx,

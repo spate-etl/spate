@@ -697,9 +697,9 @@ const CHILD_REGISTRY_URL: &str = "SPATE_TEST_AVRO_REGISTRY_URL";
 
 /// With an empty system trust store, an `http://` registry builds and
 /// decodes. An `https://` registry fails at startup with an error that names
-/// `registry.tls.root_ca` and the trust store, except on macOS and Windows,
-/// where the platform verifier reads the OS store and `SSL_CERT_FILE` does not
-/// empty it. Regression for #624.
+/// `registry.tls.root_ca` and the trust store, except where
+/// `PLATFORM_VERIFIER` is set: there the platform verifier reads the OS store
+/// and `SSL_CERT_FILE` does not empty it. Regression for #624.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_trust_store_fails_only_an_https_build() {
     const NAME: &str = "an_empty_trust_store_fails_only_an_https_build";

@@ -300,8 +300,8 @@ fn http_client_with(
 }
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
-/// addition to the system roots, as [`client_roots`] decides. An `https://`
-/// registry with no root fails.
+/// addition to the system roots, as [`client_roots`] decides. Where
+/// `PLATFORM_VERIFIER` is unset, an `https://` registry with no root fails.
 fn client_builder(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,

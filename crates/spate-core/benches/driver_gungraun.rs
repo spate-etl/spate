@@ -3,12 +3,14 @@
 //! One shape: [`poll_loop`](spate_core::bench_seams::poll_loop) runs the
 //! thread's real loop for 10,000 iterations over scripted lanes, the queues of
 //! a sink, and a chain that only drains. Every iteration heartbeats, drains the
-//! control channel, scans the shard queues for the backpressure controller,
-//! picks the next lane, checks its pending-batch gate and polls it.
+//! control channel, ticks the backpressure controller, picks the next lane,
+//! checks its pending-batch gate and polls it. An unpaused controller does not
+//! read the shard queues.
 //!
 //! - `empty_one_lane`: one lane, one shard, every poll empty. The floor.
 //! - `empty_64_lanes`: work that scales with the lanes a thread owns.
-//! - `empty_256_shards`: work that scales with the sink's shard queues.
+//! - `empty_256_shards`: a sink with many shard queues, which an unpaused
+//!   thread should not pay for. It counts close to `empty_one_lane`.
 //! - `batches_64_lanes`: every poll a batch of 16 payloads, adding the path
 //!   that pushes a batch through the chain and counts it.
 //!

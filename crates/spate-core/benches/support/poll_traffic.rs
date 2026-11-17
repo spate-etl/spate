@@ -284,7 +284,7 @@ impl Rig {
                 controller.on_send_rejected();
             }
             clock.advance(STEP);
-            if controller.tick(budget, step.queues_below_low).is_some() {
+            if controller.tick(budget, || step.queues_below_low).is_some() {
                 transitions += 1;
             }
         }

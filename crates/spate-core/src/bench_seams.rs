@@ -41,8 +41,8 @@ pub type PollLoop = Box<dyn FnOnce() -> ((u64, u64, u64, u64), Box<dyn Any + Sen
 /// Every payload a scripted batch yields.
 const PAYLOAD: &[u8] = &[b'x'; 64];
 
-/// Shard-queue capacity in chunks. Nothing is sent, so only the fill reading
-/// the queue scan takes depends on it.
+/// Shard-queue capacity in chunks. Nothing is sent and the controller never
+/// pauses, so no count depends on it.
 const QUEUE_CAPACITY: usize = 64;
 
 /// Build one pipeline thread that runs `polls` iterations of its poll loop over

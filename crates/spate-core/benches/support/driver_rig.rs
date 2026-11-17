@@ -37,7 +37,8 @@ pub(crate) const EMPTY_64_LANES: Case = Case {
     payloads: None,
 };
 
-/// Many shards, every poll empty: work that scales with the sink's queues.
+/// Many shards, every poll empty: the shard queues an unpaused thread leaves
+/// unread.
 pub(crate) const EMPTY_256_SHARDS: Case = Case {
     name: "empty_256_shards",
     lanes: 1,

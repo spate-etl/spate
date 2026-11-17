@@ -40,9 +40,11 @@ use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::producer::{BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::{ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY, reported_executable};
+use spate_test_support::{
+    ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY, producer, reported_executable, send,
+};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -383,24 +385,12 @@ fn ch_env(h: &Harness) -> Vec<(&'static str, String)> {
 /// Produce keyed payloads to `topic`, letting the client's default partitioner
 /// place them, so an example that routes on the key sees the placement a
 /// real producer would give it.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the harness seeds the topic outside the connector's client factory"
-)]
 fn produce_raw(brokers: &str, topic: &str, payloads: &[(Vec<u8>, Vec<u8>)]) {
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .create()
-        .expect("producer");
+    let producer = producer(brokers).unwrap_or_else(|e| panic!("{e}"));
+    let deadline = Instant::now() + spate_test::HANG;
     for (key, payload) in payloads {
-        loop {
-            let record = BaseRecord::to(topic).payload(payload).key(key);
-            if producer.send(record).is_ok() {
-                break;
-            }
-            producer.poll(Duration::from_millis(50));
-        }
-        producer.poll(Duration::ZERO);
+        let record = BaseRecord::to(topic).payload(payload).key(key);
+        send(&producer, record, deadline).unwrap_or_else(|e| panic!("{e}"));
     }
     producer.flush(Duration::from_secs(30)).expect("flush");
 }

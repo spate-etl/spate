@@ -57,7 +57,7 @@ source:
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). The error names the last consumer error, such as a refused connection, and how long ago it arrived. `0s` disables it, and the source waits for as long as the group takes. |
 | `assignment_timeout` | duration | `5m` | How long the source may hold no partitions, after having held some, before it reports a fatal error. The window covers all of the source's consumers together, so a consumer the group assigns nothing keeps running while another holds partitions. The deadline counts from the moment ownership is released, and any accepted assignment clears it, an empty one included, so a member the group assigns nothing keeps running. An empty assignment accepted beside an offer the source discarded clears neither deadline. The error names the last consumer error and how long ago it arrived. `0s` disables it. |
 | `misplaced_partition_timeout` | duration | `60s` | How long an owned partition may be fetched from a broker other than its leader before the source reports a fatal error. The error names the partition and both brokers. It also waits for three statistics snapshots in a row that show the partition off its leader. The check reads statistics, so `statistics_interval: 0s` turns it off, and it is off when the `rdkafka` map sets a non-empty `client.rack`. `0s` disables it. See [A partition left off its leader](#a-partition-left-off-its-leader). |
-| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal, and disabling statistics gives it up. A non-zero value under `1ms` or above `24h` is refused. |
+| `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, and turns off `misplaced_partition_timeout`, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal, and disabling statistics gives it up. A non-zero value under `1ms` or above `24h` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation except for an `auto.offset.reset` of `latest` — see below. |
 
 ## The `rdkafka` passthrough and the denylist
@@ -398,8 +398,13 @@ fetches to a follower without `client.rack`, set
 A leader move can also deadlock librdkafka's own threads
 ([confluentinc/librdkafka#5476](https://github.com/confluentinc/librdkafka/issues/5476)).
 The client then stops for good without reporting an error.
-The pipeline threads block on the client, so their heartbeats go stale and
-`/healthz` answers 503. A liveness probe on `/healthz` restarts the process, as
+A pipeline thread blocks once one of its lanes reads the partition's position
+from the client, so its heartbeat goes stale and `/healthz` answers 503.
+A lane skips that read while its last read of the partition returned an error.
+It also skips it for the client's whole life once the source has logged
+`message on the main queue; rewinding partition`.
+A deadlock in either state can leave `/healthz` at 200.
+A liveness probe on `/healthz` restarts the process, as
 [Probes and the admin server](../../../05-deployment/docker.mdx#probes-and-the-admin-server)
 describes. With `admin.listen: none` nothing reports the deadlock.
 

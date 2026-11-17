@@ -1895,8 +1895,8 @@ fn assignment_deadline_error(
 /// from a broker other than its leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Misplaced {
-    /// The `ts` of the run's first snapshot, librdkafka's monotonic clock in
-    /// microseconds.
+    /// The `ts` of the run's first snapshot, in microseconds. librdkafka reads
+    /// it from a monotonic clock on Linux and from the wall clock on macOS.
     since_ts: i64,
     snapshots: u32,
 }
@@ -2029,7 +2029,8 @@ impl Source for KafkaSource {
             tracing::warn!(
                 topic = %self.config.topic,
                 "statistics disabled (statistics_interval: 0s): consumer lag \
-                 and the spate_kafka_source_* families will not be published"
+                 and the spate_kafka_source_* families will not be published, \
+                 and misplaced_partition_timeout is off"
             );
         }
         let mut members = Vec::new();

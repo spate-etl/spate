@@ -192,11 +192,12 @@ pub struct KafkaSourceConfig {
     pub misplaced_partition_timeout: Duration,
     /// librdkafka statistics emission interval, feeding the lag metrics and
     /// the connector's `spate_kafka_source_*` families (broker health,
-    /// latency, queue saturation, group stability). Zero disables statistics
-    /// and those families with it. librdkafka reads the value in whole
-    /// milliseconds up to 24h, so [`validate`](Self::validate) refuses a
-    /// non-zero value under 1ms or above 24h. [The metrics reference]
-    /// tabulates them under Kafka source.
+    /// latency, queue saturation, group stability), and the check behind
+    /// [`misplaced_partition_timeout`](Self::misplaced_partition_timeout).
+    /// Zero disables statistics, and those families and that check with it.
+    /// librdkafka reads the value in whole milliseconds up to 24h, so
+    /// [`validate`](Self::validate) refuses a non-zero value under 1ms or above
+    /// 24h. [The metrics reference] tabulates them under Kafka source.
     ///
     /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]

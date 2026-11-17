@@ -118,6 +118,62 @@ pub(crate) struct DriverContext<L> {
     pub stop_clock: Arc<dyn Clock + Send + Sync>,
 }
 
+/// The ends of a [`DriverContext::detached`] thread that its caller drives.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) struct Detached<L> {
+    pub control: crossbeam_channel::Sender<ThreadControl<L>>,
+    pub events: crossbeam_channel::Receiver<DriverEvent>,
+    pub budget: Arc<InflightBudget>,
+    pub health: Arc<HealthState>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl<L> DriverContext<L> {
+    /// Driver thread 0 with no runtime around it, on `clock`, and the ends its
+    /// caller drives.
+    ///
+    /// It runs `chain` over `queues` with the given settings. The thread owns
+    /// a fresh in-flight budget and health state, its metrics carry `labels`,
+    /// and its shutdown flag stays unset.
+    pub(crate) fn detached(
+        options: &RuntimeOptions,
+        backpressure: &BackpressureSection,
+        checkpoint: &CheckpointSection,
+        chain: Box<dyn RunnableChain>,
+        queues: Vec<ShardQueues>,
+        labels: &crate::metrics::ComponentLabels,
+        clock: Arc<crate::clock::TestClock>,
+    ) -> (Self, Detached<L>) {
+        let (control_tx, control) = crossbeam_channel::unbounded();
+        let (events, events_rx) = crossbeam_channel::unbounded();
+        let budget = Arc::new(InflightBudget::new());
+        let health =
+            HealthState::with_clock(1, crate::admin::HealthThresholds::default(), clock.clone());
+        let ctx = DriverContext {
+            params: DriverParams::new(0, options, backpressure, checkpoint),
+            control,
+            events,
+            chain,
+            bp: WatermarkController::new(backpressure_params(backpressure)),
+            budget: Arc::clone(&budget),
+            queues,
+            health: Arc::clone(&health),
+            bp_metrics: BackpressureMetrics::new(labels),
+            source_metrics: SourceMetrics::shadow(labels),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            clock: clock.clone(),
+            stop_clock: clock,
+        };
+        let detached = Detached {
+            control: control_tx,
+            events: events_rx,
+            budget,
+            health,
+        };
+        (ctx, detached)
+    }
+}
+
 /// Run one driver thread to completion.
 pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     let DriverContext {
@@ -783,14 +839,108 @@ fn apply_transition(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::source::DefaultLane;
+    use crate::admin::HealthThresholds;
+    use crate::clock::TestClock;
+    use crate::metrics::ComponentLabels;
+    use crate::pipeline::fakes::{ChainMode, ChainShared, FakeChain, SourceLog};
+    use crate::source::{DefaultLane, DrainBarrier};
     use bytesize::ByteSize;
+    use spate_test::{HANG, wait_until};
+    use std::sync::Mutex;
 
     fn lanes(ids: &[u32]) -> Vec<DefaultLane> {
         ids.iter().map(|&id| DefaultLane(LaneId(id))).collect()
+    }
+
+    /// A paused thread stays paused while a sink queue is above the low ratio,
+    /// with the budget already drained, and resumes once the queue is down to
+    /// it.
+    #[test]
+    fn full_shard_queues_hold_a_pause() {
+        const BUDGET: u64 = 1_000;
+        let clock = TestClock::frozen();
+        let options = RuntimeOptions {
+            poll_timeout: Duration::from_millis(1),
+            ..RuntimeOptions::default()
+        };
+        // No minimum pause, so only the budget and the queues decide a resume.
+        let backpressure = BackpressureSection {
+            max_inflight_bytes: ByteSize::b(BUDGET),
+            high_ratio: 0.8,
+            low_ratio: 0.5,
+            min_pause: Duration::ZERO,
+        };
+        // Four slots at a ratio of 0.5: three queued is above it, two is at it.
+        let (queues, mut receivers) = crate::sink::shard_queues(1, 4);
+        for _ in 0..3 {
+            queues.try_send(0, crate::sink::test_chunk()).unwrap();
+        }
+        let shared = Arc::new(ChainShared::default());
+        let chain = FakeChain {
+            shared: Arc::clone(&shared),
+            log: Arc::new(Mutex::new(SourceLog::default())),
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        };
+        let (ctx, driver) = DriverContext::<DefaultLane>::detached(
+            &options,
+            &backpressure,
+            &CheckpointSection::default(),
+            Box::new(chain),
+            vec![queues],
+            &ComponentLabels::new("full-queues-hold-a-pause", "driver-0", "driver"),
+            clock.clone(),
+        );
+        let thread = crate::task::spawn_thread("full-queues", move || run_driver(ctx)).unwrap();
+
+        // A failed assertion is caught so the thread still gets its
+        // `Shutdown`; the handle joins it on drop.
+        let checked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            driver.budget.add(usize::try_from(BUDGET).unwrap());
+            assert!(matches!(
+                driver.events.recv_timeout(HANG),
+                Ok(DriverEvent::PauseLanes { .. })
+            ));
+            driver.budget.sub(usize::try_from(BUDGET).unwrap());
+
+            // The channel orders the release before the tick of the pass that
+            // serves this flush.
+            driver.control.send(ThreadControl::FlushNow).unwrap();
+            wait_until(HANG, "the thread serves the flush", || {
+                shared.flushes.load(Ordering::Relaxed) >= 1
+            });
+            // That pass heartbeat before it read the flush, so a heartbeat on the
+            // moved clock comes from a later pass, after the tick.
+            clock.advance(HealthThresholds::default().heartbeat_stale + Duration::from_millis(1));
+            wait_until(HANG, "the thread starts another pass", || {
+                driver.health.healthy()
+            });
+            assert!(
+                driver.events.try_recv().is_err(),
+                "resumed with three of four slots queued"
+            );
+
+            receivers[0].try_recv().unwrap();
+            assert!(matches!(
+                driver.events.recv_timeout(HANG),
+                Ok(DriverEvent::ResumeLanes { .. })
+            ));
+        }));
+        driver
+            .control
+            .send(ThreadControl::Shutdown {
+                barrier: DrainBarrier::new(1),
+                deadline: clock.now(),
+            })
+            .unwrap();
+        let exit = thread.join().unwrap();
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(exit, DriverExit::Completed);
     }
 
     /// The reading is true only when every queue of every sink is at or below

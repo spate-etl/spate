@@ -7,3 +7,13 @@
 id = "RUSTSEC-2026-0440"
 ignoreUntil = 2027-04-27
 reason = "astral-tokio-tar 0.6.3 is unmaintained, and no version is patched. It reaches this tree only through testcontainers, a dev-dependency of the test suites, so no published crate ships it. Remove this entry in the change that moves testcontainers to a release without the crate."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-05-17
+reason = "chrono is unmaintained, no version is patched, and no vulnerability is reported against it. object_store depends on it at its newest release, 0.14.2, so no change in this workspace removes it. Remove this entry once object_store and the workspace crates no longer depend on chrono."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0542"
+ignoreUntil = 2027-05-17
+reason = "humantime is unmaintained, no version is patched, and no vulnerability is reported against it. object_store depends on it at its newest release, 0.14.2, and humantime-serde wraps it for the config durations. Remove this entry once object_store and the workspace crates no longer depend on humantime."

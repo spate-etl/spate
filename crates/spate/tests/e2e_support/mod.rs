@@ -25,9 +25,9 @@
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use rdkafka::ClientConfig;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::admin::{NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::producer::{BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
 use spate::clickhouse::{ClickHouseEncoder, config};
@@ -39,10 +39,11 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
+use spate_test::HANG;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
-    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, PartitionState, RegistryStub,
-    container_image, http, ready,
+    CLUSTER_NODES, KafkaBroker, KafkaCluster, PartitionState, RegistryStub, SingleBroker,
+    container_image, create_topics, http, producer, ready, send, transactional_producer,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -51,7 +52,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
@@ -76,12 +77,12 @@ pub fn event_id(partition: i32, seq: i64) -> i64 {
 
 /// The Kafka containers a harness runs.
 enum Brokers {
-    One(Box<Container<KafkaBroker>>),
+    One(Box<SingleBroker>),
     Cluster(KafkaCluster),
 }
 
 pub struct Harness {
-    /// Runtime for ClickHouse queries and Kafka admin.
+    /// Runtime for ClickHouse queries.
     pub rt: tokio::runtime::Runtime,
     kafka: Brokers,
     replication: i32,
@@ -100,13 +101,9 @@ impl Harness {
     /// Start Kafka + ClickHouse + the stub schema registry. Slow on first
     /// use (image pulls); panics with context on any failure.
     pub fn up() -> Self {
-        let kafka = KafkaBroker::selected().transactional();
-        let broker = kafka.broker();
-        let kafka = kafka
-            .start()
-            .unwrap_or_else(|e| panic!("start {broker} container: {e}"));
-        let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
-        let brokers = format!("127.0.0.1:{kafka_port}");
+        let kafka = SingleBroker::start(KafkaBroker::selected().transactional())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let brokers = kafka.bootstrap().to_owned();
         Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
     }
 
@@ -264,7 +261,7 @@ impl Harness {
 
     fn single_broker(&self) -> &Container<KafkaBroker> {
         match &self.kafka {
-            Brokers::One(kafka) => kafka,
+            Brokers::One(kafka) => kafka.container(),
             Brokers::Cluster(_) => panic!("the scenario runs a cluster"),
         }
     }
@@ -310,38 +307,22 @@ impl Harness {
     }
 
     /// Produce `events` to `topic` in one transaction, and commit or abort it.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the harness seeds the topic outside the connector's client factory"
-    )]
     pub fn produce_transaction(&self, topic: &str, events: &[(i32, Event)], commit: bool) {
         const TIMEOUT: Duration = Duration::from_secs(60);
         let first = events.first().expect("a transaction has records");
-        let producer: BaseProducer = ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .set("transactional.id", format!("{topic}-{}", first.1.id))
-            .create()
-            .expect("transactional producer");
-        producer.init_transactions(TIMEOUT).expect("init");
+        let id = format!("{topic}-{}", first.1.id);
+        let producer =
+            transactional_producer(&self.brokers, &id, TIMEOUT).unwrap_or_else(|e| panic!("{e}"));
         producer.begin_transaction().expect("begin");
+        let deadline = Instant::now() + HANG;
         for (partition, event) in events {
             let payload = self.confluent_frame(event);
             let key = event.id.to_string();
-            loop {
-                match producer.send(
-                    BaseRecord::to(topic)
-                        .partition(*partition)
-                        .payload(&payload)
-                        .key(key.as_bytes()),
-                ) {
-                    Ok(()) => break,
-                    // Local queue full: give librdkafka a beat to flush.
-                    Err(_) => {
-                        producer.poll(Duration::from_millis(50));
-                    }
-                }
-            }
-            producer.poll(Duration::ZERO);
+            let record = BaseRecord::to(topic)
+                .partition(*partition)
+                .payload(&payload)
+                .key(key.as_bytes());
+            send(&producer, record, deadline).unwrap_or_else(|e| panic!("{e}"));
         }
         if commit {
             producer.commit_transaction(TIMEOUT).expect("commit");
@@ -390,61 +371,26 @@ impl Harness {
         end - 2
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the harness administers the broker outside the connector's client factory"
-    )]
+    /// Create `topic` with `partitions` partitions and wait until the broker
+    /// lists it.
     pub fn create_topic(&self, topic: &str, partitions: i32) {
-        let admin: AdminClient<_> = ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .create()
-            .expect("admin client");
-        self.rt
-            .block_on(admin.create_topics(
-                &[NewTopic::new(
-                    topic,
-                    partitions,
-                    TopicReplication::Fixed(self.replication),
-                )],
-                &AdminOptions::new(),
-            ))
-            .expect("create topic")
-            .into_iter()
-            .for_each(|r| {
-                r.expect("topic created");
-            });
+        let topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(self.replication));
+        create_topics(&self.brokers, &[topic], HANG).unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// Produce Confluent-framed Avro events, keyed by record id (the key
     /// drives shard routing). `events` are (partition, Event) pairs.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the harness seeds the topic outside the connector's client factory"
-    )]
     pub fn produce(&self, topic: &str, events: &[(i32, Event)]) {
-        let producer: BaseProducer = ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .create()
-            .expect("producer");
+        let producer = producer(&self.brokers).unwrap_or_else(|e| panic!("{e}"));
+        let deadline = Instant::now() + HANG;
         for (partition, event) in events {
             let payload = self.confluent_frame(event);
             let key = event.id.to_string();
-            loop {
-                match producer.send(
-                    BaseRecord::to(topic)
-                        .partition(*partition)
-                        .payload(&payload)
-                        .key(key.as_bytes()),
-                ) {
-                    Ok(()) => break,
-                    // Local queue full: give librdkafka a beat to flush.
-                    Err((e, _)) => {
-                        producer.poll(Duration::from_millis(50));
-                        let _ = e;
-                    }
-                }
-            }
-            producer.poll(Duration::ZERO);
+            let record = BaseRecord::to(topic)
+                .partition(*partition)
+                .payload(&payload)
+                .key(key.as_bytes());
+            send(&producer, record, deadline).unwrap_or_else(|e| panic!("{e}"));
         }
         producer
             .flush(Duration::from_secs(30))
@@ -453,28 +399,17 @@ impl Harness {
 
     /// A payload that fails Avro decoding (valid Confluent header, torn
     /// datum), exercising the deserializer's Skip policy.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the harness seeds the topic outside the connector's client factory"
-    )]
     pub fn produce_poison(&self, topic: &str, partition: i32, n: usize) {
-        let producer: BaseProducer = ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .create()
-            .expect("producer");
+        let producer = producer(&self.brokers).unwrap_or_else(|e| panic!("{e}"));
         // Torn varint string: length 5, no bytes.
         let frame = spate_test::confluent_frame(SCHEMA_ID, &[0x0B]);
+        let deadline = Instant::now() + HANG;
         for _ in 0..n {
-            producer
-                .send(
-                    BaseRecord::to(topic)
-                        .partition(partition)
-                        .payload(&frame)
-                        .key(b"poison"),
-                )
-                .map_err(|(e, _)| e)
-                .expect("send poison");
-            producer.poll(Duration::ZERO);
+            let record = BaseRecord::to(topic)
+                .partition(partition)
+                .payload(&frame)
+                .key(b"poison");
+            send(&producer, record, deadline).expect("send poison");
         }
         producer.flush(Duration::from_secs(30)).expect("flush");
     }

@@ -18,6 +18,7 @@ mod kafka;
 #[cfg(feature = "kafka-client")]
 mod kafka_client;
 mod registry_stub;
+mod returns;
 #[cfg(feature = "s3")]
 mod s3;
 mod s3_stub;
@@ -41,8 +42,12 @@ pub use kafka::{
     BROKER_FROM_INSIDE, Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, SingleBroker,
 };
 #[cfg(feature = "kafka-client")]
-pub use kafka_client::{create_topics, producer, send, transactional_producer};
+pub use kafka_client::{
+    committed, committed_offsets, consumer, create_topics, from_start, high_watermark, producer,
+    send, transactional_producer,
+};
 pub use registry_stub::{RegistryRequest, RegistryStub};
+pub use returns::{assert_returns, returns_within};
 #[cfg(feature = "s3")]
 pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 pub use s3_stub::{

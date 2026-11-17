@@ -40,6 +40,8 @@ pub use config::{
 };
 pub use failures::SinkFailures;
 pub use pool::{DrainReport, SinkPool};
+#[cfg(all(test, not(loom)))]
+pub(crate) use queue::test_chunk;
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
 
 /// Boxed sink drain hook: budget in, report out. Produced by sink

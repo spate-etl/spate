@@ -38,8 +38,9 @@
 //! // - when a try_send to a shard queue is rejected:
 //! //     controller.on_send_rejected();
 //! //     (stash the undeliverable record; NEVER block)
-//! // - once per iteration:
-//! let queues_below_low = true; // driver-provided: all shard queues < 50% full
+//! // - once per iteration, with a reading of whether every shard queue is
+//! //   at or below 50% full, which the controller calls only when it decides:
+//! let queues_below_low = || true;
 //! match controller.tick(&budget, queues_below_low) {
 //!     Some(Transition::Pause) => { /* source.pause(&owned_lanes) */ }
 //!     Some(Transition::Resume) => { /* source.resume(&owned_lanes) */ }
@@ -230,10 +231,16 @@ impl<C: Clock> WatermarkController<C> {
 
     /// Evaluate the state machine once per poll iteration.
     ///
-    /// `queues_below_low` is the driver's view of its downstream queues
-    /// (all below the low-watermark fill ratio). Returns a transition for
-    /// the driver to apply, or `None`.
-    pub fn tick(&mut self, budget: &InflightBudget, queues_below_low: bool) -> Option<Transition> {
+    /// `queues_below_low` reads the driver's downstream queues and returns
+    /// whether all of them are at or below the low-watermark fill ratio. It is
+    /// called at most once, and only while paused with no rejection since the
+    /// last tick and usage at or below the low watermark. Returns a transition
+    /// for the driver to apply, or `None`.
+    pub fn tick(
+        &mut self,
+        budget: &InflightBudget,
+        queues_below_low: impl FnOnce() -> bool,
+    ) -> Option<Transition> {
         match self.state {
             State::Normal => {
                 if self.rejected || budget.usage() >= self.params.high_bytes {
@@ -254,7 +261,7 @@ impl<C: Clock> WatermarkController<C> {
                     self.rejected = false;
                     return None;
                 }
-                let drained = budget.usage() <= self.params.low_bytes && queues_below_low;
+                let drained = budget.usage() <= self.params.low_bytes && queues_below_low();
                 if drained && self.clock.now().duration_since(since) >= self.params.min_pause {
                     self.state = State::Normal;
                     Some(Transition::Resume)
@@ -282,6 +289,7 @@ impl<C: Clock> WatermarkController<C> {
 mod tests {
     use super::*;
     use crate::clock::TestClock;
+    use std::cell::Cell;
 
     const MIN_PAUSE: Duration = Duration::from_millis(500);
 
@@ -316,9 +324,9 @@ mod tests {
     fn rejection_pauses_on_next_tick() {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
-        assert_eq!(ctl.tick(&budget, true), None);
+        assert_eq!(ctl.tick(&budget, || true), None);
         ctl.on_send_rejected();
-        assert_eq!(ctl.tick(&budget, true), Some(Transition::Pause));
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
         assert!(ctl.is_paused());
     }
 
@@ -327,7 +335,7 @@ mod tests {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         budget.add(800);
-        assert_eq!(ctl.tick(&budget, true), Some(Transition::Pause));
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
     }
 
     #[test]
@@ -335,9 +343,9 @@ mod tests {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
-        ctl.tick(&budget, true);
+        ctl.tick(&budget, || true);
         clock.advance(MIN_PAUSE - Duration::from_millis(1));
-        assert_eq!(ctl.tick(&budget, true), None, "drained but too early");
+        assert_eq!(ctl.tick(&budget, || true), None, "drained but too early");
     }
 
     #[test]
@@ -345,12 +353,12 @@ mod tests {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         budget.add(900);
-        ctl.tick(&budget, true);
+        ctl.tick(&budget, || true);
         clock.advance(MIN_PAUSE * 2);
         budget.sub(300); // 600 > low (500)
-        assert_eq!(ctl.tick(&budget, true), None);
+        assert_eq!(ctl.tick(&budget, || true), None);
         budget.sub(200); // 400 <= low
-        assert_eq!(ctl.tick(&budget, true), Some(Transition::Resume));
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
     }
 
     #[test]
@@ -358,10 +366,42 @@ mod tests {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
-        ctl.tick(&budget, true);
+        ctl.tick(&budget, || true);
         clock.advance(MIN_PAUSE * 2);
-        assert_eq!(ctl.tick(&budget, false), None);
-        assert_eq!(ctl.tick(&budget, true), Some(Transition::Resume));
+        assert_eq!(ctl.tick(&budget, || false), None);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// The queue reading costs an atomic load per shard, so it is taken only
+    /// while paused, with no rejection pending and usage at or below the low
+    /// watermark.
+    #[test]
+    fn reads_the_queues_only_while_paused_at_or_below_low() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        let reads = Cell::new(0);
+        let reading = || {
+            reads.set(reads.get() + 1);
+            true
+        };
+
+        assert_eq!(ctl.tick(&budget, reading), None);
+        assert_eq!(reads.get(), 0, "running");
+        ctl.on_send_rejected();
+        assert_eq!(ctl.tick(&budget, reading), Some(Transition::Pause));
+        assert_eq!(reads.get(), 0, "pausing on a rejection");
+        ctl.on_send_rejected();
+        assert_eq!(ctl.tick(&budget, reading), None);
+        assert_eq!(reads.get(), 0, "paused with a rejection pending");
+        budget.add(501);
+        assert_eq!(ctl.tick(&budget, reading), None);
+        assert_eq!(reads.get(), 0, "paused above the low watermark");
+        budget.sub(1); // exactly low
+        assert_eq!(ctl.tick(&budget, reading), None, "drained but too early");
+        assert_eq!(reads.get(), 1, "paused at the low watermark");
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, reading), Some(Transition::Resume));
+        assert_eq!(reads.get(), 2, "resuming");
     }
 
     #[test]
@@ -369,13 +409,13 @@ mod tests {
         let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
-        ctl.tick(&budget, true);
+        ctl.tick(&budget, || true);
         clock.advance(MIN_PAUSE - Duration::from_millis(1));
         ctl.on_send_rejected(); // congestion evidence: restart
         clock.advance(Duration::from_millis(2)); // past original deadline
-        assert_eq!(ctl.tick(&budget, true), None);
+        assert_eq!(ctl.tick(&budget, || true), None);
         clock.advance(MIN_PAUSE);
-        assert_eq!(ctl.tick(&budget, true), Some(Transition::Resume));
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
     }
 
     #[test]
@@ -393,7 +433,7 @@ mod tests {
             if !ctl.is_paused() {
                 ctl.on_send_rejected();
             }
-            if let Some(t) = ctl.tick(&budget, true) {
+            if let Some(t) = ctl.tick(&budget, || true) {
                 transitions.push(t);
             }
             clock.advance(step);
@@ -473,7 +513,7 @@ mod tests {
                         Op::Reject => ctl.on_send_rejected(),
                         Op::Advance(ms) => clock.advance(Duration::from_millis(ms)),
                         Op::Tick => {
-                            if let Some(t) = ctl.tick(&budget, true) {
+                            if let Some(t) = ctl.tick(&budget, || true) {
                                 transitions.push(t);
                             }
                         }
@@ -498,14 +538,14 @@ mod tests {
                         Op::Sub(n) => budget.sub(n),
                         Op::Reject => ctl.on_send_rejected(),
                         Op::Advance(ms) => clock.advance(Duration::from_millis(ms)),
-                        Op::Tick => { let _ = ctl.tick(&budget, true); }
+                        Op::Tick => { let _ = ctl.tick(&budget, || true); }
                     }
                 }
                 // Drain the world and go quiet.
                 budget.sub(budget.usage());
-                let _ = ctl.tick(&budget, true); // consume any pending rejection
+                let _ = ctl.tick(&budget, || true); // consume any pending rejection
                 clock.advance(MIN_PAUSE * 2);
-                let _ = ctl.tick(&budget, true);
+                let _ = ctl.tick(&budget, || true);
                 prop_assert!(!ctl.is_paused(), "controller wedged in Paused");
             }
         }

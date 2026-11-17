@@ -261,7 +261,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 
         // 2. Backpressure transitions. Pause/resume are *requests*; only
         // the controller thread touches the Source.
-        let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
+        let queues_low = || queues_below_low(&queues, params.queue_low_ratio);
         if let Some(t) = bp.tick(&budget, queues_low) {
             let owned = lanes.iter().map(SourceLane::id).collect();
             apply_transition(t, owned, &events, &bp_metrics, &mut pause_started);
@@ -599,7 +599,7 @@ fn drive_batch(
                 // not-ready wait is counted by the chain and retried.
                 if reason == BlockReason::Capacity {
                     bp.on_send_rejected();
-                    let queues_low = queues.iter().all(|q| q.all_below(params.queue_low_ratio));
+                    let queues_low = || queues_below_low(queues, params.queue_low_ratio);
                     if let Some(t) = bp.tick(budget, queues_low) {
                         apply_transition(t, owned(), events, bp_metrics, pause_started);
                     }
@@ -752,6 +752,13 @@ fn split_for_poll<L: SourceLane>(
     (lane, ids)
 }
 
+/// Whether every shard queue of every installed sink is at or below `ratio`
+/// of its capacity, the reading the backpressure controller takes before a
+/// resume.
+fn queues_below_low(queues: &[ShardQueues], ratio: f64) -> bool {
+    queues.iter().all(|q| q.all_below(ratio))
+}
+
 fn apply_transition(
     t: Transition,
     owned: Vec<LaneId>,
@@ -784,6 +791,21 @@ mod tests {
 
     fn lanes(ids: &[u32]) -> Vec<DefaultLane> {
         ids.iter().map(|&id| DefaultLane(LaneId(id))).collect()
+    }
+
+    /// The reading is true only when every queue of every sink is at or below
+    /// the ratio, and true with no sink installed.
+    #[test]
+    fn queues_below_low_needs_every_sinks_queues_below_the_ratio() {
+        let (first, _first_rx) = crate::sink::shard_queues(1, 2);
+        let (second, _second_rx) = crate::sink::shard_queues(1, 2);
+        let both = [first.clone(), second.clone()];
+        assert!(queues_below_low(&[], 0.5), "no sink installed");
+        assert!(queues_below_low(&both, 0.5), "both empty");
+        second.try_send(0, crate::sink::test_chunk()).unwrap();
+        assert!(queues_below_low(&both, 0.5), "the second is at the ratio");
+        second.try_send(0, crate::sink::test_chunk()).unwrap();
+        assert!(!queues_below_low(&both, 0.5), "the second is full");
     }
 
     /// Wherever the split falls, it lends the lane at that index and lists

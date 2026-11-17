@@ -142,21 +142,23 @@ pub fn shard_queues(
     )
 }
 
+/// A one-row chunk with no acknowledgments, for tests that fill a queue.
+#[cfg(all(test, not(loom)))]
+pub(crate) fn test_chunk() -> EncodedChunk {
+    EncodedChunk {
+        oldest_ingest: crate::clock::Clock::now(&crate::clock::SystemClock),
+        oldest_event_ms: 0,
+        frame: bytes::Bytes::from_static(b"x"),
+        raw_len: 1,
+        rows: 1,
+        acks: crate::checkpoint::AckSet::new(),
+    }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
+    use super::test_chunk as chunk;
     use super::*;
-    use bytes::Bytes;
-
-    fn chunk() -> EncodedChunk {
-        EncodedChunk {
-            oldest_ingest: std::time::Instant::now(),
-            oldest_event_ms: 0,
-            frame: Bytes::from_static(b"x"),
-            raw_len: 1,
-            rows: 1,
-            acks: crate::checkpoint::AckSet::new(),
-        }
-    }
 
     #[test]
     fn try_send_never_blocks_and_returns_the_chunk_when_full() {

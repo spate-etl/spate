@@ -9,8 +9,8 @@
 //!
 //! - `empty_one_lane`: one lane, one shard, every poll empty. The floor.
 //! - `empty_64_lanes`: work that scales with the lanes a thread owns.
-//! - `empty_256_shards`: a sink with many shard queues, which an unpaused
-//!   thread should not pay for. It counts close to `empty_one_lane`.
+//! - `empty_256_shards`: one lane over a sink with 256 shard queues, which an
+//!   unpaused thread does not read.
 //! - `batches_64_lanes`: every poll a batch of 16 payloads, adding the path
 //!   that pushes a batch through the chain and counts it.
 //!

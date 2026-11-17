@@ -73,7 +73,7 @@ jobs:
           CI: "true"
         run: npm run build
 
-      - name: Site is complete
+      - name: Site is complete and described
         run: cargo xtask site-check
 
       # Its own step because it is also the cache key below. A browser build

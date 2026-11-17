@@ -667,7 +667,7 @@ jobs:
           CI: "true"
         run: npm run build
 
-      - name: Site is complete
+      - name: Site is complete and described
         run: cargo xtask site-check
 
       # The deploy job has no checkout, so the config ships in the artifact.

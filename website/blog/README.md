@@ -51,7 +51,8 @@ The rest is automatic. `cargo xtask release assemble` refuses an `X.Y.0`
 unless exactly one post carries `slug: releases/X.Y`, and the release commit
 removes the `draft: true` line. A `draft` key written any other way, a merge
 key (`<<`), a key that is not a plain string, front matter that does not parse
-as YAML, or a `description` outside 50 to 160 characters stops `assemble`.
+as YAML, or a `description` that is missing or outside 50 to 160 characters
+stops `assemble`.
 The post goes live at `/blog/releases/X.Y` with the first site deploy after the
 release pull request merges, normally the one the release dispatches, and the
 GitHub release body links it.

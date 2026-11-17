@@ -24,7 +24,7 @@ use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::{KAFKA_PORT, KafkaBroker, TestCa, container_image, pem};
+use spate_test_support::{SingleBroker, TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

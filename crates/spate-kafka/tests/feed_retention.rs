@@ -14,13 +14,12 @@ mod support;
 use spate_core::pipeline::ExitState;
 use spate_test::{HANG, LogCapture, wait_until};
 use spate_test_s3_feed::{STEP, recs, stage, written};
-use spate_test_support::KAFKA_PORT;
+use spate_test_support::SingleBroker;
 use support::broker;
 use support::delete_records_below;
 use support::feed::{
     HeldUnit, WORK, committed, create_topics, group_stable, hold_for, produce_raw, run_to_exit,
 };
-use testcontainers::runners::SyncRunner;
 
 /// Pins that a held unit lost to a rebalance after retention deleted its
 /// record is reported: the next owner starts at the group's commit below the
@@ -31,9 +30,8 @@ use testcontainers::runners::SyncRunner;
 fn a_unit_lost_to_a_rebalance_after_its_record_is_deleted_is_reported() {
     let capture = LogCapture::install_global(tracing::Level::WARN);
 
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let held = HeldUnit::start(&brokers, "deleted-lost", 5);
     let rows = recs("v", 5);

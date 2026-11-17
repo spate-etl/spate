@@ -19,16 +19,15 @@ use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, wait_until};
 use spate_test_s3_feed::{recs, written};
 use spate_test_support::{
-    ACCESS_KEY, KAFKA_PORT, KafkaBroker, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store,
+    ACCESS_KEY, KAFKA_PORT, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, SingleBroker, Store,
 };
 use support::broker;
 use support::feed::{
     DEAD, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark, launch_source,
     read_topic,
 };
+use testcontainers::ImageExt;
 use testcontainers::core::IntoContainerPort;
-use testcontainers::runners::SyncRunner;
-use testcontainers::{Container, ImageExt};
 
 const BUCKET: &str = "notified";
 
@@ -431,7 +430,7 @@ struct Notifying {
     client: object_store::aws::AmazonS3,
     io: tokio::runtime::Runtime,
     brokers: String,
-    _kafka: Container<KafkaBroker>,
+    _kafka: SingleBroker,
 }
 
 /// A worker reading the bucket through the Kafka feed, in a group of its own.
@@ -486,20 +485,20 @@ impl Notifying {
 /// advertises to other containers.
 fn notifying() -> Notifying {
     let store = Store::selected().expect("the selected S3 lane");
-    let kafka = broker()
-        .with_mapped_port(0, KAFKA_PORT)
-        .with_mapped_port(0, store.container_port().tcp())
-        .start()
-        .expect("start kafka container");
-    let brokers = format!(
-        "127.0.0.1:{}",
-        kafka.get_host_port_ipv4(KAFKA_PORT).expect("broker port")
-    );
+    let kafka = SingleBroker::start(
+        broker()
+            .with_mapped_port(0, KAFKA_PORT)
+            .with_mapped_port(0, store.container_port().tcp()),
+    )
+    .expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     let s3_port = kafka
+        .container()
         .get_host_port_ipv4(store.container_port())
         .expect("S3 port");
     create_topics(&brokers);
-    let s3 = S3Store::start_notifying(kafka.id(), s3_port, WORK).expect("start the S3 store");
+    let s3 = S3Store::start_notifying(kafka.container().id(), s3_port, WORK)
+        .expect("start the S3 store");
     s3.create_bucket(BUCKET).expect("create bucket");
     // A store's refusal reaches the caller: a bucket that does not exist has
     // no notification configuration to set.

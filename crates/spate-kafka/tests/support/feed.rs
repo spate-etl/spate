@@ -6,7 +6,7 @@
 use super::Raw as _;
 use super::{Read, from_start};
 use rdkafka::Offset;
-use rdkafka::admin::{AdminClient, NewTopic, TopicReplication};
+use rdkafka::admin::AdminClient;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{BorrowedMessage, Header, Message, OwnedHeaders};
@@ -24,18 +24,13 @@ use spate_s3::S3Source;
 use spate_test::{HANG, SinkScript, WriteOutcome, wait_until};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
 use spate_test_s3_feed::{CHECKPOINT, PipelineConfigFeed, STEP, data_dir, recs, stage};
 
-pub(crate) const WORK: &str = "units";
-pub(crate) const RETRY: &str = "units-retry";
-pub(crate) const DEAD: &str = "units-dead";
-pub(crate) const ATTEMPT: &str = "units-attempts";
-
-/// The attempt topic's partition count on the MockCluster and the broker.
-pub(crate) const ATTEMPT_PARTITIONS: i32 = 2;
+#[allow(unused_imports, reason = "each target uses a different subset")]
+pub(crate) use super::topics::{ATTEMPT, ATTEMPT_PARTITIONS, DEAD, RETRY, WORK};
 
 /// The feed's commit interval, read from the outside: each advance of a
 /// test's feed clock by this much makes one periodic commit due.
@@ -140,21 +135,10 @@ pub(crate) type Recording = spate_test_s3_feed::Recording<KafkaFeed>;
 /// names.
 pub(crate) type Worker = spate_test_s3_feed::Worker<KafkaFeed>;
 
-/// Create the work, retry and dead-letter topics, one partition each, the
-/// work topic stamped on append, and the compacted attempt topic. The feed
-/// never creates a topic.
+/// Create [`feed_topics`](super::topics::feed_topics) and wait until the
+/// broker lists them.
 pub(crate) fn create_topics(brokers: &str) {
-    let mut topics = vec![
-        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
-            .set("message.timestamp.type", "LogAppendTime"),
-        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
-        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
-    ];
-    topics.push(
-        NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
-            .set("cleanup.policy", "compact"),
-    );
-    super::create_visible(brokers, &topics);
+    super::create_visible(brokers, &super::topics::feed_topics());
 }
 
 /// How a test connects the feed.
@@ -363,7 +347,8 @@ pub(crate) fn publisher_on_mock(
 
 /// Produce `messages` to partition 0 of `topic` as given, key included.
 pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>, &[u8])]) {
-    let producer: BaseProducer = super::producer_config(brokers).build().expect("producer");
+    let producer = spate_test_support::producer(brokers).expect("producer");
+    let deadline = Instant::now() + HANG;
     for (key, payload) in messages {
         let mut record = BaseRecord::<[u8], [u8]>::to(topic)
             .partition(0)
@@ -371,7 +356,7 @@ pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>
         if let Some(key) = key {
             record = record.key(*key);
         }
-        producer.send(record).map_err(|(e, _)| e).expect("enqueue");
+        spate_test_support::send(&producer, record, deadline).expect("enqueue");
     }
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
@@ -387,12 +372,13 @@ pub(crate) fn open_transaction_with(
 ) -> BaseProducer {
     let producer = super::transactional_producer(brokers, topic, tag);
     producer.begin_transaction().expect("begin");
+    let deadline = Instant::now() + HANG;
     for unit in units {
         let record = BaseRecord::<[u8], [u8]>::to(topic)
             .partition(0)
             .key(unit.id.as_bytes())
             .payload(&unit.body[..]);
-        producer.send(record).map_err(|(e, _)| e).expect("enqueue");
+        spate_test_support::send(&producer, record, deadline).expect("enqueue");
     }
     producer.flush(super::TRANSACTION_TIMEOUT).expect("flush");
     producer
@@ -401,7 +387,7 @@ pub(crate) fn open_transaction_with(
 /// Produce `message` to partition 0 of `topic` with its key, value and
 /// headers as read.
 pub(crate) fn produce_copy(brokers: &str, topic: &str, message: &Read) {
-    let producer: BaseProducer = super::producer_config(brokers).build().expect("producer");
+    let producer = spate_test_support::producer(brokers).expect("producer");
     let headers = message
         .headers
         .iter()
@@ -420,7 +406,7 @@ pub(crate) fn produce_copy(brokers: &str, topic: &str, message: &Read) {
     if let Some(payload) = &message.payload {
         record = record.payload(payload);
     }
-    producer.send(record).map_err(|(e, _)| e).expect("enqueue");
+    spate_test_support::send(&producer, record, Instant::now() + HANG).expect("enqueue");
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
 

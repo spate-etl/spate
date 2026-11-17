@@ -6492,21 +6492,24 @@ mod docker {
     use crate::client::testing::{Raw as _, raw_config};
     use crate::feed::FeedRole;
     use crate::feed::KafkaFeed;
+    use crate::testutil::topics::{ATTEMPT, WORK, feed_topics};
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::message::Message;
-    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    use rdkafka::producer::{BaseRecord, Producer};
     use rdkafka::{Offset, TopicPartitionList};
     use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
     use spate_test::{HANG, wait_until};
-    use spate_test_support::{Broker, KAFKA_PORT, KafkaBroker};
+    use spate_test_support::{
+        Broker, KAFKA_PORT, KafkaBroker, SingleBroker, create_topics, producer, send,
+        transactional_producer,
+    };
     use std::num::NonZeroU32;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use testcontainers::ImageExt as _;
-    use testcontainers::runners::SyncRunner;
 
     /// Units on the work topic, fewer than the buffer holds.
     const UNITS: usize = 5;
@@ -6518,41 +6521,18 @@ mod docker {
     #[test]
     #[ignore = "requires Docker"]
     fn a_revocation_commits_before_it_unassigns() {
-        let (_container, brokers) = start_broker();
+        let (_kafka, brokers) = start_broker();
         let io = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let admin: AdminClient<DefaultClientContext> = raw_config()
-            .set("bootstrap.servers", &brokers)
-            .build()
-            .unwrap();
-        let mut topics = vec![
-            NewTopic::new("units", 1, TopicReplication::Fixed(1))
-                .set("message.timestamp.type", "LogAppendTime"),
-            NewTopic::new("units-retry", 1, TopicReplication::Fixed(1)),
-            NewTopic::new("units-dead", 1, TopicReplication::Fixed(1)),
-        ];
-        topics.push(
-            NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1))
-                .set("cleanup.policy", "compact"),
-        );
-        for created in io
-            .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-            .unwrap()
-        {
-            created.unwrap();
-        }
-        let producer: BaseProducer = raw_config()
-            .set("bootstrap.servers", &brokers)
-            .build()
-            .unwrap();
+        create_topics(&brokers, &feed_topics(), HANG).unwrap_or_else(|e| panic!("{e}"));
+        let producer = producer(&brokers).unwrap();
+        let deadline = Instant::now() + HANG;
         for i in 0..UNITS {
             let id = format!("u{i}");
-            producer
-                .send(BaseRecord::to("units").key(id.as_bytes()).payload(b"body"))
-                .map_err(|(e, _)| e)
-                .unwrap();
+            let record = BaseRecord::to(WORK).key(id.as_bytes()).payload(b"body");
+            send(&producer, record, deadline).unwrap();
         }
         producer.flush(Duration::from_secs(30)).unwrap();
         let group = spate_test::unique_name("revoke-order");
@@ -6577,37 +6557,26 @@ mod docker {
 
     /// Create the one-partition topic `name`, compacted, with segments that
     /// roll and clean within a test's time.
-    fn create_compacted(brokers: &str, io: &tokio::runtime::Runtime, name: &str) {
-        let admin: AdminClient<DefaultClientContext> = raw_config()
-            .set("bootstrap.servers", brokers)
-            .build()
-            .unwrap();
+    fn create_compacted(brokers: &str, name: &str) {
         let topic = NewTopic::new(name, 1, TopicReplication::Fixed(1))
             .set("cleanup.policy", "compact")
             .set("segment.ms", "100")
             .set("min.cleanable.dirty.ratio", "0.01")
             .set("delete.retention.ms", "0");
-        for created in io
-            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
-            .unwrap()
-        {
-            created.unwrap();
-        }
+        create_topics(brokers, &[topic], HANG).unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// Write each `(key, value)` to partition 0 of `topic`, a `None` value
     /// as a tombstone, and wait for the writes' reports.
     fn write(brokers: &str, topic: &str, records: &[(&str, Option<&[u8]>)]) {
-        let producer: BaseProducer = raw_config()
-            .set("bootstrap.servers", brokers)
-            .build()
-            .unwrap();
+        let producer = producer(brokers).unwrap();
+        let deadline = Instant::now() + HANG;
         for (key, value) in records {
             let mut record = BaseRecord::<str, [u8]>::to(topic).partition(0).key(*key);
             if let Some(value) = value {
                 record = record.payload(*value);
             }
-            producer.send(record).map_err(|(e, _)| e).unwrap();
+            send(&producer, record, deadline).unwrap();
         }
         producer.flush(Duration::from_secs(30)).unwrap();
     }
@@ -6699,40 +6668,30 @@ mod docker {
     #[test]
     #[ignore = "requires Docker"]
     fn a_gate_pass_admits_on_an_empty_or_emptied_attempt_partition() {
-        let (_container, brokers) = start_broker();
+        let (_kafka, brokers) = start_broker();
         let io = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+        let topic = NewTopic::new(ATTEMPT, 2, TopicReplication::Fixed(1));
+        create_topics(&brokers, &[topic], HANG).unwrap_or_else(|e| panic!("{e}"));
+        let producer = producer(&brokers).unwrap();
+        let deadline = Instant::now() + HANG;
+        for _ in 0..3 {
+            let payload = attempt::encode(1);
+            let record = BaseRecord::to(ATTEMPT)
+                .partition(1)
+                .key("x")
+                .payload(&payload);
+            send(&producer, record, deadline).unwrap();
+        }
+        producer.flush(Duration::from_secs(30)).unwrap();
         let admin: AdminClient<DefaultClientContext> = raw_config()
             .set("bootstrap.servers", &brokers)
             .build()
             .unwrap();
-        let topic = NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1));
-        for created in io
-            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
-            .unwrap()
-        {
-            created.unwrap();
-        }
-        let producer: BaseProducer = raw_config()
-            .set("bootstrap.servers", &brokers)
-            .build()
-            .unwrap();
-        for _ in 0..3 {
-            producer
-                .send(
-                    BaseRecord::to("units-attempts")
-                        .partition(1)
-                        .key("x")
-                        .payload(&attempt::encode(1)),
-                )
-                .map_err(|(e, _)| e)
-                .unwrap();
-        }
-        producer.flush(Duration::from_secs(30)).unwrap();
         let mut upto = TopicPartitionList::new();
-        upto.add_partition_offset("units-attempts", 1, Offset::Offset(3))
+        upto.add_partition_offset(ATTEMPT, 1, Offset::Offset(3))
             .unwrap();
         for deleted in io
             .block_on(admin.delete_records(&upto, &AdminOptions::new()))
@@ -6745,7 +6704,7 @@ mod docker {
             [(0, (0, 0)), (1, (3, 3))].into_iter().all(|(p, marks)| {
                 producer
                     .client()
-                    .fetch_watermarks("units-attempts", p, Duration::from_secs(5))
+                    .fetch_watermarks(ATTEMPT, p, Duration::from_secs(5))
                     .is_ok_and(|read| read == marks)
             })
         });
@@ -6768,50 +6727,31 @@ mod docker {
     #[test]
     #[ignore = "requires Docker"]
     fn a_gate_pass_waits_for_a_write_behind_an_open_transaction() {
-        let container = KafkaBroker::selected()
-            .transactional()
-            .start()
+        let kafka = SingleBroker::start(KafkaBroker::selected().transactional())
             .expect("start kafka container");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        let brokers = format!("127.0.0.1:{port}");
-        let io = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let admin: AdminClient<DefaultClientContext> = raw_config()
-            .set("bootstrap.servers", &brokers)
-            .build()
-            .unwrap();
-        let topic = NewTopic::new("units-attempts", 1, TopicReplication::Fixed(1));
-        for created in io
-            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
-            .unwrap()
-        {
-            created.unwrap();
-        }
-        let open: BaseProducer = raw_config()
-            .set("bootstrap.servers", &brokers)
-            .set("transactional.id", spate_test::unique_name("foreign"))
-            .set("transaction.timeout.ms", "600000")
-            .build()
-            .unwrap();
-        open.init_transactions(Duration::from_secs(30)).unwrap();
-        open.begin_transaction().unwrap();
-        open.send(
-            BaseRecord::to("units-attempts")
-                .partition(0)
-                .key("foreign/0/0")
-                .payload(&attempt::encode(1)),
+        let brokers = kafka.bootstrap();
+        let topic = NewTopic::new(ATTEMPT, 1, TopicReplication::Fixed(1));
+        create_topics(brokers, &[topic], HANG).unwrap_or_else(|e| panic!("{e}"));
+        let open = transactional_producer(
+            brokers,
+            &spate_test::unique_name("foreign"),
+            Duration::from_secs(30),
         )
-        .map_err(|(e, _)| e)
         .unwrap();
+        open.begin_transaction().unwrap();
+        let payload = attempt::encode(1);
+        let record = BaseRecord::to(ATTEMPT)
+            .partition(0)
+            .key("foreign/0/0")
+            .payload(&payload);
+        send(&open, record, Instant::now() + HANG).unwrap();
         open.flush(Duration::from_secs(30)).unwrap();
         write(
-            &brokers,
-            "units-attempts",
+            brokers,
+            ATTEMPT,
             &[("units/0/0", Some(&attempt::encode(1)[..]))],
         );
-        let config = KafkaFeedConfig::from_section(&section(&brokers, "open")).unwrap();
+        let config = KafkaFeedConfig::from_section(&section(brokers, "open")).unwrap();
         let lister = attempt::test_lister(&config);
         wait_until(HANG, "the log end is above the open transaction", || {
             lister
@@ -6871,12 +6811,10 @@ mod docker {
         })
     }
 
-    fn start_broker() -> (testcontainers::Container<KafkaBroker>, String) {
-        let container = KafkaBroker::selected()
-            .start()
-            .expect("start kafka container");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        (container, format!("127.0.0.1:{port}"))
+    fn start_broker() -> (SingleBroker, String) {
+        let kafka = SingleBroker::start(KafkaBroker::selected()).expect("start kafka container");
+        let brokers = kafka.bootstrap().to_owned();
+        (kafka, brokers)
     }
 
     /// Pins that a follower catches up on a compacted attempt partition
@@ -6886,11 +6824,7 @@ mod docker {
     #[ignore = "requires Docker"]
     fn a_follower_catches_up_on_a_compacted_live_tail() {
         let (_container, brokers) = start_broker();
-        let io = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        create_compacted(&brokers, &io, "live-tail");
+        create_compacted(&brokers, "live-tail");
         let one: &[u8] = br#"{"v":1,"attempts":1}"#;
         write(
             &brokers,
@@ -6938,17 +6872,11 @@ mod docker {
             .and_then(|l| l.local_addr())
             .expect("a free port")
             .port();
-        let container = broker
-            .with_mapped_port(port, KAFKA_PORT)
-            .start()
+        let kafka = SingleBroker::start(broker.with_mapped_port(port, KAFKA_PORT))
             .expect("start kafka container");
-        let brokers = format!("127.0.0.1:{port}");
-        let io = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let brokers = kafka.bootstrap().to_owned();
         let topic = "removed-tail";
-        create_compacted(&brokers, &io, topic);
+        create_compacted(&brokers, topic);
         let one: &[u8] = br#"{"v":1,"attempts":1}"#;
         write(
             &brokers,
@@ -6961,7 +6889,7 @@ mod docker {
             .unwrap();
         let removed = (0..TAIL_RESTARTS).any(|_| {
             let status = std::process::Command::new("docker")
-                .args(["restart", container.id()])
+                .args(["restart", kafka.container().id()])
                 .status()
                 .expect("run docker");
             assert!(status.success(), "docker restart: {status}");
@@ -7026,11 +6954,7 @@ mod docker {
     #[ignore = "requires Docker"]
     fn a_follower_catches_up_when_the_tail_is_a_tombstone() {
         let (_container, brokers) = start_broker();
-        let io = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        create_compacted(&brokers, &io, "tombstone-tail");
+        create_compacted(&brokers, "tombstone-tail");
         let one: &[u8] = br#"{"v":1,"attempts":1}"#;
         write(
             &brokers,

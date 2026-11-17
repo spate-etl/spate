@@ -8,10 +8,8 @@
 
 mod support;
 
-use support::Raw as _;
-
 use rdkafka::message::Message;
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::producer::{BaseRecord, Producer};
 use spate_core::config::PipelineConfig;
 use spate_core::deser::{BytesPassthrough, Owned};
 use spate_core::error::ErrorPolicy;
@@ -21,11 +19,10 @@ use spate_core::sink::KeyHashRouter;
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, PipelineRun, wait_until};
-use spate_test_support::KAFKA_PORT;
+use spate_test_support::SingleBroker;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::{broker, consume};
-use testcontainers::runners::SyncRunner;
 
 const IN_TOPIC: &str = "orders";
 const A_TOPIC: &str = "orders-a";
@@ -55,15 +52,13 @@ fn sink_config(brokers: &str, topic: &str) -> KafkaSinkConfig {
 /// image auto-creates topics) so the pipeline's sinks and probes never see
 /// a not-yet-created topic.
 fn produce(brokers: &str, topic: &str, payloads: &[Vec<u8>]) {
-    let producer: BaseProducer = support::producer_config(brokers).build().expect("producer");
+    let producer = spate_test_support::producer(brokers).expect("producer");
+    let deadline = Instant::now() + HANG;
     for payload in payloads {
-        producer
-            .send(
-                BaseRecord::<[u8], [u8]>::to(topic)
-                    .payload(payload)
-                    .partition(0),
-            )
-            .expect("enqueue");
+        let record = BaseRecord::<[u8], [u8]>::to(topic)
+            .payload(payload)
+            .partition(0);
+        spate_test_support::send(&producer, record, deadline).expect("enqueue");
     }
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
@@ -80,9 +75,8 @@ fn consume_payloads(brokers: &str, topic: &str, expect: usize) -> Vec<Vec<u8>> {
 #[test]
 #[ignore = "requires Docker"]
 fn kafka_to_kafka_split_round_trip() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
 
     // Input: alternating `a-<i>` / `b-<i>` payloads. Warmup singles create
     // the output topics up front.

@@ -11,15 +11,13 @@
 
 mod support;
 
-use rdkafka::admin::{NewTopic, TopicReplication};
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, LogCapture, wait_until};
-use spate_test_support::KAFKA_PORT;
+use spate_test_support::SingleBroker;
 use std::time::{Duration, Instant};
 use support::broker;
-use support::feed::{ATTEMPT, DEAD, RETRY, WORK, committed, feed_yaml, publish, section};
-use testcontainers::runners::SyncRunner;
+use support::feed::{WORK, committed, create_topics, feed_yaml, publish, section};
 
 /// The member's session timeout, as the harness's section sets it.
 const SESSION: Duration = Duration::from_secs(6);
@@ -43,24 +41,14 @@ fn assignments(capture: &LogCapture) -> usize {
 #[ignore = "requires Docker"]
 fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
     let capture = LogCapture::install_global(tracing::Level::INFO);
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .unwrap();
-    let mut topics = vec![
-        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
-            .set("message.timestamp.type", "LogAppendTime"),
-        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
-        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
-    ];
-    topics.push(
-        NewTopic::new(ATTEMPT, 2, TopicReplication::Fixed(1)).set("cleanup.policy", "compact"),
-    );
-    support::create_visible(&brokers, &topics);
+    create_topics(&brokers);
 
     let group = spate_test::unique_name("membership");
     let feed = KafkaFeed::connect(&section(&feed_yaml(&brokers, &group, "", "")), io.handle())

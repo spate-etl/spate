@@ -72,7 +72,10 @@ fn happy_path_delivers_exactly_and_commits() {
     }
     assert_eq!(
         h.committed(&params.topic, &params.group, partitions),
-        per_partition,
+        per_partition
+            .iter()
+            .map(|&n| Offset::Offset(n))
+            .collect::<Vec<_>>(),
         "every partition committed exactly its produced count"
     );
 

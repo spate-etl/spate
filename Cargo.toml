@@ -80,8 +80,8 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2.4"
 
 crossbeam-channel = "0.5.15"
-# 1.12.2 inlines `BytesMut::put_slice`, which the ClickHouse encoders call once
-# per value. Under 1.12.1 a build without LTO makes that call out of line.
+# 1.12.2 inlines `BytesMut::put_slice`, through which the ClickHouse encoders
+# write most values. Under 1.12.1 a build without LTO calls it out of line.
 bytes = "1.12.2"
 core_affinity = "0.8"
 foldhash = "0.2"

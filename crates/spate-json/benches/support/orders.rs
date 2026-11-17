@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::hash::{BuildHasherDefault, DefaultHasher};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Order {
@@ -127,12 +128,19 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 // to be measured on.
 // ---------------------------------------------------------------------------
 
-/// The map type a user's record declares, with std's default hasher.
+/// std's map with std's SipHash-1-3, keyed by a fixed key in place of a fresh
+/// random one.
+///
+/// The hashing and allocation are those of the `HashMap<String, String>` a
+/// user's record declares. A random key makes the counted case vary by up to
+/// 0.8% from run to run under the `simd` backend, all of it in glibc malloc.
+/// A fixed key keeps it repeating to the instruction.
 #[expect(
     clippy::disallowed_types,
     reason = "the bench measures decoding the std map a user's record declares"
 )]
-pub(crate) type Labels = std::collections::HashMap<String, String>;
+pub(crate) type Labels =
+    std::collections::HashMap<String, String, BuildHasherDefault<DefaultHasher>>;
 
 /// One event line: a request log entry with its host, request and client.
 ///
@@ -149,10 +157,6 @@ pub(crate) struct Event {
     pub(crate) host: Host,
     pub(crate) request: Request,
     pub(crate) tags: Vec<String>,
-    /// A `HashMap` with the default hasher, the field type a user writes.
-    /// Each decoded map draws a fresh hash seed, so a counted case over these
-    /// lines does not repeat to the instruction; `decode_gungraun.rs` says by
-    /// how much.
     #[serde(serialize_with = "in_key_order")]
     pub(crate) labels: Labels,
 }
@@ -271,7 +275,7 @@ pub(crate) fn sample_event(i: u64) -> Event {
         table[usize::try_from(i % n).expect("an index below the table length")].replace("{id}", &id)
     };
     let service = pick(&SERVICES);
-    let labels = Labels::from([
+    let labels = Labels::from_iter([
         ("team".to_owned(), pick(&TEAMS)),
         ("deployment".to_owned(), format!("{service}-{}", i % 3)),
         ("release".to_owned(), format!("release-2026.11.{}", i % 17)),

@@ -125,7 +125,7 @@
 //! limiter behind the skip warning allows five events per ten *seconds*, so a
 //! poison case whose warm pass and measured pass together straddled a window
 //! roll would emit up to five extra log events on one run and not the next.
-//! Nothing observed comes near it: the whole twenty-two-case binary takes 29
+//! Nothing observed comes near it: the whole twenty-three-case binary takes 20
 //! seconds in an aarch64 Linux container on a development machine, which
 //! bounds any one case's process (valgrind startup, corpus construction, warm
 //! pass and measured region together) at a small multiple of a second. A

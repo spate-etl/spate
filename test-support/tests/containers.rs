@@ -14,12 +14,15 @@ use object_store::path::Path as StorePath;
 use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
 use rdkafka::ClientConfig;
 use rdkafka::Message as _;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-use rdkafka::client::DefaultClientContext;
+use rdkafka::admin::{NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
-use spate_test_support::{ElasticMq, KAFKA_PORT, KafkaBroker, Message, S3Store, Store};
-use testcontainers::runners::SyncRunner as _;
+use rdkafka::producer::{BaseRecord, Producer as _};
+use spate_test_support::{
+    ElasticMq, KafkaBroker, Message, S3Store, SingleBroker, Store, create_topics, producer, send,
+};
+
+/// Bounds a hang only.
+const HANG: Duration = Duration::from_secs(60);
 
 /// A bucket created through the helper takes a signed put, get, list and
 /// delete, and the container joins the network it was given. A store that
@@ -108,53 +111,35 @@ fn s3_store_round_trips_an_object() {
 #[ignore = "requires Docker"]
 #[expect(
     clippy::disallowed_methods,
-    reason = "a smoke test builds its clients outside spate-kafka's factory"
+    reason = "a smoke test builds its consumer outside spate-kafka's factory"
 )]
 fn kafka_broker_round_trips_a_record() {
-    let broker = KafkaBroker::selected();
-    let name = broker.broker();
-    let container = broker
-        .start()
-        .unwrap_or_else(|e| panic!("start {name}: {e}"));
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let broker = SingleBroker::start(KafkaBroker::selected()).unwrap_or_else(|e| panic!("{e}"));
+    let brokers = broker.bootstrap();
 
     // Created first, as the suites create theirs: a consumer of a topic only
     // a produce created can read it as unknown, and fail, on Redpanda.
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .create()
-        .expect("admin client");
     let topic = NewTopic::new("smoke", 1, TopicReplication::Fixed(1));
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime")
-        .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
-        .expect("create topic")
-        .into_iter()
-        .for_each(|r| {
-            r.expect("topic created");
-        });
+    create_topics(brokers, &[topic], HANG).unwrap_or_else(|e| panic!("{e}"));
 
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("message.timeout.ms", "30000")
-        .create()
-        .expect("producer");
-    producer
-        .send(BaseRecord::<(), _>::to("smoke").payload("one"))
-        .expect("enqueue");
-    producer.flush(Duration::from_secs(60)).expect("flush");
+    let producer = producer(brokers).unwrap_or_else(|e| panic!("{e}"));
+    send(
+        &producer,
+        BaseRecord::<(), _>::to("smoke").payload("one"),
+        Instant::now() + HANG,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    producer.flush(HANG).expect("flush");
 
     let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
+        .set("bootstrap.servers", brokers)
         .set("group.id", "smoke")
         .set("auto.offset.reset", "earliest")
         .create()
         .expect("consumer");
     consumer.subscribe(&["smoke"]).expect("subscribe");
     // Bounds a hang only: the record is read as soon as the group assigns.
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + HANG;
     let payload = loop {
         match consumer.poll(Duration::from_millis(100)) {
             Some(Ok(m)) => break m.payload().map(<[u8]>::to_vec),
@@ -163,6 +148,19 @@ fn kafka_broker_round_trips_a_record() {
         }
     };
     assert_eq!(payload.as_deref(), Some(&b"one"[..]));
+}
+
+/// A topic created a second time is refused with the broker's error for it,
+/// on a broker reached at its host port.
+#[test]
+#[ignore = "requires Docker"]
+fn a_topic_created_twice_is_refused_the_second_time() {
+    let broker = SingleBroker::start(KafkaBroker::selected()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(broker.bootstrap(), format!("127.0.0.1:{}", broker.port()));
+    let topic = || NewTopic::new("twice", 1, TopicReplication::Fixed(1));
+    create_topics(broker.bootstrap(), &[topic()], HANG).unwrap_or_else(|e| panic!("{e}"));
+    let again = create_topics(broker.bootstrap(), &[topic()], HANG).unwrap_err();
+    assert!(again.starts_with("create topic twice: "), "{again}");
 }
 
 /// A message sent to a queue the helper created is received once and, once

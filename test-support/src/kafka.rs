@@ -1,6 +1,7 @@
 //! A Kafka broker in a container, chosen by `SPATE_KAFKA_LANE`: the
 //! listeners a client reaches it on, and the settings a suite asks of it.
-//! [`KafkaCluster`] runs three of them as one cluster.
+//! [`SingleBroker`] starts one, and [`KafkaCluster`] runs three of them as
+//! one cluster.
 //!
 //! Each lane under `ci/kafka/` is a broker, and each broker has an arm in
 //! [`Broker`] holding how it starts, alone or as a cluster node.
@@ -15,10 +16,13 @@ use std::time::Duration;
 #[cfg(feature = "kafka-client")]
 use rdkafka::consumer::Consumer as _;
 
+#[cfg(feature = "kafka-client")]
+use crate::kafka_client::{METADATA_TIMEOUT, metadata_probe};
+
 use testcontainers::bollard::models::HostConfig;
 use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecCommand, WaitFor};
 use testcontainers::runners::SyncRunner;
-use testcontainers::{Container, Image, ImageExt, TestcontainersError};
+use testcontainers::{Container, ContainerRequest, Image, ImageExt, TestcontainersError};
 
 use crate::container_log::{container_output, container_tails, exit_clause};
 use crate::{container_image, selected_lane};
@@ -56,6 +60,59 @@ const _: () = assert!(
     REDPANDA_RPC_PORT < 32_768,
     "REDPANDA_RPC_PORT is inside the ephemeral range"
 );
+
+/// One started broker, and the address a client on the host reaches it at.
+#[derive(Debug)]
+pub struct SingleBroker {
+    container: Container<KafkaBroker>,
+    port: u16,
+    bootstrap: String,
+}
+
+impl SingleBroker {
+    /// Starts `request`: a [`KafkaBroker`], or a request built from one with
+    /// the container settings a test asks of it.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming the broker, when the container does not start or its
+    /// host port cannot be read.
+    pub fn start(
+        request: impl Into<ContainerRequest<KafkaBroker>>,
+    ) -> Result<SingleBroker, String> {
+        let request = request.into();
+        let broker = request.image().broker();
+        let container = request
+            .start()
+            .map_err(|e| format!("start {broker} container: {e}"))?;
+        let port = container
+            .get_host_port_ipv4(KAFKA_PORT)
+            .map_err(|e| format!("read {broker}'s host port: {e}"))?;
+        Ok(SingleBroker {
+            container,
+            port,
+            bootstrap: format!("127.0.0.1:{port}"),
+        })
+    }
+
+    /// The broker's client address, for `bootstrap.servers`.
+    #[must_use]
+    pub fn bootstrap(&self) -> &str {
+        &self.bootstrap
+    }
+
+    /// The host port mapped to [`KAFKA_PORT`].
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The broker's container, for a test that pauses, restarts or joins it.
+    #[must_use]
+    pub fn container(&self) -> &Container<KafkaBroker> {
+        &self.container
+    }
+}
 
 /// How many nodes a [`KafkaCluster`] runs. Node ids run from 1 to this.
 pub const CLUSTER_NODES: i32 = 3;
@@ -785,23 +842,6 @@ pub struct PartitionState {
     pub leader: i32,
     /// How many replicas are in sync.
     pub in_sync: usize,
-}
-
-/// How long one metadata request waits on a cluster that may be electing.
-#[cfg(feature = "kafka-client")]
-const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// A client that reads a cluster's metadata.
-#[cfg(feature = "kafka-client")]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a cluster helper reads metadata outside every connector role"
-)]
-fn metadata_probe(bootstrap: &str) -> Result<rdkafka::consumer::BaseConsumer, String> {
-    rdkafka::ClientConfig::new()
-        .set("bootstrap.servers", bootstrap)
-        .create()
-        .map_err(|e| format!("metadata client: {e}"))
 }
 
 /// Whether metadata listing `ids` sees every node of a cluster, or the ids

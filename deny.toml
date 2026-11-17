@@ -14,7 +14,7 @@ ignore = [
     # a release without the crate, so the id stops hiding a crate outside the graph.
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained with no patched release, and reaches this tree only through testcontainers, a dev-dependency of the test suites" },
     # chrono and humantime are unmaintained with no known vulnerability, and
-    # object_store 0.14 depends on both. Remove each entry once object_store and
+    # object_store depends on both. Remove each entry once object_store and
     # the workspace crates no longer depend on its crate; cargo-deny then warns
     # `advisory-not-detected`.
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no patched release, and object_store, at its newest release, depends on it" },

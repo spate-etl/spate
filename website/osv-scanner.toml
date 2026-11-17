@@ -6,4 +6,4 @@
 [[IgnoredVulns]]
 id = "GHSA-fc5q-39xc-vjpf"
 ignoreUntil = 2027-05-17
-reason = "picomatch reaches this tree only through the Docusaurus build and dev server, by way of chokidar, micromatch, fast-glob, readdirp and jest-util. The patterns it compiles come from this repository and the Docusaurus config, never from a visitor, and the deployed site is static files. The advisory range covers 4.0.7, the newest release, so no upgrade clears it."
+reason = "picomatch reaches this tree only through the Docusaurus build and dev server, by way of chokidar, micromatch, fast-glob, readdirp and jest-util. The patterns it compiles come from this repository and the Docusaurus config, never from a visitor, and the deployed site is static files. The advisory range covers 4.0.7, the newest release, so no upgrade clears it. Remove this entry once every picomatch in the lockfile is a patched release."

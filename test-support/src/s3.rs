@@ -1,7 +1,8 @@
 //! An S3 store in a container, chosen by `SPATE_S3_LANE`: a fixed access key
-//! pair, a client builder signing with it, the signed call that creates a
-//! bucket, and a variant that publishes a bucket's storage notifications to a
-//! Kafka broker.
+//! pair, a client builder signing with it, the `store:` options a source
+//! reaches it with, the signed calls that create a bucket and write an object
+//! at a raw key, and a variant that publishes a bucket's storage notifications
+//! to a Kafka broker.
 //!
 //! Each lane under `ci/s3/` is a store, and each store has an arm in
 //! [`Store`] holding what its startup needs that the S3 API does not carry.
@@ -322,6 +323,32 @@ impl S3Store {
             .with_secret_access_key(SECRET_KEY)
     }
 
+    /// The `store:` options a source needs to reach this store, as YAML map
+    /// entries indented six spaces: they sit under a `store:` key at column 0
+    /// to 4.
+    #[must_use]
+    pub fn store_options_yaml(&self) -> String {
+        store_options(&self.endpoint())
+    }
+
+    /// Writes `body` at `key` in `bucket` with a signed `PUT`, for a key
+    /// `object_store`'s `Path` cannot hold, such as a folder marker ending in
+    /// `/`. `key` is sent as written, so it must need no percent-encoding.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the request cannot be signed or sent, or the store answers
+    /// anything but `200`.
+    pub fn put_raw(&self, bucket: &str, key: &str, body: &str) -> Result<(), String> {
+        self.signed(
+            Method::PUT,
+            &format!("/{bucket}/{key}"),
+            body,
+            "application/octet-stream",
+        )
+        .map(drop)
+    }
+
     /// Creates `bucket` with a signed `PUT`. Stores refuse unsigned writes.
     ///
     /// # Errors
@@ -431,6 +458,14 @@ impl S3Store {
     }
 }
 
+/// The `store:` entries for the store at `endpoint`, signing with the fixed
+/// key pair.
+fn store_options(endpoint: &str) -> String {
+    format!(
+        "      endpoint: \"{endpoint}\"\n      allow_http: \"true\"\n      access_key_id: \"{ACCESS_KEY}\"\n      secret_access_key: \"{SECRET_KEY}\"\n      region: \"{REGION}\""
+    )
+}
+
 /// The image `store`'s lane pins, pulled by digest.
 fn pinned(store: Store) -> GenericImage {
     let (image, tag) = container_image(&["--pull", SERVICE, store.lane()]);
@@ -454,6 +489,16 @@ fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_store_options_name_the_endpoint_and_the_fixed_key_pair() {
+        assert_eq!(
+            store_options("http://127.0.0.1:9000"),
+            "      endpoint: \"http://127.0.0.1:9000\"\n      allow_http: \"true\"\n      \
+             access_key_id: \"spate-test\"\n      secret_access_key: \"spate-test-secret\"\n      \
+             region: \"us-east-1\""
+        );
+    }
 
     #[test]
     fn a_named_s3_lane_selects_its_store() {

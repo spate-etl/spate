@@ -2,10 +2,10 @@
 //! fixture shared by the Docker-gated suites, with one bucket and a signed
 //! client for seeding.
 
-use object_store::aws::{AmazonS3, AwsAuthorizer, AwsCredential};
+use object_store::aws::AmazonS3;
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
-use spate_test_support::{ACCESS_KEY, REGION, S3Store, SECRET_KEY, Store};
+use spate_test_support::{S3Store, Store};
 use std::sync::Arc;
 
 pub(crate) struct Gateway {
@@ -46,10 +46,7 @@ impl Gateway {
     /// The `store:` passthrough options a source needs to reach this
     /// store, as indented YAML map entries.
     pub(crate) fn store_options_yaml(&self) -> String {
-        format!(
-            "      endpoint: \"{}\"\n      allow_http: \"true\"\n      access_key_id: \"{ACCESS_KEY}\"\n      secret_access_key: \"{SECRET_KEY}\"\n      region: \"{REGION}\"",
-            self.store.endpoint()
-        )
+        self.store.store_options_yaml()
     }
 
     pub(crate) fn seed(&self, objects: Vec<(String, Vec<u8>)>) {
@@ -80,36 +77,11 @@ impl Gateway {
     }
 
     /// PUT `body` at the raw `key`, which `object_store`'s `Path` cannot
-    /// hold, such as a folder marker ending in `/`. `key` is sent as written,
-    /// so it must need no percent-encoding.
+    /// hold, such as a folder marker ending in `/`.
     pub(crate) fn put_raw(&self, key: &str, body: &str) {
-        let endpoint = self.store.endpoint();
-        let path = format!("/{}/{key}", self.bucket);
-        let mut request = object_store::client::HttpRequest::new(body.to_owned().into());
-        *request.method_mut() = "PUT".parse().unwrap();
-        *request.uri_mut() = format!("{endpoint}{path}").parse().unwrap();
-        let credential = AwsCredential {
-            key_id: ACCESS_KEY.to_owned(),
-            secret_key: SECRET_KEY.to_owned(),
-            token: None,
-        };
-        AwsAuthorizer::new(&credential, "s3", REGION)
-            .try_authorize(&mut request, None)
-            .expect("sign the PUT");
-        let headers: Vec<(String, String)> = request
-            .headers()
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
-            .collect();
-        // The signature covers `Host`, which the exchange sets to the address.
-        let addr = endpoint
-            .strip_prefix("http://")
-            .and_then(|a| a.parse().ok())
-            .expect("the endpoint is http://<address>");
-        let (status, reply) =
-            spate_test_support::http_with_headers(addr, "PUT", &path, &headers, body)
-                .expect("send the PUT");
-        assert_eq!(status, 200, "PUT {key}: {reply}");
+        self.store
+            .put_raw(&self.bucket, key, body)
+            .unwrap_or_else(|e| panic!("PUT {key}: {e}"));
     }
 }
 

@@ -25,10 +25,12 @@ use spate_test_support::{
 const HANG: Duration = Duration::from_secs(60);
 
 /// A bucket created through the helper takes a signed put, get, list and
-/// delete, and the container joins the network it was given. A store that
-/// takes its Kafka target through a topic, started without one, refuses a
-/// bucket's notification configuration naming `start_notifying`, and Garage
-/// refuses one, and refuses to start notifying, naming notifications.
+/// delete, and a put at a raw key that reads back. The `store:` options name
+/// the store's endpoint, and the container joins the network it was given. A
+/// store that takes its Kafka target through a topic, started without one,
+/// refuses a bucket's notification configuration naming `start_notifying`,
+/// and Garage refuses one, and refuses to start notifying, naming
+/// notifications.
 #[test]
 #[ignore = "requires Docker"]
 fn s3_store_round_trips_an_object() {
@@ -103,6 +105,20 @@ fn s3_store_round_trips_an_object() {
         let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
         assert!(listed.is_empty(), "{listed:?}");
     });
+
+    s3_store
+        .put_raw("smoke", "raw/two.ndjson", "{\"k\":2}\n")
+        .expect("put at a raw key");
+    runtime.block_on(async {
+        let key = StorePath::from("raw/two.ndjson");
+        let body = store.get(&key).await.unwrap().bytes().await.unwrap();
+        assert_eq!(&body[..], b"{\"k\":2}\n");
+    });
+    let options = s3_store.store_options_yaml();
+    assert!(
+        options.contains(&format!("endpoint: \"{}\"", s3_store.endpoint())),
+        "{options}"
+    );
 }
 
 /// A record produced to the selected broker on its host listener reads back

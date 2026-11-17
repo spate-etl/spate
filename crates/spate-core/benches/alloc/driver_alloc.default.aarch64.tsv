@@ -3,7 +3,7 @@
 # arch: aarch64
 # counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
 case	allocs	reallocs	bytes
-batches_64_lanes	10007	4	2572972
-empty_256_shards	10002	0	40428
-empty_64_lanes	10007	4	2572972
-empty_one_lane	10002	0	40428
+batches_64_lanes	7	4	12972
+empty_256_shards	2	0	428
+empty_64_lanes	7	4	12972
+empty_one_lane	2	0	428

@@ -1,7 +1,6 @@
 //! Shared test fixtures: librdkafka statistics values, a refused broker
-//! address, a broker that refuses a SASL login, a raised fatal error, a
-//! bounded wait on a call that may never return and a stop on a librdkafka log
-//! line.
+//! address, a broker that refuses a SASL login, a raised fatal error and a
+//! stop on a librdkafka log line.
 
 use crate::context::SourceContext;
 use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
@@ -10,7 +9,6 @@ use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::statistics::{Broker, Window};
 use spate_test::HANG;
 use std::ffi::CStr;
-use std::sync::mpsc;
 use std::time::Duration;
 
 #[path = "../tests/support/mock.rs"]
@@ -24,36 +22,7 @@ pub(crate) mod topics;
 #[allow(dead_code, reason = "the integration suites use the rest")]
 pub(crate) mod wire;
 
-/// Run `f` on a thread of its own and report whether it returned within
-/// `limit`. A call that does not return leaves its thread running.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a thread that never returns is the failure; the caller fails instead of joining it"
-)]
-pub(crate) fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        f();
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(limit).is_ok()
-}
-
-/// Run `close` within `limit` and fail naming `what` if it does not return.
-/// A call that does not return leaves `cluster` undropped: its clients are
-/// still connected, and dropping it would wait on them.
-pub(crate) fn assert_returns<C>(
-    cluster: C,
-    limit: Duration,
-    what: &str,
-    close: impl FnOnce() + Send + 'static,
-) {
-    let returned = returns_within(limit, close);
-    if !returned {
-        std::mem::forget(cluster);
-    }
-    assert!(returned, "{what} did not return");
-}
+pub(crate) use spate_test_support::{assert_returns, returns_within};
 
 /// A consumer enters the wait for an assign call. Its `delegating assign` line
 /// and the rebalance event follow.
@@ -105,34 +74,6 @@ pub(crate) fn raise_fatal<C: ClientContext>(client: &Client<C>, code: RespErr, r
         rdkafka::bindings::rd_kafka_test_fatal_error(client.native_ptr(), code, reason.as_ptr())
     };
     assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
-}
-
-/// The offset `group` has committed for each of `partitions` of `topic`, read
-/// by a consumer outside the group's membership.
-pub(crate) fn committed_offsets(
-    brokers: &str,
-    group: &str,
-    topic: &str,
-    partitions: std::ops::Range<i32>,
-) -> Vec<rdkafka::Offset> {
-    use crate::client::testing::{Raw as _, raw_config};
-    use rdkafka::consumer::{BaseConsumer, Consumer as _};
-    let probe: BaseConsumer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in partitions {
-        tpl.add_partition(topic, p);
-    }
-    probe
-        .committed_offsets(tpl, std::time::Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect()
 }
 
 /// Asserts that `lines` hold exactly one cleartext-credential warning, for

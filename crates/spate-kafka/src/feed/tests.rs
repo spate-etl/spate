@@ -2333,10 +2333,35 @@ mod cluster {
 
     /// The offset `group` has committed for the work topic's partition.
     pub(super) fn committed(brokers: &str, group: &str) -> Option<i64> {
-        match crate::testutil::committed_offsets(brokers, group, "units", 0..1)[0] {
+        let reader = spate_test_support::consumer(brokers, &[("group.id", group)])
+            .unwrap_or_else(|e| panic!("{e}"));
+        match spate_test_support::committed_offsets(&reader, "units", 1, HANG)
+            .unwrap_or_else(|e| panic!("{e}"))[0]
+        {
             Offset::Offset(offset) => Some(offset),
             _ => None,
         }
+    }
+
+    /// Pins that a committed-offset read the broker refuses is read again.
+    /// Regression for #2140.
+    #[test]
+    fn a_committed_read_refused_once_is_read_again() {
+        let cluster = MockKafka::new();
+        cluster.create_topic("units", 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("refused-read");
+        let member =
+            spate_test_support::consumer(&brokers, &[("group.id", group.as_str())]).unwrap();
+        let mut at = TopicPartitionList::new();
+        at.add_partition_offset("units", 0, Offset::Offset(3))
+            .unwrap();
+        member.commit(&at, CommitMode::Sync).unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        assert_eq!(committed(&brokers, &group), Some(3));
     }
 
     /// Pins that dropping the feed's consumer thread returns with an assignment
@@ -2375,12 +2400,7 @@ mod cluster {
             panic!("poisoning the intent lock");
         })
         .join();
-        let dropped = returns_within(HANG, move || drop(d));
-        if !dropped {
-            // Its consumer is still connected; dropping it would wait on it.
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the driver did not return");
+        assert_returns(cluster, HANG, "dropping the driver", move || drop(d));
     }
 
     /// Pins that dropping the driver answers a lost assignment's revocation
@@ -4013,16 +4033,11 @@ mod cluster {
         cluster.broker_down(1).unwrap();
         let _queued = feed.publish(Unit::new("fills-the-queue", Vec::new()));
         let acknowledging = Arc::clone(&feed);
-        let returned = returns_within(HANG, move || {
-            let _ = acknowledging.acknowledge(delivery.receipt);
-        });
-        if !returned {
-            // The state lock is held for good; stopping would wait on it.
-            std::mem::forget(admission);
-            std::mem::forget(d);
-            std::mem::forget(cluster);
-            panic!("acknowledging did not return");
-        }
+        // A held state lock is held for good; stopping would wait on it.
+        let (admission, _d, cluster) =
+            assert_returns((admission, d, cluster), HANG, "acknowledging", move || {
+                let _ = acknowledging.acknowledge(delivery.receipt);
+            });
         assert_eq!(
             feed.core.lock().resends.len(),
             1,
@@ -5352,17 +5367,6 @@ mod cluster {
         got.unwrap()
     }
 
-    fn work_high_watermark(brokers: &str) -> i64 {
-        let probe: BaseConsumer = raw_config()
-            .set("bootstrap.servers", brokers)
-            .build()
-            .unwrap();
-        probe
-            .fetch_watermarks("units", 0, Duration::from_secs(10))
-            .unwrap()
-            .1
-    }
-
     /// Pins that a publish too large for the producer is refused, and that
     /// the publisher goes on publishing.
     #[test]
@@ -5396,7 +5400,11 @@ mod cluster {
         assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
         let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
         assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
-        assert_eq!(work_high_watermark(&brokers), 0);
+        let reader = spate_test_support::consumer(&brokers, &[]).unwrap();
+        assert_eq!(
+            spate_test_support::high_watermark(&reader, "units", 0, HANG),
+            Ok(0)
+        );
     }
 
     /// Pins that dropping a publisher with a publish in flight settles that
@@ -5589,15 +5597,11 @@ mod cluster {
         f: impl FnOnce(&mut Driver) -> T + Send + 'static,
     ) -> (MockKafka, Driver, T) {
         let (tx, rx) = mpsc::channel();
-        let returned = returns_within(HANG, move || {
+        let cluster = assert_returns(cluster, HANG, what, move || {
             let mut d = d;
             let out = f(&mut d);
             let _ = tx.send((d, out));
         });
-        if !returned {
-            std::mem::forget(cluster);
-            panic!("{what} did not return");
-        }
         let (d, out) = rx.recv().expect("handed back");
         (cluster, d, out)
     }
@@ -5694,12 +5698,10 @@ mod cluster {
     /// Run the consumer thread's end, `d` on a thread of its own, and fail when
     /// it does not return.
     fn ends(cluster: &MockKafka, d: Driver) {
-        let returned = returns_within(HANG, move || consumer::run(d));
-        if !returned {
-            // Its clients are still connected, and dropping it would wait on them.
-            std::mem::forget(cluster.clone());
-        }
-        assert!(returned, "the consumer thread did not end");
+        // Its clients are still connected, and dropping it would wait on them.
+        assert_returns(cluster.clone(), HANG, "the consumer thread", move || {
+            consumer::run(d);
+        });
     }
 
     /// Pins that a close whose last commit the group does not answer settles as
@@ -5713,14 +5715,10 @@ mod cluster {
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         slow(&cluster);
         let (tx, rx) = mpsc::channel();
-        let returned = returns_within(HANG, move || {
+        assert_returns(cluster.clone(), HANG, "the consumer thread", move || {
             let warned = spate_test::capture_logs(tracing::Level::WARN, move || consumer::run(d));
             let _ = tx.send(warned);
         });
-        if !returned {
-            std::mem::forget(cluster.clone());
-        }
-        assert!(returned, "the consumer thread did not end");
         let warned = rx.recv().expect("sent");
         assert!(
             warned
@@ -6281,16 +6279,14 @@ mod cluster {
         fn fences(&self, partition: i32) -> Vec<i64> {
             use rdkafka::Message as _;
             use rdkafka::error::KafkaError;
-            let consumer: BaseConsumer = raw_config()
-                .set("bootstrap.servers", self.cluster.bootstrap_servers())
-                .set("group.id", spate_test::unique_name("fences"))
-                .set("enable.partition.eof", "true")
-                .build()
-                .unwrap();
-            let mut tpl = TopicPartitionList::new();
-            tpl.add_partition_offset(ATTEMPTS, partition, Offset::Beginning)
-                .unwrap();
-            consumer.assign(&tpl).unwrap();
+            let group = spate_test::unique_name("fences");
+            let consumer = spate_test_support::from_start(
+                &self.cluster.bootstrap_servers(),
+                ATTEMPTS,
+                &[partition],
+                &[("group.id", &group), ("enable.partition.eof", "true")],
+            )
+            .unwrap();
             let mut fences = Vec::new();
             wait_until(HANG, "the end of the attempt partition", || match consumer
                 .poll(Duration::from_millis(100))
@@ -6795,15 +6791,9 @@ mod docker {
 
     /// The offset of the first record a fresh read of `topic` finds.
     fn first_offset(brokers: &str, topic: &str) -> Option<i64> {
-        let consumer: BaseConsumer = raw_config()
-            .set("bootstrap.servers", brokers)
-            .set("group.id", spate_test::unique_name("first"))
-            .build()
-            .unwrap();
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition_offset(topic, 0, Offset::Beginning)
-            .unwrap();
-        consumer.assign(&tpl).unwrap();
+        let group = spate_test::unique_name("first");
+        let consumer =
+            spate_test_support::from_start(brokers, topic, &[0], &[("group.id", &group)]).unwrap();
         (0..50).find_map(|_| {
             consumer
                 .poll(Duration::from_millis(100))

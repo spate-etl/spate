@@ -14,6 +14,7 @@ use spate_core::record::{NO_EVENT_TIME_MS, PartitionId};
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, metric_series, wait_until};
+use spate_test_support::assert_returns;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -1745,7 +1746,7 @@ fn dropping_after_a_discard_returns() {
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "drop-discard");
         driver.settle_group(2, 1);
-        returns_within("dropping after a discard", move || drop(driver));
+        assert_returns((), HANG, "dropping after a discard", move || drop(driver));
     });
 }
 
@@ -1769,7 +1770,12 @@ fn dropping_in_the_pass_after_a_discard_returns() {
                 || matches!(event, Some(Ok(SourceEvent::LanesAssigned(_))))
         });
         let _ = source.flush_commits();
-        returns_within("dropping in the pass after a discard", move || drop(source));
+        assert_returns(
+            (),
+            HANG,
+            "dropping in the pass after a discard",
+            move || drop(source),
+        );
     });
 }
 
@@ -2026,23 +2032,6 @@ fn consumer_series_carry_no_passthrough_value() {
     assert!(leaked.is_empty(), "{leaked:#?}");
 }
 
-/// Run `f` on a helper thread and fail if it does not return in time: a
-/// drop that waits on an unacknowledged rebalance never returns.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a thread that never returns is the failure; the test fails instead of joining it"
-)]
-fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
-    let (done, finished) = mpsc::channel();
-    std::thread::spawn(move || {
-        f();
-        let _ = done.send(());
-    });
-    finished
-        .recv_timeout(HANG)
-        .unwrap_or_else(|_| panic!("{what} did not return"));
-}
-
 /// Poll `source` until it surfaces a revocation, which it leaves
 /// unacknowledged.
 fn await_revocation(source: &mut KafkaSource, what: &str) {
@@ -2087,7 +2076,7 @@ fn dropping_mid_revoke_returns() {
     let mut source = driver.source;
     let lanes = driver.lanes;
     await_revocation(&mut source, "a revocation");
-    returns_within("dropping the source mid-revoke", move || {
+    assert_returns((), HANG, "dropping the source mid-revoke", move || {
         drop(lanes);
         drop(source);
     });
@@ -2123,7 +2112,7 @@ fn dropping_mid_lost_revoke_returns() {
             .any(|l| l.contains("librdkafka") && l.contains("fac=\"LOST\"")),
         "no assignment was marked lost: {lines:#?}"
     );
-    returns_within("dropping the source mid lost revoke", move || {
+    assert_returns((), HANG, "dropping the source mid lost revoke", move || {
         drop(lanes);
         drop(source);
     });
@@ -2140,7 +2129,7 @@ fn dropping_the_source_before_its_lanes_completes() {
     let mut driver = Driver::open(config(&brokers, "drop-order"));
     driver.settle(2);
     let Driver { source, lanes, .. } = driver;
-    returns_within("dropping the source, then its lanes", move || {
+    assert_returns((), HANG, "dropping the source, then its lanes", move || {
         drop(source);
         drop(lanes);
     });
@@ -2156,7 +2145,9 @@ fn dropping_an_unpolled_source_with_a_backlog_returns() {
     produce(&brokers, TOPIC, 100, 2, "b");
 
     let Driver { source, .. } = Driver::open(config(&brokers, "drop-unpolled"));
-    returns_within("dropping an unpolled source", move || drop(source));
+    assert_returns((), HANG, "dropping an unpolled source", move || {
+        drop(source)
+    });
 }
 
 /// A commit that carries a watermark for a partition no consumer of the

@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
-use support::{CH_PASSWORD, Harness, http_get};
+use support::{CH_PASSWORD, Harness, committed_total, http_get};
 
 /// How long an example may take to reach its expected output before the test
 /// gives up. Sized for a cold start against a freshly booted broker, where
@@ -546,7 +546,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     // to replay. The wait above makes this reachable: every lined order
     // landing means every partition was consumed past the line-less ones
     // ahead of them.
-    let committed: i64 = h.committed("orders", "orders-etl", 2).into_iter().sum();
+    let committed = committed_total(&h.committed("orders", "orders-etl", 2));
     assert_eq!(
         committed,
         orders + unlined,
@@ -633,10 +633,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
         u64::try_from(placed).expect("placed"),
         "the lines cover every order, one group each"
     );
-    let committed: i64 = h
-        .committed("order-placed", "order-lines-etl", 2)
-        .into_iter()
-        .sum();
+    let committed = committed_total(&h.committed("order-placed", "order-lines-etl", 2));
     assert_eq!(
         committed, placed,
         "the drain committed a watermark covering every order"
@@ -766,10 +763,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     );
     // Both branches clone the source batch's ack, so the watermark advances
     // only once every table a batch's events landed in has written.
-    let committed: i64 = h
-        .committed("storefront-events", "storefront-split-etl", 2)
-        .into_iter()
-        .sum();
+    let committed = committed_total(&h.committed("storefront-events", "storefront-split-etl", 2));
     assert_eq!(
         committed,
         settled * 3,
@@ -856,10 +850,7 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     );
     // Delivery reports for every derived record are what let the watermark
     // advance, so a committed offset per source record is the drain's receipt.
-    let committed: i64 = h
-        .committed("orders", "orders-split-etl", 2)
-        .into_iter()
-        .sum();
+    let committed = committed_total(&h.committed("orders", "orders-split-etl", 2));
     assert_eq!(
         committed,
         i64::try_from(payloads.len()).expect("produced"),

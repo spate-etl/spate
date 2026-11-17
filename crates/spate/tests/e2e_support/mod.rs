@@ -25,6 +25,7 @@
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use rdkafka::ClientConfig;
+pub use rdkafka::Offset;
 use rdkafka::admin::{NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseRecord, Producer};
@@ -43,7 +44,8 @@ use spate_test::HANG;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
     CLUSTER_NODES, KafkaBroker, KafkaCluster, PartitionState, RegistryStub, SingleBroker,
-    container_image, create_topics, http, producer, ready, send, transactional_producer,
+    committed_offsets, consumer, container_image, create_topics, high_watermark, http, producer,
+    ready, send, transactional_producer,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -422,15 +424,16 @@ impl Harness {
         spate_test::confluent_frame(SCHEMA_ID, &datum)
     }
 
-    /// Committed offset per partition for a group (0 when none).
-    pub fn committed(&self, topic: &str, group: &str, partitions: i32) -> Vec<i64> {
-        read_committed(
+    /// Committed offset per partition for a group. No commit reads as
+    /// `Offset::Invalid`.
+    pub fn committed(&self, topic: &str, group: &str, partitions: i32) -> Vec<Offset> {
+        committed_offsets(
             &probe_consumer(&self.brokers, group),
             topic,
             partitions,
-            Duration::from_secs(10),
+            HANG,
         )
-        .expect("committed offsets")
+        .unwrap_or_else(|e| panic!("{e}"))
     }
 
     // ── Pipeline assembly (mirrors the flagship example) ───────────────
@@ -1043,16 +1046,27 @@ impl SampleTarget {
 }
 
 /// A consumer in `group` that reads the group's offsets and joins nothing.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the harness reads the group's offsets outside the connector's client factory"
-)]
 fn probe_consumer(brokers: &str, group: &str) -> BaseConsumer {
-    ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .create()
-        .expect("probe consumer")
+    consumer(brokers, &[("group.id", group)]).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The records `committed` covers across its partitions: a commit at `n`
+/// covers `n`, and no commit none.
+///
+/// # Panics
+///
+/// On an offset that is neither a commit nor `Offset::Invalid`.
+pub fn committed_total(committed: &[Offset]) -> i64 {
+    committed.iter().map(|&offset| covered(offset)).sum()
+}
+
+/// The records one partition's committed `offset` covers.
+fn covered(offset: Offset) -> i64 {
+    match offset {
+        Offset::Offset(n) => n,
+        Offset::Invalid => 0,
+        other => panic!("a committed offset reads {other:?}"),
+    }
 }
 
 /// The partitions of the scenario's topic, which exists before its pipeline.
@@ -1065,48 +1079,27 @@ fn partition_count(probe: &BaseConsumer, params: &PipelineParams) -> i32 {
     i32::try_from(count).expect("partition count")
 }
 
-/// Committed offset per partition (0 when none).
+/// The records committed per partition, 0 where none is, read again within
+/// `timeout`.
 fn read_committed(
     probe: &BaseConsumer,
     topic: &str,
     partitions: i32,
     timeout: Duration,
-) -> rdkafka::error::KafkaResult<Vec<i64>> {
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition(topic, p);
-    }
-    let committed = probe.committed_offsets(tpl, timeout)?;
-    Ok((0..partitions)
-        .map(|p| {
-            committed
-                .find_partition(topic, p)
-                .map(|e| match e.offset() {
-                    rdkafka::Offset::Offset(o) => o,
-                    _ => 0,
-                })
-                .unwrap_or(0)
-        })
-        .collect())
+) -> Result<Vec<i64>, String> {
+    let committed = committed_offsets(probe, topic, partitions, timeout)?;
+    Ok(committed.into_iter().map(covered).collect())
 }
 
 /// The offset after each partition's last record.
 fn read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<i64> {
-    try_read_ends(probe, topic, partitions).expect("watermarks")
+    try_read_ends(probe, topic, partitions).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// [`read_ends`], returning the first failed read.
-fn try_read_ends(
-    probe: &BaseConsumer,
-    topic: &str,
-    partitions: i32,
-) -> rdkafka::error::KafkaResult<Vec<i64>> {
+/// [`read_ends`], returning the first read that failed within its 5 s.
+fn try_read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
     (0..partitions)
-        .map(|p| {
-            probe
-                .fetch_watermarks(topic, p, PROBE_TIMEOUT)
-                .map(|(_, high)| high)
-        })
+        .map(|p| high_watermark(probe, topic, p, PROBE_TIMEOUT))
         .collect()
 }
 

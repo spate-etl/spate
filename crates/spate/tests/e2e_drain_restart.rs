@@ -90,10 +90,12 @@ fn drain_then_resume(
     let committed = h.committed(&params.topic, &params.group, partitions);
     for (p, c) in committed.iter().enumerate() {
         let lo = event_id(i32::try_from(p).expect("partition"), 0);
-        assert!(
-            *c > 0,
-            "partition {p}: nothing committed after a drain that wrote rows: {committed:?}"
-        );
+        let c = match *c {
+            Offset::Offset(c) if c > 0 => c,
+            _ => panic!(
+                "partition {p}: nothing committed after a drain that wrote rows: {committed:?}"
+            ),
+        };
         let hi = lo + c;
         let present = h.scalar(&format!(
             "SELECT uniqExact(id) FROM {} WHERE id >= {lo} AND id < {hi}",
@@ -101,7 +103,7 @@ fn drain_then_resume(
         ));
         assert_eq!(
             present,
-            u64::try_from(*c).expect("offset"),
+            u64::try_from(c).expect("offset"),
             "partition {p}: committed to {c} but rows are missing — \
              the watermark ran ahead of durable writes"
         );
@@ -125,10 +127,7 @@ fn drain_then_resume(
     let rows = h.count(&params.table);
     let uniq = h.uniq(&params.table);
     assert_eq!(uniq, total as u64, "zero loss across drain + restart");
-    let final_committed: i64 = h
-        .committed(&params.topic, &params.group, partitions)
-        .iter()
-        .sum();
+    let final_committed = committed_total(&h.committed(&params.topic, &params.group, partitions));
     assert_eq!(
         final_committed, total as i64,
         "everything committed at the end"

@@ -51,7 +51,9 @@ pub(crate) fn metadata_probe(bootstrap: &str) -> Result<BaseConsumer, String> {
 }
 
 /// Creates `topics` on `bootstrap` and waits until its metadata lists each
-/// one with every partition, all within `bound`.
+/// one with every partition. `bound` limits the request and the wait
+/// together. A metadata read under way when it passes finishes first, which
+/// can take up to 5 s more.
 ///
 /// A broker can report a topic it has just created as missing for a while,
 /// so a test that reads or writes it straight away waits here first.

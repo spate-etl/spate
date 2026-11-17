@@ -386,10 +386,7 @@ mod tests {
     #[test]
     fn a_single_quoted_value_keeps_its_double_quotes() {
         let html = r#"<meta name=description content='A "quoted" page.'>"#;
-        assert_eq!(
-            description_of(html).as_deref(),
-            Some(r#"A "quoted" page."#)
-        );
+        assert_eq!(description_of(html).as_deref(), Some(r#"A "quoted" page."#));
     }
 
     #[test]
@@ -422,7 +419,10 @@ mod tests {
             read(r#"<meta name=description content="&amp;quot;">"#),
             "&amp;quot;"
         );
-        assert_eq!(read(r#"<meta name=description content="&apos;">"#), "&apos;");
+        assert_eq!(
+            read(r#"<meta name=description content="&apos;">"#),
+            "&apos;"
+        );
         assert_eq!(read("<meta name=description content='&quot;'>"), "&quot;");
     }
 
@@ -449,9 +449,15 @@ mod tests {
 
     #[test]
     fn a_url_maps_to_its_page_file() {
-        assert_eq!(page_file("https://host/"), Some(PathBuf::from("index.html")));
+        assert_eq!(
+            page_file("https://host/"),
+            Some(PathBuf::from("index.html"))
+        );
         assert_eq!(page_file("https://host"), Some(PathBuf::from("index.html")));
-        assert_eq!(page_file("https://host/a/b"), Some(PathBuf::from("a/b.html")));
+        assert_eq!(
+            page_file("https://host/a/b"),
+            Some(PathBuf::from("a/b.html"))
+        );
         assert_eq!(page_file("/a"), Some(PathBuf::from("a.html")));
     }
 
@@ -523,7 +529,11 @@ mod tests {
         let scratch = Scratch::new("xtask-site-check").unwrap();
         std::fs::write(scratch.join("sitemap.xml"), "<urlset></urlset>").unwrap();
         let err = description_problems(scratch.dir()).unwrap_err();
-        assert!(err.message.ends_with("sitemap.xml: lists no page"), "{}", err.message);
+        assert!(
+            err.message.ends_with("sitemap.xml: lists no page"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

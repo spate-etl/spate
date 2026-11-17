@@ -18,9 +18,7 @@ use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, wait_until};
 use spate_test_s3_feed::{recs, written};
-use spate_test_support::{
-    ACCESS_KEY, KAFKA_PORT, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, SingleBroker, Store,
-};
+use spate_test_support::{KAFKA_PORT, RGW_OPAQUE_DATA, S3Store, SingleBroker, Store};
 use support::broker;
 use support::feed::{
     DEAD, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark, launch_source,
@@ -464,10 +462,8 @@ impl Notifying {
     fn worker(&self, name: &str) -> Reading {
         let group = spate_test::unique_name(name);
         let source = format!(
-            "  s3:\n    url: \"s3://{BUCKET}/\"\n    store:\n      endpoint: \"{}\"\n      \
-             allow_http: \"true\"\n      access_key_id: \"{ACCESS_KEY}\"\n      \
-             secret_access_key: \"{SECRET_KEY}\"\n      region: \"{REGION}\"\n",
-            self.s3.endpoint()
+            "  s3:\n    url: \"s3://{BUCKET}/\"\n    store:\n{}\n",
+            self.s3.store_options_yaml()
         );
         let worker = launch_source(
             KafkaFeed::connect,

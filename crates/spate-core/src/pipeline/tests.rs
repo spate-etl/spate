@@ -475,6 +475,34 @@ fn blocked_chain_pauses_then_resumes() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// A pause raised while the second lane's batch is blocked names both lanes.
+/// The lanes share a partition, so the controller hands them over in order and
+/// the first is held before the second can be polled.
+#[test]
+fn a_mid_batch_pause_names_every_lane_of_the_thread() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::BlockOnce(AtomicBool::new(false)),
+        batches_seen: 0,
+    });
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        lane(0, 0, &[]),
+        lane(1, 0, std::slice::from_ref(&(0..10))),
+    ]));
+    wait_until(spate_test::HANG, "the blocked batch pauses", || {
+        !h.shared.lock().unwrap().pauses.is_empty()
+    });
+    assert_eq!(
+        h.shared.lock().unwrap().pauses[0],
+        vec![LaneId(0), LaneId(1)]
+    );
+    h.shutdown.trigger();
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
 /// A batch that can never unblock must not hold shutdown hostage until the
 /// barrier deadline. The driver's retry loop observes the shutdown flag,
 /// abandons the batch (failing its acknowledgment so the data replays),

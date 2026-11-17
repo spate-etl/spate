@@ -357,14 +357,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // The poll result borrows the lane's buffers, so the fatal is latched
         // here and acted on once this block ends.
         let fatal_reported = {
-            // The batch holds the polled lane mutably, so a transition reads
-            // the other lanes' IDs through this split, and only when it fires.
-            let (before, rest) = lanes.split_at_mut(lane_idx);
-            let (lane, after) = rest
-                .split_first_mut()
-                .expect("lane_idx is below lanes.len()");
-            let polled_id = lane.id();
-            let owned = || lane_ids_around(before, polled_id, after);
+            let (lane, owned) = split_for_poll(&mut lanes, lane_idx);
             let poll_started = Stopwatch::start(&SystemClock);
             let polled = lane.poll(params.max_records, lane_timeout);
             source_metrics.poll_duration(poll_started.elapsed(&SystemClock));
@@ -730,15 +723,33 @@ fn idle_flush(
     }
 }
 
-/// The IDs of every lane the thread holds, in rotation order, while the lane
-/// at the split is borrowed for its poll.
-fn lane_ids_around<L: SourceLane>(before: &[L], polled: LaneId, after: &[L]) -> Vec<LaneId> {
-    before
-        .iter()
-        .map(SourceLane::id)
-        .chain(std::iter::once(polled))
-        .chain(after.iter().map(SourceLane::id))
-        .collect()
+/// The lane at `idx`, borrowed for its poll, and a function that lists every
+/// lane's ID in rotation order.
+///
+/// The poll's batch holds the lane mutably, so a transition raised while the
+/// batch is pushed reads the other lanes through this split, and only when it
+/// fires.
+///
+/// # Panics
+///
+/// When `idx` is not below `lanes.len()`.
+fn split_for_poll<L: SourceLane>(
+    lanes: &mut [L],
+    idx: usize,
+) -> (&mut L, impl Fn() -> Vec<LaneId> + '_) {
+    let (before, rest) = lanes.split_at_mut(idx);
+    let (lane, after) = rest.split_first_mut().expect("idx is below lanes.len()");
+    let polled = lane.id();
+    let (before, after): (&[L], &[L]) = (before, after);
+    let ids = move || {
+        before
+            .iter()
+            .map(SourceLane::id)
+            .chain(std::iter::once(polled))
+            .chain(after.iter().map(SourceLane::id))
+            .collect()
+    };
+    (lane, ids)
 }
 
 fn apply_transition(
@@ -775,20 +786,20 @@ mod tests {
         ids.iter().map(|&id| DefaultLane(LaneId(id))).collect()
     }
 
-    /// Wherever the split falls, the IDs come back in rotation order with the
-    /// polled lane in its place.
+    /// Wherever the split falls, it lends the lane at that index and lists
+    /// every lane's ID in rotation order.
     #[test]
-    fn lane_ids_around_keeps_rotation_order_at_every_split() {
-        let all = vec![LaneId(0), LaneId(1), LaneId(2)];
-        assert_eq!(lane_ids_around(&lanes(&[0]), LaneId(1), &lanes(&[2])), all);
-        assert_eq!(
-            lane_ids_around(&lanes(&[]), LaneId(0), &lanes(&[1, 2])),
-            all
-        );
-        assert_eq!(
-            lane_ids_around(&lanes(&[0, 1]), LaneId(2), &lanes(&[])),
-            all
-        );
+    fn split_for_poll_lists_every_lane_at_every_split() {
+        let mut held = lanes(&[0, 1, 2]);
+        for idx in 0..held.len() {
+            let (lane, ids) = split_for_poll(&mut held, idx);
+            assert_eq!(lane.id(), LaneId(u32::try_from(idx).unwrap()));
+            assert_eq!(
+                ids(),
+                vec![LaneId(0), LaneId(1), LaneId(2)],
+                "split at {idx}"
+            );
+        }
     }
 
     /// Each setting reaches the driver field the runtime reads it from. Every

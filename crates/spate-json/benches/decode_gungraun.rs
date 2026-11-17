@@ -77,6 +77,16 @@
 //! - `large_string` — one field roughly five orders of magnitude larger than its
 //!   neighbors.
 //!
+//! ## Event lines
+//!
+//! - `ndjson_events` — [`RECORDS`] lines of about 600 bytes, each a request
+//!   log entry nested three objects deep, mostly strings, decoded into a
+//!   struct with `String`, `Vec<String>` and string-to-string `HashMap` fields.
+//!   That is the line a log or event pipeline decodes, and the one the choice
+//!   between the two decode backends is read on. Its framing, policy and
+//!   record count are `ndjson_clean`'s, so the pair differs in the record and
+//!   nothing else.
+//!
 //! ## The duplicate-key guard
 //!
 //! `reject_duplicate_keys` parses each document a second time through a
@@ -115,8 +125,8 @@
 //! limiter behind the skip warning allows five events per ten *seconds*, so a
 //! poison case whose warm pass and measured pass together straddled a window
 //! roll would emit up to five extra log events on one run and not the next.
-//! Nothing observed comes near it: the whole twenty-two-case binary takes 29
-//! seconds in an aarch64 Linux container on a development machine, which
+//! Nothing observed comes near it: the whole twenty-three-case binary takes 20
+//! to 30 seconds in an aarch64 Linux container on a development machine, which
 //! bounds any one case's process (valgrind startup, corpus construction, warm
 //! pass and measured region together) at a small multiple of a second. A
 //! poison row that moved by a few hundred instructions between runs would be
@@ -130,8 +140,9 @@
 //! the framing. The error axis is exercised only on `ndjson` and `array`,
 //! because `single` framing has one record to fail and its error path is the
 //! per-record one these already charge, run once. And the shape axis is
-//! exercised only under the dynamically-typed target, because a struct can
-//! only be given one of these shapes at a time. Callgrind runs the workload
+//! exercised under the dynamically-typed target, because a struct can only be
+//! given one of these shapes at a time; the one typed point on it is the
+//! event line. Callgrind runs the workload
 //! under emulation, and a case that re-measures a combination two others
 //! already fix costs real time on every pull request.
 //!
@@ -156,7 +167,7 @@ mod orders;
 mod shapes;
 
 use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, keyed, rig, shape_rig};
-use orders::{BAD_EVERY, Corruption, LineItem, Order, RECORDS};
+use orders::{BAD_EVERY, Corruption, Event, LineItem, Order, RECORDS};
 
 /// The number of records the batch framings carry. Fifty is the same batch
 /// size the Avro decode bench uses, so the two are comparable per element.
@@ -169,12 +180,15 @@ const LABELS: (&str, &str) = ("bench", "json");
 /// [`batch_rig`] and [`shape_rig`] under this binary's labels. The shared rig
 /// takes them per call for `tests/bench_fixtures.rs`, which builds several
 /// rigs in one process; here there is nothing to separate.
-fn batch(
+fn batch<P>(
     framing: JsonFraming,
     on_error: OnError,
     payload: Vec<u8>,
     expect: u64,
-) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
+) -> Rig<spate_json::JsonSerdeDeserializer<P>>
+where
+    P: serde::de::DeserializeOwned + Send + 'static,
+{
     batch_rig(framing, on_error, payload, expect, LABELS)
 }
 
@@ -257,6 +271,15 @@ fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     )
 }
 
+fn events_rig() -> Rig<spate_json::JsonSerdeDeserializer<Event>> {
+    batch(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::events_ndjson(RECORDS),
+        RECORDS,
+    )
+}
+
 fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Array,
@@ -322,6 +345,21 @@ fn decode_batch(
     rig
 }
 
+// The nested event lines, under the same framing, policy and record count as
+// `ndjson_clean`.
+#[library_benchmark]
+#[bench::ndjson_events(events_rig())]
+fn decode_events(
+    mut rig: Rig<spate_json::JsonSerdeDeserializer<Event>>,
+) -> Rig<spate_json::JsonSerdeDeserializer<Event>> {
+    assert_eq!(
+        decode_run::<Owned<Event>, _>(&mut rig),
+        rig.expect,
+        "the framing emitted a different count"
+    );
+    rig
+}
+
 // The one case whose payload must fail the whole call. Split out because the
 // assertion is the opposite one, and because a `Fail` fixture that decoded
 // cleanly would otherwise pass as a fast version of `ndjson_fail_clean`.
@@ -365,6 +403,7 @@ library_benchmark_group!(
         decode_value,
         decode_framed,
         decode_batch,
+        decode_events,
         decode_batch_failing,
         decode_shape
 );

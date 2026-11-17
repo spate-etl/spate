@@ -1,7 +1,8 @@
 //! Decode fixtures shared by `benches/decode_wall.rs` (wall time) and
 //! `benches/decode_gungraun.rs` (instruction counts): a flat 15-field record,
-//! a seven-field order line, and the three payload framings the deserializer
-//! supports, clean and corrupted.
+//! a seven-field order line, the three payload framings the deserializer
+//! supports, clean and corrupted, and a nested event line of the kind a log
+//! or event pipeline decodes.
 //!
 //! Included with `#[path]` rather than imported: a bench target is its own
 //! crate, so two targets can only agree on a workload by compiling the same
@@ -17,7 +18,9 @@
 // would itself go unfulfilled in whichever target does use the item.
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::BTreeMap;
+use std::hash::{BuildHasherDefault, DefaultHasher};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Order {
@@ -90,7 +93,7 @@ pub(crate) fn sample_lines(n: u64) -> Vec<LineItem> {
     (0..n).map(sample_line).collect()
 }
 
-pub(crate) fn ndjson(lines: &[LineItem]) -> Vec<u8> {
+pub(crate) fn ndjson<T: Serialize>(lines: &[T]) -> Vec<u8> {
     let mut out = Vec::new();
     for r in lines {
         out.extend_from_slice(&serde_json::to_vec(r).unwrap());
@@ -112,6 +115,206 @@ pub(crate) fn lines_array(n: u64) -> Vec<u8> {
 /// `n` lines newline-delimited, the `ndjson` framing's payload.
 pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
     ndjson(&sample_lines(n))
+}
+
+// ---------------------------------------------------------------------------
+// Event lines.
+//
+// The records above are flat and their strings are short. A log or event
+// pipeline decodes lines of a few hundred bytes, nested two or three levels,
+// made mostly of strings, into a struct with `String`, `Vec<String>` and map
+// fields. That is the shape a choice of decode backend is measured on.
+// ---------------------------------------------------------------------------
+
+/// std's map with std's SipHash-1-3, keyed by a fixed key in place of a fresh
+/// random one.
+///
+/// The hashing and allocation are those of the `HashMap<String, String>` a
+/// user's record declares. A random key makes the counted case vary by up to
+/// 0.8% from run to run under the `simd` backend, almost all of it in glibc
+/// malloc. A fixed key keeps it repeating to the instruction.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the bench measures decoding the std map a user's record declares"
+)]
+pub(crate) type Labels =
+    std::collections::HashMap<String, String, BuildHasherDefault<DefaultHasher>>;
+
+/// One event line: a request log entry with its host, request and client.
+///
+/// Three objects deep (`Event`, `Request`, `Client`), with one integer among
+/// eighteen string values. `tests/bench_fixtures.rs` pins the corpus bytes and
+/// the line shape.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub(crate) struct Event {
+    pub(crate) id: String,
+    pub(crate) ts: String,
+    pub(crate) level: String,
+    pub(crate) service: String,
+    pub(crate) message: String,
+    pub(crate) host: Host,
+    pub(crate) request: Request,
+    pub(crate) tags: Vec<String>,
+    #[serde(serialize_with = "in_key_order")]
+    pub(crate) labels: Labels,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub(crate) struct Host {
+    pub(crate) name: String,
+    pub(crate) zone: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub(crate) struct Request {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) status: u16,
+    pub(crate) user_agent: String,
+    pub(crate) client: Client,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub(crate) struct Client {
+    pub(crate) ip: String,
+    pub(crate) city: String,
+}
+
+/// Writes a map's entries sorted by key. A `HashMap`'s iteration order is not
+/// promised across Rust releases, even with a fixed key, and the corpus has to
+/// be the same bytes on every toolchain for `tests/bench_fixtures.rs` to pin it.
+fn in_key_order<S: Serializer>(map: &Labels, s: S) -> Result<S::Ok, S::Error> {
+    map.iter().collect::<BTreeMap<_, _>>().serialize(s)
+}
+
+// Table lengths are primes from 2 to 13, so the table values on a line repeat
+// together only every 30,030 lines, well past the corpus.
+
+const LEVELS: [&str; 3] = ["info", "warn", "error"];
+
+const METHODS: [&str; 2] = ["GET", "POST"];
+
+const SERVICES: [&str; 5] = [
+    "checkout-api",
+    "inventory-worker",
+    "auth-gateway",
+    "search-frontend",
+    "billing-reconciler",
+];
+
+/// One message carries an escaped quote, so both backends leave their fast
+/// string path on some lines.
+const MESSAGES: [&str; 7] = [
+    "request completed for customer \"{id}\" after a cache miss",
+    "upstream returned a retryable status; retrying in 200 ms",
+    "order {id} moved from pending to fulfilled",
+    "token refresh succeeded for session {id}",
+    "slow query on orders_by_customer exceeded the 250 ms budget",
+    "cart {id} merged with the anonymous cart",
+    "rate limit reached for api key {id}; rejected with 429",
+];
+
+const PATHS: [&str; 11] = [
+    "/api/v2/orders/{id}/items",
+    "/api/v2/customers/{id}/addresses/default",
+    "/api/v1/search?q=wireless+headphones&page=2",
+    "/static/js/app.3f9c2e1b.min.js",
+    "/api/v2/payments/{id}/capture",
+    "/api/v2/carts/{id}/merge",
+    "/api/v1/recommendations?customer={id}",
+    "/api/v2/inventory/sku/{id}/reserve",
+    "/auth/oauth2/token",
+    "/api/v2/orders/{id}/cancel",
+    "/api/v1/catalog/categories/audio/products",
+];
+
+const AGENTS: [&str; 5] = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+    "okhttp/4.12.0 (Android 14; Pixel 8)",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) Mobile/15E148",
+    "python-requests/2.32.3",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) Gecko/20100101 Firefox/132.0",
+];
+
+/// Several carry multi-byte UTF-8, which both backends validate.
+const CITIES: [&str; 13] = [
+    "London, United Kingdom",
+    "São Paulo, Brazil",
+    "Zürich, Switzerland",
+    "Kraków, Poland",
+    "東京, Japan",
+    "Montréal, Canada",
+    "Dublin, Ireland",
+    "Frankfurt, Germany",
+    "Málaga, Spain",
+    "Singapore, Singapore",
+    "Göteborg, Sweden",
+    "Austin, United States",
+    "Reykjavík, Iceland",
+];
+
+const TEAMS: [&str; 7] = [
+    "payments-core",
+    "platform-infra",
+    "search-relevance",
+    "growth-experiments",
+    "fulfilment-ops",
+    "identity-access",
+    "catalog-quality",
+];
+
+const ROLLOUTS: [&str; 3] = ["edge-cache-hit", "canary-release", "batch-replay"];
+
+/// Line `i` of the event corpus.
+pub(crate) fn sample_event(i: u64) -> Event {
+    let id = format!("{i:08x}");
+    let pick = |table: &[&str]| {
+        let n = table.len() as u64;
+        table[usize::try_from(i % n).expect("an index below the table length")].replace("{id}", &id)
+    };
+    let service = pick(&SERVICES);
+    let labels = Labels::from_iter([
+        ("team".to_owned(), pick(&TEAMS)),
+        ("deployment".to_owned(), format!("{service}-{}", i % 3)),
+        ("release".to_owned(), format!("release-2026.11.{}", i % 17)),
+    ]);
+    Event {
+        id: format!("0f8e7d6c-5b4a-4392-8170-{i:012x}"),
+        ts: format!(
+            "2026-03-01T12:{:02}:{:02}.{:03}Z",
+            (i / 60) % 60,
+            i % 60,
+            (i * 37) % 1000
+        ),
+        level: pick(&LEVELS),
+        message: pick(&MESSAGES),
+        host: Host {
+            name: format!("web-{:03}.prod.internal", i % 211),
+            zone: format!("eu-west-2{}", ["a", "b", "c"][(i % 3) as usize]),
+        },
+        request: Request {
+            method: pick(&METHODS),
+            path: pick(&PATHS),
+            status: [200, 201, 304, 404, 503][(i % 5) as usize],
+            user_agent: pick(&AGENTS),
+            client: Client {
+                ip: format!("203.0.113.{}", i % 256),
+                city: pick(&CITIES),
+            },
+        },
+        tags: vec![
+            pick(&ROLLOUTS),
+            format!("partition-{:02}", i % 16),
+            format!("region-{}", ["eu-west", "us-east"][(i % 2) as usize]),
+        ],
+        service,
+        labels,
+    }
+}
+
+/// `n` event lines newline-delimited, the `ndjson` framing's payload.
+pub(crate) fn events_ndjson(n: u64) -> Vec<u8> {
+    ndjson(&(0..n).map(sample_event).collect::<Vec<_>>())
 }
 
 // ---------------------------------------------------------------------------

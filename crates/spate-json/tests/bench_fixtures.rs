@@ -20,7 +20,7 @@ use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::stable_key_hash;
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
-use spate_test::raw_payload;
+use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::pin;
 
 #[path = "../benches/support/decode_rig.rs"]
@@ -36,7 +36,7 @@ mod shapes;
 
 use decode_rig::Sink;
 use lines::Eol;
-use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
+use orders::{BAD_EVERY, Corruption, Event, LineItem, RECORDS};
 
 /// What one payload through one deserializer produced: whether the call
 /// failed, and how many records reached the sink. The same two quantities
@@ -101,6 +101,10 @@ fn the_corpora_are_reproducible() {
         orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
         orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch)
     );
+    assert_eq!(
+        orders::events_ndjson(RECORDS),
+        orders::events_ndjson(RECORDS)
+    );
     assert_eq!(shapes::wide_flat(), shapes::wide_flat());
     assert_eq!(shapes::deep_nested(), shapes::deep_nested());
     assert_eq!(shapes::numeric_array(), shapes::numeric_array());
@@ -130,23 +134,7 @@ fn the_corpora_are_reproducible() {
 fn the_line_item_shape_is_the_measured_workload() {
     let doc = serde_json::to_value(orders::sample_line(7)).expect("encode an order line");
     let obj = doc.as_object().expect("an order line is a JSON object");
-    let shape: Vec<(&str, &str)> = obj
-        .iter()
-        .map(|(k, v)| {
-            let kind = match v {
-                serde_json::Value::String(_) => "string",
-                serde_json::Value::Bool(_) => "bool",
-                serde_json::Value::Array(_) => "array",
-                serde_json::Value::Number(n) if n.is_f64() => "float",
-                serde_json::Value::Number(_) => "int",
-                // Reported rather than panicked, so an accidental `Option`
-                // field arrives as a readable shape diff.
-                serde_json::Value::Null => "null",
-                serde_json::Value::Object(_) => "object",
-            };
-            (k.as_str(), kind)
-        })
-        .collect();
+    let shape: Vec<(&str, &str)> = obj.iter().map(|(k, v)| (k.as_str(), kind(v))).collect();
     assert_eq!(
         shape,
         [
@@ -159,6 +147,187 @@ fn the_line_item_shape_is_the_measured_workload() {
             ("unit", "string"),
         ]
     );
+}
+
+/// The JSON kind of one value, as the shape pins name it. `null` is a kind
+/// rather than a panic, so an accidental `Option` field arrives as a readable
+/// shape diff.
+fn kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Number(n) if n.is_f64() => "float",
+        serde_json::Value::Number(_) => "int",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// What the event-shape test measures over one document.
+#[derive(Default)]
+struct Strings {
+    /// The byte length of every string value, keys excluded.
+    lens: Vec<usize>,
+    /// Whether any string value holds a character outside ASCII.
+    non_ascii: bool,
+}
+
+/// Walks `v`, records its string values in `strings`, and returns how many
+/// objects deep it nests (a scalar is 0, a flat object 1).
+fn walk(v: &serde_json::Value, strings: &mut Strings) -> usize {
+    match v {
+        serde_json::Value::String(s) => {
+            strings.lens.push(s.len());
+            strings.non_ascii |= !s.is_ascii();
+            0
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().map(|i| walk(i, strings)).max().unwrap_or(0)
+        }
+        serde_json::Value::Object(map) => {
+            1 + map.values().map(|i| walk(i, strings)).max().unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Every field of an event line by its dotted path, with its JSON kind.
+///
+/// The digest pin below says that the corpus moved, and this says which field
+/// did: a nested object flattened into strings, the map or the array dropped,
+/// or a string turned into a number. Paths come back sorted because
+/// `serde_json::Value` maps are, so this pins names and kinds and leaves order
+/// to the digest.
+#[test]
+fn the_event_fields_are_the_measured_workload() {
+    fn paths(prefix: &str, v: &serde_json::Value, out: &mut Vec<(String, &'static str)>) {
+        if let serde_json::Value::Object(map) = v {
+            for (k, child) in map {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                out.push((path.clone(), kind(child)));
+                paths(&path, child, out);
+            }
+        }
+    }
+    let doc = serde_json::to_value(orders::sample_event(7)).expect("encode an event");
+    let mut got = Vec::new();
+    paths("", &doc, &mut got);
+    let got: Vec<(&str, &str)> = got.iter().map(|(p, k)| (p.as_str(), *k)).collect();
+    assert_eq!(
+        got,
+        [
+            ("host", "object"),
+            ("host.name", "string"),
+            ("host.zone", "string"),
+            ("id", "string"),
+            ("labels", "object"),
+            ("labels.deployment", "string"),
+            ("labels.release", "string"),
+            ("labels.team", "string"),
+            ("level", "string"),
+            ("message", "string"),
+            ("request", "object"),
+            ("request.client", "object"),
+            ("request.client.city", "string"),
+            ("request.client.ip", "string"),
+            ("request.method", "string"),
+            ("request.path", "string"),
+            ("request.status", "int"),
+            ("request.user_agent", "string"),
+            ("service", "string"),
+            ("tags", "array"),
+            ("ts", "string"),
+        ]
+    );
+}
+
+/// The event corpus is the line #1248's measurement is about: a few hundred
+/// bytes, nested three objects deep, and made mostly of strings of 10 to 100
+/// bytes, some outside ASCII and some escaped.
+///
+/// Each bound is one a fixture edit could break while the corpus still
+/// decodes and the bench still reports a number: lines that shrink to the
+/// flat records' size, a nested object flattened away, short enum-like
+/// strings in place of text, or the escapes and multi-byte characters that
+/// make both backends leave their fast string paths.
+#[test]
+fn the_event_corpus_is_the_shape_its_case_names() {
+    let corpus = orders::events_ndjson(RECORDS);
+    let lines: Vec<&[u8]> = corpus
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(lines.len() as u64, RECORDS);
+
+    let mut strings = Strings::default();
+    let mut line_bytes = 0usize;
+    for line in &lines {
+        let doc: serde_json::Value = serde_json::from_slice(line).expect("an event line is JSON");
+        assert_eq!(
+            walk(&doc, &mut strings),
+            3,
+            "an event line is not three objects deep"
+        );
+        line_bytes += line.len();
+    }
+
+    let mean = line_bytes / lines.len();
+    assert!((550..=650).contains(&mean), "mean line is {mean} bytes");
+
+    let longest = strings.lens.iter().max().copied().unwrap_or(0);
+    assert!(longest <= 100, "a string value is {longest} bytes");
+    let text = strings.lens.iter().filter(|&&n| n >= 10).count();
+    assert!(
+        text * 10 >= strings.lens.len() * 7,
+        "{text} of {} string values are 10 bytes or longer",
+        strings.lens.len()
+    );
+    let string_bytes: usize = strings.lens.iter().sum();
+    assert!(
+        string_bytes * 100 >= line_bytes * STRING_SHARE_PCT,
+        "string values are {string_bytes} of {line_bytes} bytes"
+    );
+
+    assert!(strings.non_ascii, "no string value is outside ASCII");
+    assert!(
+        lines.iter().any(|l| l.windows(2).any(|w| w == b"\\\"")),
+        "no line carries an escaped quote"
+    );
+}
+
+/// The least share of an event line's bytes that string values make up, in
+/// per cent.
+const STRING_SHARE_PCT: usize = 55;
+
+/// The event corpus decodes through the compiled backend to the events it was
+/// built from.
+///
+/// The `simd` arm and the default one are compared on the premise that both
+/// decode the same values. A backend that read the map, a nested object or an
+/// escaped string differently would make that comparison price different work,
+/// and still emit the same record count the bench asserts.
+#[test]
+fn the_event_corpus_decodes_to_its_samples() {
+    let mut deser =
+        JsonDeserializerBuilder::from_settings(settings(JsonFraming::Ndjson, OnError::Fail, false))
+            .build_serde::<Event>();
+    let (ack, _rx) = AckRef::test_pair();
+    let mut sink = EmitCollector::new();
+    deser
+        .deserialize(
+            &raw_payload(&orders::events_ndjson(RECORDS)),
+            &ack,
+            &mut sink,
+        )
+        .expect("the event corpus decodes");
+    let want: Vec<Event> = (0..RECORDS).map(orders::sample_event).collect();
+    let got: Vec<Event> = sink.records.into_iter().map(|r| r.payload).collect();
+    assert!(got == want, "a decoded event differs from its sample");
 }
 
 /// Every corpus, pinned by length and digest.
@@ -227,6 +396,11 @@ fn the_corpora_are_pinned_across_revisions() {
         pin(&orders::lines_array_bad_last(RECORDS)),
         (242_890, 0x8a19_2ae8_bb84_e836),
         "array_bad_last"
+    );
+    assert_eq!(
+        pin(&orders::events_ndjson(RECORDS)),
+        (1_235_511, 0x8ef0_041e_fa9a_702d),
+        "ndjson_events"
     );
     assert_eq!(
         pin(&shapes::wide_flat()),
@@ -685,7 +859,20 @@ fn a_second_drive_emits_what_the_first_did() {
         0,
         ("fixtures-storm", "json"),
     );
+    // The event lines, the one typed corpus that is nested.
+    let mut events = decode_rig::batch_rig::<Event>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::events_ndjson(RECORDS),
+        RECORDS,
+        ("fixtures-events", "json"),
+    );
     for drive in 1..=3 {
+        assert_eq!(
+            decode_rig::decode_run::<Owned<Event>, _>(&mut events),
+            RECORDS,
+            "events drive {drive}"
+        );
         assert_eq!(
             decode_rig::decode_run::<Owned<LineItem>, _>(&mut ndjson),
             RECORDS,

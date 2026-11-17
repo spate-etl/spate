@@ -45,11 +45,11 @@
 //! refused, which is what a feature name spelled for the wrong package looks
 //! like.
 //!
-//! Expect the three `decode_floor_simd_*` cases to appear as present only in the
+//! Expect the four `decode_floor_simd_*` cases to appear as present only in the
 //! head arm: they are `cfg(feature = "simd")`, so the base arm does not declare
 //! them and nothing pairs them.
 //!
-//! The three `decode_floor_serde_*` cases pair and should read flat. They call
+//! The four `decode_floor_serde_*` cases pair and should read flat. They call
 //! `serde_json` on both arms, so what an arm run prices for them is the two
 //! builds and not the two parsers, which makes them the control: a figure there
 //! bounds how much of the framework cases' margin belongs to code layout rather
@@ -61,15 +61,19 @@
 //! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
 //! libraries over one corpus in one binary, and is the more direct answer when
 //! the question is about the parsers rather than about what this crate adds.
+//! `decode_floor_simd_events` against `decode_floor_serde_events` is the same
+//! answer on the nested event lines a log or event pipeline decodes.
 //!
 //! ## Which cases carry a floor
 //!
-//! One floor per parser entry point, over the same bytes as its framework
-//! partner, in whichever backend the leg compiled:
+//! One floor per parser entry point, and one over the event lines, each over
+//! the same bytes as its framework partner, in whichever backend the leg
+//! compiled:
 //!
 //! | Framework case | Floor |
 //! |---|---|
 //! | `decode_ndjson_typed` | `decode_floor_*_ndjson` |
+//! | `decode_ndjson_events` | `decode_floor_*_events` |
 //! | `decode_array_typed` | `decode_floor_*_array` |
 //! | `decode_wide_flat` | `decode_floor_*_wide_flat` |
 //!
@@ -81,7 +85,7 @@
 //!
 //! ## What is left out
 //!
-//! Fourteen cases where `decode_gungraun.rs` declares twenty-two. `single_typed`
+//! Fourteen cases where `decode_gungraun.rs` declares twenty-three. `single_typed`
 //! and `single_value` are dropped because one 265-byte document decodes in
 //! about 360 ns, and at that size a build's code layout moves the figure by
 //! more than the 5% floor, and an A/A comparison of one commit against itself
@@ -122,7 +126,8 @@ mod orders;
 mod shapes;
 
 use decode_rig::{Rig, batch_rig, decode_run, decode_run_err, shape_rig};
-use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
+use orders::{BAD_EVERY, Corruption, Event, LineItem, RECORDS};
+use serde::de::DeserializeOwned;
 
 /// The component label a case's drop counters carry; the pipeline label is the
 /// case id.
@@ -163,27 +168,29 @@ fn payload_bytes<D>(rig: &RefCell<Rig<D>>) -> u64 {
 /// before the region opens, so the process's high-water mark is already set by
 /// the time the harness starts watching, and it reports the metric absent
 /// rather than as a figure about the warm-up.
-fn batch_case(
+fn batch_case<P>(
     suite: Suite,
     id: &'static str,
     framing: JsonFraming,
     on_error: OnError,
     expect: u64,
     payload: impl Fn() -> Vec<u8> + 'static,
-) -> Suite {
+) -> Suite
+where
+    P: DeserializeOwned + Send + 'static,
+{
     suite
         .case(
             id,
             move |corpus, _seed| {
-                let rig =
-                    batch_rig::<LineItem>(framing, on_error, payload(), expect, (id, COMPONENT));
+                let rig = batch_rig::<P>(framing, on_error, payload(), expect, (id, COMPONENT));
                 absorb(corpus, &rig);
                 RefCell::new(rig)
             },
-            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<LineItem>>>| {
+            |b, rig: &RefCell<Rig<JsonSerdeDeserializer<P>>>| {
                 b.iter(|| {
                     let mut rig = rig.borrow_mut();
-                    let got = decode_run::<Owned<LineItem>, _>(&mut rig);
+                    let got = decode_run::<Owned<P>, _>(&mut rig);
                     assert_eq!(got, rig.expect, "the framing emitted a different count");
                     got
                 });
@@ -274,7 +281,7 @@ fn suite() -> Suite {
     // The framing and typing axes at batch scale. `decode_ndjson_typed` is the
     // headline, and the denominator the error-policy cases below are read
     // against.
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_typed",
         JsonFraming::Ndjson,
@@ -282,7 +289,7 @@ fn suite() -> Suite {
         RECORDS,
         || orders::lines_ndjson(RECORDS),
     );
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_array_typed",
         JsonFraming::Array,
@@ -291,11 +298,22 @@ fn suite() -> Suite {
         || orders::lines_array(RECORDS),
     );
 
+    // The nested event lines, under `decode_ndjson_typed`'s framing, policy and
+    // record count, so the pair differs in the record and nothing else.
+    let suite = batch_case::<Event>(
+        suite,
+        "decode_ndjson_events",
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        RECORDS,
+        || orders::events_ndjson(RECORDS),
+    );
+
     // The `Fail` policy on input that never needed it. This framing decodes
     // every line into a holding buffer before emitting any of them, so that a
     // payload failing part-way emits no prefix; against `decode_ndjson_typed`
     // this is what that guarantee costs.
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_fail_clean",
         JsonFraming::Ndjson,
@@ -306,7 +324,7 @@ fn suite() -> Suite {
 
     // The error axis under `Skip`: one record in `BAD_EVERY` broken from
     // opposite ends of the parser, then every record broken.
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_syntax_10pct",
         JsonFraming::Ndjson,
@@ -314,7 +332,7 @@ fn suite() -> Suite {
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
     );
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_type_10pct",
         JsonFraming::Ndjson,
@@ -322,7 +340,7 @@ fn suite() -> Suite {
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
     );
-    let suite = batch_case(
+    let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_syntax_all",
         JsonFraming::Ndjson,
@@ -447,10 +465,10 @@ fn ndjson_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// Counting rather than collecting is the parity choice: the crate's sink
 /// increments a counter and drops the record, so this does the same. The count
 /// is also what keeps the loop alive.
-fn serde_ndjson(bytes: &[u8]) -> u64 {
+fn serde_ndjson<T: DeserializeOwned>(bytes: &[u8]) -> u64 {
     let mut decoded = 0u64;
     for line in ndjson_lines(bytes) {
-        let _: LineItem = serde_json::from_slice(line).expect("the fixture is a valid order line");
+        let _: T = serde_json::from_slice(line).expect("the fixture is a valid line");
         decoded += 1;
     }
     decoded
@@ -477,7 +495,14 @@ fn serde_floors(suite: Suite) -> Suite {
         "decode_floor_serde_ndjson",
         RECORDS,
         || orders::lines_ndjson(RECORDS),
-        serde_ndjson,
+        serde_ndjson::<LineItem>,
+    );
+    let suite = serde_floor(
+        suite,
+        "decode_floor_serde_events",
+        RECORDS,
+        || orders::events_ndjson(RECORDS),
+        serde_ndjson::<Event>,
     );
     let suite = serde_floor(
         suite,
@@ -573,10 +598,10 @@ fn simd_value(state: &SimdFloor) -> Value {
 }
 
 #[cfg(feature = "simd")]
-fn simd_ndjson(state: &SimdFloor) -> u64 {
+fn simd_ndjson<T: DeserializeOwned>(state: &SimdFloor) -> u64 {
     let mut decoded = 0u64;
     for line in ndjson_lines(&state.payload) {
-        let _: LineItem = simd_decode(state, line);
+        let _: T = simd_decode(state, line);
         decoded += 1;
     }
     decoded
@@ -589,7 +614,14 @@ fn simd_floors(suite: Suite) -> Suite {
         "decode_floor_simd_ndjson",
         RECORDS,
         || orders::lines_ndjson(RECORDS),
-        simd_ndjson,
+        simd_ndjson::<LineItem>,
+    );
+    let suite = simd_floor(
+        suite,
+        "decode_floor_simd_events",
+        RECORDS,
+        || orders::events_ndjson(RECORDS),
+        simd_ndjson::<Event>,
     );
     let suite = simd_floor(
         suite,

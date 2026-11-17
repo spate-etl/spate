@@ -1,10 +1,10 @@
 //! Payload shapes for the decode-path benches, counted and wall-clock alike.
 //!
-//! Every other corpus in this crate is a flat record of seven to fifteen
-//! fields, which is one point on an axis a JSON decoder is read along. These
-//! are the rest of it: an object far wider than any struct, a document nested
-//! far deeper than one, an array that is almost entirely numbers, and a
-//! document that is almost entirely one string. Each isolates a different part
+//! The record corpora in `orders.rs` are flat records of seven to fifteen
+//! fields and one nested event line of about 600 bytes. These are the ends of
+//! the shape axis a JSON decoder is read along: an object far wider than any
+//! struct, a document nested far deeper than one, an array that is almost
+//! entirely numbers, and a document that is almost entirely one string. Each isolates a different part
 //! of a parser (key lookup, recursion, number conversion, string handling),
 //! and each is a shape a real payload takes.
 //!

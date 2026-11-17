@@ -362,6 +362,21 @@ mod tests {
         assert_eq!(description_of(only_og), None);
     }
 
+    /// Another `name` tag ahead of the description is not read.
+    #[test]
+    fn another_named_meta_tag_is_not_read() {
+        let html = "<meta name=keywords content=\"keywords\">\
+                    <meta name=description content=\"the one\">";
+        assert_eq!(description_of(html).as_deref(), Some("the one"));
+    }
+
+    /// A minifier may drop the space after a quoted value.
+    #[test]
+    fn an_attribute_can_follow_a_closing_quote() {
+        let html = "<meta content=\"the one\"name=description>";
+        assert_eq!(description_of(html).as_deref(), Some("the one"));
+    }
+
     #[test]
     fn a_page_without_the_tag_has_none() {
         assert_eq!(description_of("<head><meta charset=UTF-8></head>"), None);

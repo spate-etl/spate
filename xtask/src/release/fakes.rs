@@ -540,7 +540,7 @@ pub(crate) struct FakeWorkspace<'a> {
 }
 
 /// The draft post the 0.3.0 release requires.
-pub(crate) const POST_0_3: &str = "---\ntitle: Spate 0.3\nslug: releases/0.3\nauthors: [marcus]\ntags: [release]\ndraft: true\n---\n\nThe opener.\n\n<!-- truncate -->\n\n## A highlight\n";
+pub(crate) const POST_0_3: &str = "---\ntitle: Spate 0.3\ndescription: \"What Spate 0.3 ships: the release highlights, in one sentence for the release notes.\"\nslug: releases/0.3\nauthors: [marcus]\ntags: [release]\ndraft: true\n---\n\nThe opener.\n\n<!-- truncate -->\n\n## A highlight\n";
 
 impl<'a> FakeWorkspace<'a> {
     /// The path of the post file `name` in the blog.

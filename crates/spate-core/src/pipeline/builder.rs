@@ -1787,17 +1787,17 @@ mod tests {
             .chains(move |_ctx| fake_chain(&cs, &log))
             .runtime_options(test_options());
 
-        // Drive shutdown from a watcher thread once the payloads land.
-        let consumed = Arc::clone(&chain_shared);
+        // The run goes on its own thread, so a wait that fails here fails the
+        // test instead of leaving the run without a shutdown.
         let runtime = pipeline.into_runtime(source).expect("into_runtime");
         let shutdown = runtime.shutdown_handle();
-        std::thread::spawn(move || {
-            wait_until(Duration::from_secs(5), "payloads consumed", || {
-                consumed.consumed.load(Ordering::Relaxed) == 5
-            });
-            shutdown.trigger();
+        let run = std::thread::spawn(move || runtime.run());
+        wait_until(spate_test::HANG, "payloads consumed", || {
+            chain_shared.consumed.load(Ordering::Relaxed) == 5
         });
-        let report = runtime.run().unwrap();
+        shutdown.trigger();
+        wait_until(spate_test::HANG, "run to return", || run.is_finished());
+        let report = run.join().unwrap().unwrap();
         assert_eq!(report.state, ExitState::Completed);
         assert_eq!(report.final_watermarks, vec![(PartitionId(0), 5)]);
     }

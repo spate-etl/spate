@@ -522,6 +522,7 @@ fn fatal_chain_fails_pipeline_and_stalls_watermark() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("pipeline must fail");
@@ -550,6 +551,7 @@ fn panicking_chain_fails_pipeline() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20]);
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("pipeline must fail");

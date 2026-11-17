@@ -180,9 +180,9 @@ pub(crate) struct Client {
     pub(crate) city: String,
 }
 
-/// Writes a map's entries sorted by key. A `HashMap` iterates in an order its
-/// per-process seed decides, and the corpus has to be the same bytes on every
-/// run for `tests/bench_fixtures.rs` to pin it.
+/// Writes a map's entries sorted by key. A `HashMap`'s iteration order is not
+/// promised across Rust releases, even with a fixed key, and the corpus has to
+/// be the same bytes on every toolchain for `tests/bench_fixtures.rs` to pin it.
 fn in_key_order<S: Serializer>(map: &Labels, s: S) -> Result<S::Ok, S::Error> {
     map.iter().collect::<BTreeMap<_, _>>().serialize(s)
 }

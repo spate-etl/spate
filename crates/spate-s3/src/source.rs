@@ -1019,7 +1019,9 @@ fn needs_root(builder: &AmazonS3Builder) -> bool {
 }
 
 /// The certificates the S3 client trusts, as [`client_roots`] decides from
-/// `system` and `root_ca`. With `needs_root` and no certificate it fails,
+/// `system` and `root_ca`. Where
+/// [`PLATFORM_VERIFIER`](spate_core::tls::PLATFORM_VERIFIER) is unset and the
+/// options leave the system store on, `needs_root` with no certificate fails,
 /// since the client could verify no server.
 ///
 /// A client whose options set `disable_system_certificates` reads no system
@@ -1028,7 +1030,8 @@ fn needs_root(builder: &AmazonS3Builder) -> bool {
 ///
 /// # Errors
 ///
-/// `root_ca` cannot be used, or `needs_root` is set and no certificate loads.
+/// `root_ca` cannot be used, or, in the case above, `needs_root` is set and no
+/// certificate loads.
 fn store_roots(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,

@@ -125,33 +125,30 @@ fn system_openssl_default_preserves_hashed_directory_trust() {
 
 /// Boots a TLS broker signed by a fresh CA, and returns the CA as PEM, the
 /// container and its address.
-fn tls_broker() -> (String, Container<KafkaBroker>, String) {
+fn tls_broker() -> (String, SingleBroker, String) {
     let ca = TestCa::new("spate-kafka-test CA");
     let (chain, key) = ca.leaf(&["127.0.0.1", "localhost"]);
     // Kafka reads these as properties, where `\n` is a newline.
     let inline = |pem: String| pem.replace('\n', "\\n");
-    let kafka = broker()
-        .with_env_var(
-            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-            "BROKER:PLAINTEXT,PLAINTEXT:SSL,CONTROLLER:PLAINTEXT",
-        )
-        .with_env_var("KAFKA_SSL_KEYSTORE_TYPE", "PEM")
-        .with_env_var(
-            "KAFKA_SSL_KEYSTORE_KEY",
-            inline(pem("PRIVATE KEY", key.secret_pkcs8_der())),
-        )
-        .with_env_var(
-            "KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN",
-            inline(pem("CERTIFICATE", &chain)),
-        )
-        .start()
-        .expect("start kafka container");
-    let port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    (
-        pem("CERTIFICATE", &ca.der()),
-        kafka,
-        format!("127.0.0.1:{port}"),
+    let kafka = SingleBroker::start(
+        broker()
+            .with_env_var(
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                "BROKER:PLAINTEXT,PLAINTEXT:SSL,CONTROLLER:PLAINTEXT",
+            )
+            .with_env_var("KAFKA_SSL_KEYSTORE_TYPE", "PEM")
+            .with_env_var(
+                "KAFKA_SSL_KEYSTORE_KEY",
+                inline(pem("PRIVATE KEY", key.secret_pkcs8_der())),
+            )
+            .with_env_var(
+                "KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN",
+                inline(pem("CERTIFICATE", &chain)),
+            ),
     )
+    .expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
+    (pem("CERTIFICATE", &ca.der()), kafka, brokers)
 }
 
 /// Runs a sink, its readiness probe and a source over TLS with the connector's

@@ -30,7 +30,7 @@ use spate_test::{HANG, WriteOutcome, wait_until};
 use spate_test_s3_feed::{
     DRAIN_TIMEOUT, TWO_RANGES, data_dir, recs, sorted, stage, two_range_unit, written,
 };
-use spate_test_support::{ChildTest, KAFKA_PORT};
+use spate_test_support::{ChildTest, SingleBroker};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
@@ -44,7 +44,6 @@ use support::{
     TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, produce_transaction,
     transactional_broker,
 };
-use testcontainers::runners::SyncRunner;
 
 /// The members' session timeout. A member that dies holds its partitions
 /// for this long after its last heartbeat.
@@ -115,9 +114,8 @@ fn worker_a_holds_a_unit_until_it_is_killed() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let group = spate_test::unique_name("killed");
     let dir = tempfile::tempdir().unwrap();
@@ -191,9 +189,8 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let group = spate_test::unique_name("killed-twice");
     let dir = tempfile::tempdir().unwrap();
@@ -303,9 +300,8 @@ fn refusal(connected: Result<KafkaFeed, ConnectError>) -> String {
 #[test]
 #[ignore = "requires Docker"]
 fn startup_refuses_a_missing_retry_or_dead_letter_topic() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     for (work, role, missing) in [
         ("no-retry", "retry", retry_of("no-retry")),
         ("no-dead", "dead-letter", dead_of("no-dead")),
@@ -337,9 +333,8 @@ fn startup_refuses_a_missing_retry_or_dead_letter_topic() {
 #[test]
 #[ignore = "requires Docker"]
 fn startup_refuses_a_compacted_work_retry_or_dead_letter_topic() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     for (work, role, policy) in [
         ("compacted-work", "work", "compact"),
         ("compacted-retry", "retry", "compact,delete"),
@@ -411,9 +406,8 @@ fn startup_refuses_a_compacted_work_retry_or_dead_letter_topic() {
 #[test]
 #[ignore = "requires Docker"]
 fn startup_refuses_a_notification_topic_without_log_append_time() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     let topics_for = |work: &str, entries: Vec<(&'static str, &'static str)>| {
         vec![
             (work.to_owned(), entries),
@@ -460,9 +454,8 @@ fn startup_refuses_a_notification_topic_without_log_append_time() {
 #[test]
 #[ignore = "requires Docker"]
 fn startup_refuses_a_missing_or_uncompacted_attempt_topic() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     for (work, policy, needle) in [
         ("no-attempts", None, "does not exist".to_owned()),
         (
@@ -509,10 +502,10 @@ fn startup_refuses_a_missing_or_uncompacted_attempt_topic() {
 #[ignore = "requires Docker"]
 fn a_confirmed_write_is_below_the_next_high_watermark() {
     use rdkafka::producer::{FutureProducer, FutureRecord};
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
+    // The shared producer only queues; this one awaits each write's report.
     let producer: FutureProducer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("acks", "all")
@@ -572,9 +565,8 @@ fn create_topics_of(brokers: &str, work: &str, entries: &[(&str, &str)]) {
 #[test]
 #[ignore = "requires Docker"]
 fn the_publisher_runs_the_configuration_checks_at_connect() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -619,9 +611,8 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_keyless_message_is_read_as_a_unit() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let group = spate_test::unique_name("keyless");
     produce_raw(&brokers, WORK, &[(None, &b"keyless"[..])]);
@@ -646,9 +637,8 @@ fn a_keyless_message_is_read_as_a_unit() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_dead_letter_topic_entry_ends_the_job_stalled() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let group = spate_test::unique_name("dead-bounded");
     let dir = tempfile::tempdir().unwrap();
@@ -678,9 +668,8 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 #[ignore = "requires Docker"]
 #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_two_partition_work(&brokers);
     let group = spate_test::unique_name("two-workers");
     let dir = tempfile::tempdir().unwrap();
@@ -728,9 +717,8 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_unit_whose_record_is_deleted_while_held_is_read_to_its_end() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let held = HeldUnit::start(&brokers, "deleted-held", 50);
     delete_records_below(&brokers, WORK, 0, 1);
@@ -759,9 +747,8 @@ fn a_unit_whose_record_is_deleted_while_held_is_read_to_its_end() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_gap_at_a_partitions_end_does_not_hold_a_job_open() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let held = HeldUnit::start(&brokers, "deleted-gap", 5);
     delete_records_below(&brokers, WORK, 0, 1);
@@ -801,9 +788,8 @@ fn create_two_partition_work(brokers: &str) {
 #[test]
 #[ignore = "requires Docker"]
 fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let group = spate_test::unique_name("stopping");
     let dir = tempfile::tempdir().unwrap();
@@ -878,13 +864,9 @@ const HALF_WINDOW: Duration = DEFAULT_SETTLING_WINDOW.checked_div(2).expect("non
 
 /// Run `body` on a broker that takes transactions, with the feed's topics made.
 fn on_transactional_broker(body: impl FnOnce(&str)) {
-    let container = transactional_broker()
-        .start()
-        .expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
-    create_topics(&brokers);
-    body(&brokers);
+    let kafka = SingleBroker::start(transactional_broker()).expect("start kafka container");
+    create_topics(kafka.bootstrap());
+    body(kafka.bootstrap());
 }
 
 /// A bounded job on `brokers`, its lister run.
@@ -905,9 +887,8 @@ fn staged(job: &BoundedJob, tag: &str) -> (Unit, Vec<String>) {
 #[test]
 #[ignore = "requires Docker"]
 fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let job = listed(&brokers, "above-end", "");
     let (a, b) = (recs("a", 2), recs("b", 2));
@@ -930,9 +911,8 @@ fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_feed_commit_carries_the_epoch_of_the_record_before_it() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let job = listed(&brokers, "commit-epoch", "");
     let (a, b) = (recs("a", 2), recs("b", 2));
@@ -961,9 +941,8 @@ fn a_feed_commit_carries_the_epoch_of_the_record_before_it() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_member_reads_the_units_below_a_commit_the_leader_answers_lower() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let job = listed(&brokers, "truncated", "");
     let (a, b, c) = (recs("a", 2), recs("b", 2), recs("c", 2));
@@ -994,9 +973,8 @@ fn a_member_reads_the_units_below_a_commit_the_leader_answers_lower() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_member_reads_a_partition_whose_epoch_carrying_commit_is_above_its_end() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     create_topics(&brokers);
     let job = listed(&brokers, "above-end-epoch", "");
     let (a, b) = (recs("a", 2), recs("b", 2));
@@ -1326,14 +1304,11 @@ fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
             let producer =
                 support::transactional_producer(brokers, ATTEMPT, &format!("aborted-{partition}"));
             producer.begin_transaction().expect("begin");
-            producer
-                .send(
-                    rdkafka::producer::BaseRecord::to(ATTEMPT)
-                        .partition(partition)
-                        .payload(&br#"{"v":1,"attempts":1}"#[..])
-                        .key(&b"gone"[..]),
-                )
-                .expect("enqueue");
+            let record = rdkafka::producer::BaseRecord::to(ATTEMPT)
+                .partition(partition)
+                .payload(&br#"{"v":1,"attempts":1}"#[..])
+                .key(&b"gone"[..]);
+            spate_test_support::send(&producer, record, Instant::now() + HANG).expect("enqueue");
             producer.flush(TRANSACTION_TIMEOUT).expect("flush");
             producer
                 .abort_transaction(TRANSACTION_TIMEOUT)
@@ -1429,13 +1404,11 @@ fn an_open_transaction_on_the_attempt_topic_keeps_the_attempt_cap() {
                 let producer =
                     support::transactional_producer(brokers, ATTEMPT, &format!("open-{partition}"));
                 producer.begin_transaction().expect("begin");
-                producer
-                    .send(
-                        rdkafka::producer::BaseRecord::to(ATTEMPT)
-                            .partition(partition)
-                            .key(FOREIGN)
-                            .payload(&br#"{"v":1,"attempts":1}"#[..]),
-                    )
+                let record = rdkafka::producer::BaseRecord::to(ATTEMPT)
+                    .partition(partition)
+                    .key(FOREIGN)
+                    .payload(&br#"{"v":1,"attempts":1}"#[..]);
+                spate_test_support::send(&producer, record, Instant::now() + HANG)
                     .expect("enqueue");
                 producer.flush(TRANSACTION_TIMEOUT).expect("flush");
                 producer

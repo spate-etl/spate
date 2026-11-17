@@ -25,7 +25,7 @@ use spate_test_support::KafkaBroker;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use testcontainers::ContainerRequest;
 
 pub(crate) mod feed;
@@ -33,6 +33,7 @@ pub(crate) mod group;
 pub(crate) mod latest;
 pub(crate) mod mock;
 pub(crate) mod sink;
+pub(crate) mod topics;
 pub(crate) mod wire;
 
 #[allow(unused_imports, reason = "each target uses a different subset")]
@@ -258,30 +259,18 @@ pub(crate) fn transactional_broker() -> ContainerRequest<KafkaBroker> {
     KafkaBroker::selected().transactional().into()
 }
 
-/// The config of a producer on `brokers` that gives up on a record after 30
-/// seconds.
-pub(crate) fn producer_config(brokers: &str) -> ClientConfig {
-    let mut config = raw_config();
-    config
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000");
-    config
-}
-
 /// Enqueue `count` records to partition `p`, with payload `{tag}-p{p}-{i}` and
 /// key `k{p}-{i}`.
 fn send_records(producer: &BaseProducer, topic: &str, p: i32, count: usize, tag: &str) {
+    let deadline = Instant::now() + HANG;
     for i in 0..count {
         let payload = format!("{tag}-p{p}-{i}");
         let key = format!("k{p}-{i}");
-        producer
-            .send(
-                BaseRecord::to(topic)
-                    .partition(p)
-                    .payload(payload.as_bytes())
-                    .key(key.as_bytes()),
-            )
-            .expect("enqueue");
+        let record = BaseRecord::to(topic)
+            .partition(p)
+            .payload(payload.as_bytes())
+            .key(key.as_bytes());
+        spate_test_support::send(producer, record, deadline).expect("enqueue");
     }
 }
 
@@ -294,7 +283,7 @@ pub(crate) fn produce(
     partitions: i32,
     tag: &str,
 ) {
-    let producer: BaseProducer = producer_config(brokers).build().expect("producer");
+    let producer = spate_test_support::producer(brokers).expect("producer");
     for p in 0..partitions {
         send_records(&producer, topic, p, per_partition, tag);
     }
@@ -317,16 +306,12 @@ pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
 /// A producer on `brokers` initialised for transactions under an id derived
 /// from `topic` and `tag`.
 pub(crate) fn transactional_producer(brokers: &str, topic: &str, tag: &str) -> BaseProducer {
-    let producer: BaseProducer = producer_config(brokers)
-        .set("transactional.id", format!("{topic}-{tag}"))
-        // Kafka's 60 s default can abort an open transaction under a slow suite.
-        .set("transaction.timeout.ms", "600000")
-        .build()
-        .expect("producer");
-    producer
-        .init_transactions(TRANSACTION_TIMEOUT)
-        .expect("init");
-    producer
+    spate_test_support::transactional_producer(
+        brokers,
+        &format!("{topic}-{tag}"),
+        TRANSACTION_TIMEOUT,
+    )
+    .expect("init")
 }
 
 /// Produce `count` records to partition 0 of `topic` in one transaction under
@@ -406,39 +391,26 @@ pub(crate) fn produce_to(
     partition: i32,
     offsets: std::ops::Range<i64>,
 ) {
-    let producer: BaseProducer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000")
-        .build()
-        .expect("producer");
+    let producer = spate_test_support::producer(brokers).expect("producer");
+    let deadline = Instant::now() + HANG;
     for offset in offsets {
         let payload = format!("{partition}:{offset}");
-        producer
-            .send(
-                BaseRecord::to(topic)
-                    .partition(partition)
-                    .payload(payload.as_bytes())
-                    .key(payload.as_bytes()),
-            )
-            .expect("enqueue");
+        let record = BaseRecord::to(topic)
+            .partition(partition)
+            .payload(payload.as_bytes())
+            .key(payload.as_bytes());
+        spate_test_support::send(&producer, record, deadline).expect("enqueue");
     }
     producer.flush(Duration::from_secs(60)).expect("flush");
 }
 
 /// Produce one record with `payload` to `partition`, and flush.
 pub(crate) fn produce_payload(brokers: &str, topic: &str, partition: i32, payload: &[u8]) {
-    let producer: BaseProducer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000")
-        .build()
-        .expect("producer");
-    producer
-        .send(
-            BaseRecord::<[u8], _>::to(topic)
-                .partition(partition)
-                .payload(payload),
-        )
-        .expect("enqueue");
+    let producer = spate_test_support::producer(brokers).expect("producer");
+    let record = BaseRecord::<[u8], _>::to(topic)
+        .partition(partition)
+        .payload(payload);
+    spate_test_support::send(&producer, record, Instant::now() + HANG).expect("enqueue");
     producer.flush(Duration::from_secs(60)).expect("flush");
 }
 
@@ -453,25 +425,7 @@ pub(crate) fn create_topic(brokers: &str, topic: &str, partitions: i32) {
 /// Create `topics` and wait until the broker's metadata lists each one. A
 /// broker can answer a topic it has just created as unknown for a while.
 pub(crate) fn create_visible(brokers: &str, topics: &[NewTopic<'_>]) {
-    let admin: AdminClient<DefaultClientContext> = raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(admin.create_topics(topics, &AdminOptions::new()))
-        .expect("create topics")
-        .into_iter()
-        .for_each(|r| {
-            r.expect("topic created");
-        });
-    for topic in topics {
-        spate_test::wait_until(HANG, &format!("{} in metadata", topic.name), || {
-            feed::exists(brokers, topic.name)
-        });
-    }
+    spate_test_support::create_topics(brokers, topics, HANG).unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Delete `partition`'s records below `before`, which moves its log start there.

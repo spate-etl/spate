@@ -16,17 +16,15 @@ use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::{Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster};
+use spate_test_support::{Broker, CLUSTER_NODES, KafkaCluster, SingleBroker};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::{
     Transaction, Watched, await_assignment, broker, drain_lane, log_end, produce,
     produce_transaction, settled_end, transactional_broker,
 };
-use testcontainers::Container;
-use testcontainers::runners::SyncRunner;
 
 const TOPIC: &str = "orders";
 
@@ -45,9 +43,8 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_full_lifecycle() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
 
     // Auto-created topic has a single partition, which is enough for the
     // lifecycle; the multi-partition rebalance path is covered by the
@@ -98,9 +95,8 @@ fn real_broker_full_lifecycle() {
 #[ignore = "requires Docker"]
 #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn real_broker_revocation_commit_persists_revoked_offsets() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
 
     produce(&brokers, TOPIC, 50, 1, "rev");
 
@@ -190,9 +186,8 @@ fn real_broker_backlog_reports_summable_lag() {
     const PER_PARTITION: usize = 5_000;
     const CONSUME_PER_LANE: usize = 100;
 
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
 
     // Explicit multi-partition topic: auto-creation yields a single partition,
     // which would not exercise the aggregate at all.
@@ -264,9 +259,8 @@ fn real_broker_backlog_reports_summable_lag() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     produce(&brokers, TOPIC, 1, 1, "never");
     for (answer, group) in [
         (support::Answer::Empty, "never-answers-empty"),
@@ -285,9 +279,8 @@ fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_revocation_commits_every_consumers_offsets() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     support::create_topic(&brokers, TOPIC, 2);
     produce(&brokers, TOPIC, 25, 2, "both");
 
@@ -348,12 +341,10 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
 
 /// A broker that takes transactions, and its bootstrap address. The container
 /// stops when the handle drops.
-fn transaction_broker() -> (Container<KafkaBroker>, String) {
-    let container = transactional_broker()
-        .start()
-        .expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    (container, format!("127.0.0.1:{port}"))
+fn transaction_broker() -> (SingleBroker, String) {
+    let kafka = SingleBroker::start(transactional_broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
+    (kafka, brokers)
 }
 
 /// [`config`] on `topic`.
@@ -574,9 +565,8 @@ fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_source_commit_carries_the_epoch_of_the_record_before_it() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     produce(&brokers, TOPIC, 5, 1, "before");
     let epoch = support::record_epoch(&brokers, TOPIC, 4);
     assert!(epoch >= 0, "the broker sends an epoch with each record");
@@ -615,9 +605,8 @@ fn real_broker_a_source_commit_carries_the_epoch_of_the_record_before_it() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_source_reads_below_a_commit_the_leader_answers_lower() {
-    let container = broker().start().expect("start kafka container");
-    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-    let brokers = format!("127.0.0.1:{port}");
+    let kafka = SingleBroker::start(broker()).expect("start kafka container");
+    let brokers = kafka.bootstrap().to_owned();
     produce(&brokers, TOPIC, 5, 1, "truncated");
     for reset in ["latest", "earliest"] {
         let group = format!("truncated-{reset}");
@@ -904,9 +893,8 @@ mod latest_start {
     use support::latest;
 
     fn on_a_broker(partitions: i32, body: impl FnOnce(&str, &str)) {
-        let container = broker().start().expect("start kafka container");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        let brokers = format!("127.0.0.1:{port}");
+        let kafka = SingleBroker::start(broker()).expect("start kafka container");
+        let brokers = kafka.bootstrap().to_owned();
         support::create_topic(&brokers, TOPIC, partitions);
         body(&brokers, TOPIC);
     }
@@ -1073,26 +1061,21 @@ mod latest_start {
     #[test]
     #[ignore = "requires Docker"]
     fn an_open_transaction_is_not_skipped_by_a_new_group() {
-        let container = transactional_broker()
-            .start()
-            .expect("start kafka container");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        let brokers = format!("127.0.0.1:{port}");
+        let kafka = SingleBroker::start(transactional_broker()).expect("start kafka container");
+        let brokers = kafka.bootstrap().to_owned();
         support::create_topic(&brokers, TOPIC, 1);
         support::produce_to(&brokers, TOPIC, 0, 0..2);
         let stable = support::log_end(&brokers, TOPIC, 0);
 
         let producer = support::transactional_producer(&brokers, TOPIC, "open-transaction");
         producer.begin_transaction().expect("begin");
+        let deadline = Instant::now() + HANG;
         for i in 0..3 {
             let payload = format!("0:{}", 2 + i);
-            producer
-                .send(
-                    BaseRecord::<(), _>::to(TOPIC)
-                        .partition(0)
-                        .payload(payload.as_bytes()),
-                )
-                .expect("enqueue");
+            let record = BaseRecord::<(), _>::to(TOPIC)
+                .partition(0)
+                .payload(payload.as_bytes());
+            spate_test_support::send(&producer, record, deadline).expect("enqueue");
         }
         producer.flush(Duration::from_secs(60)).expect("flush");
         let high = support::log_end(&brokers, TOPIC, 0);

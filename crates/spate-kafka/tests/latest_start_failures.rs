@@ -477,7 +477,7 @@ mod silent_coordinator {
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::HANG;
-    use spate_test_support::{KAFKA_PORT, KafkaBroker};
+    use spate_test_support::{KafkaBroker, SingleBroker};
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
@@ -485,8 +485,6 @@ mod silent_coordinator {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use support::latest;
-    use testcontainers::Container;
-    use testcontainers::runners::SyncRunner;
 
     const OFFSET_COMMIT: i16 = 8;
     const OFFSET_FETCH: i16 = 9;
@@ -577,18 +575,18 @@ mod silent_coordinator {
     }
 
     /// The selected broker, advertising `proxy`'s address.
-    fn broker_behind_a_proxy() -> (Container<KafkaBroker>, Proxy, String) {
+    fn broker_behind_a_proxy() -> (SingleBroker, Proxy, String) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let advertised = listener.local_addr().expect("addr");
-        let container = KafkaBroker::selected()
-            .advertised_at(advertised)
-            .without_rebalance_delay()
-            .start()
-            .expect("start kafka");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        let proxy = Proxy::on(listener, format!("127.0.0.1:{port}"));
+        let kafka = SingleBroker::start(
+            KafkaBroker::selected()
+                .advertised_at(advertised)
+                .without_rebalance_delay(),
+        )
+        .expect("start kafka");
+        let proxy = Proxy::on(listener, kafka.bootstrap().to_owned());
         let brokers = proxy.addr.clone();
-        (container, proxy, brokers)
+        (kafka, proxy, brokers)
     }
 
     /// A source whose client gives up on a silent broker in seconds.
@@ -748,7 +746,7 @@ mod silent_coordinator {
     #[test]
     #[ignore = "requires Docker"]
     fn a_source_whose_broker_dies_at_the_start_commit_drops_at_the_startup_deadline() {
-        let (container, proxy, brokers) = broker_behind_a_proxy();
+        let (kafka, proxy, brokers) = broker_behind_a_proxy();
         support::create_topic(&brokers, TOPIC, 1);
         let cfg = short_timeouts(&brokers, "killed");
         proxy.armed.store(true, Ordering::SeqCst);
@@ -776,7 +774,7 @@ mod silent_coordinator {
         spate_test::wait_until(HANG, "the start commit", || {
             proxy.silent.load(Ordering::SeqCst)
         });
-        container.stop_with_timeout(Some(0)).expect("kill");
+        kafka.container().stop_with_timeout(Some(0)).expect("kill");
         proxy.release();
         let started = Instant::now();
         let mut seen = Vec::new();
@@ -802,20 +800,9 @@ mod silent_coordinator {
         trigger: i16,
         committed: bool,
     ) -> (Option<Result<(), spate_core::feed::FeedError>>, bool) {
-        use rdkafka::admin::{NewTopic, TopicReplication};
         use spate_core::feed::Feed as _;
         let (container, proxy, brokers) = broker_behind_a_proxy();
-        support::create_visible(
-            &brokers,
-            &[
-                NewTopic::new("units", 1, TopicReplication::Fixed(1))
-                    .set("message.timestamp.type", "LogAppendTime"),
-                NewTopic::new("units-retry", 1, TopicReplication::Fixed(1)),
-                NewTopic::new("units-dead", 1, TopicReplication::Fixed(1)),
-                NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1))
-                    .set("cleanup.policy", "compact"),
-            ],
-        );
+        support::feed::create_topics(&brokers);
         support::produce_to(&brokers, "units", 0, 0..3);
         let group = spate_test::unique_name("feed-silent");
         // A group-call bound of 2 s, a quarter of `max.poll.interval.ms`.

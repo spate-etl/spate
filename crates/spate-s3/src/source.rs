@@ -12,10 +12,10 @@
 //! feed that hands back, the reader reads on to the stop reserve and hands
 //! back what it has not read to its end; see `unit_reader`.
 
-use crate::config::{ENDPOINT_KEYS, S3SourceConfig, is_https, s3_store_key, store_endpoint};
+use crate::config::{ENDPOINT_KEYS, S3SourceConfig, s3_store_key, store_endpoint};
 use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
-use crate::listing::{ClientRoots, TrustHint, UnaddressableConnector, UnaddressableKeys};
+use crate::listing::{StoreRoots, TrustHint, UnaddressableConnector, UnaddressableKeys};
 use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
@@ -32,7 +32,7 @@ use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use spate_core::task::{self, TaskHandle};
-use spate_core::tls::{CertificateDer, SystemRoots, TrustError, TrustRoots};
+use spate_core::tls::{CertificateDer, ClientRoots, SystemRoots, client_roots, is_https};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -906,7 +906,7 @@ fn store_named(
 /// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
 /// The explicit `options` are overlaid on top and win over the environment;
 /// the bucket comes from the URL. The client verifies TLS against
-/// [`client_roots`], which reads the system trust store from `system`. `object_store::parse_url_opts`, used for
+/// [`store_roots`], which reads the system trust store from `system`. `object_store::parse_url_opts`, used for
 /// `file://`, does *not* read the environment, so the S3 scheme is
 /// special-cased here.
 ///
@@ -917,7 +917,7 @@ fn store_named(
 ///
 /// # Errors
 ///
-/// The text of `object_store`'s error, or of a [`client_roots`] failure
+/// The text of `object_store`'s error, or of a [`store_roots`] failure
 /// anchored at `tls.root_ca`.
 fn build_store(
     url: &Url,
@@ -959,14 +959,8 @@ fn build_store(
         &builder,
         AmazonS3ConfigKey::Client(ClientConfigKey::NoSystemCertificates),
     );
-    let roots = client_roots(
-        system,
-        root_ca,
-        needs_root(&builder),
-        no_system,
-        PLATFORM_VERIFIER,
-    )
-    .map_err(|e| format!("source.s3.tls.root_ca: {e}"))?;
+    let roots = store_roots(system, root_ca, needs_root(&builder), no_system)
+        .map_err(|e| format!("source.s3.tls.root_ca: {e}"))?;
     let hint = trust_hint(options, no_system);
     let store = builder
         .with_http_connector(
@@ -984,12 +978,6 @@ fn build_store(
         resumable,
     })
 }
-
-/// Whether the S3 client keeps reqwest's platform verifier, which reads the
-/// system trust store itself. Elsewhere it reads the roots from
-/// `spate_core::tls`, since the platform verifier fails to build on an empty
-/// store whatever the endpoint's scheme.
-const PLATFORM_VERIFIER: bool = cfg!(any(target_vendor = "apple", windows, target_os = "android"));
 
 /// Whether `builder`'s store is called over `https://`: the S3-specific
 /// endpoint wins over the generic one, and with neither the client calls AWS.
@@ -1030,47 +1018,49 @@ fn needs_root(builder: &AmazonS3Builder) -> bool {
         && !(set(ClientConfigKey::ProxyUrl) && set(ClientConfigKey::ProxyCaCertificate))
 }
 
-/// The certificates the S3 client trusts: `system`'s and `root_ca`'s, which
-/// replace the system trust store the platform verifier reads. With
-/// `needs_root` and no certificate it fails, since the client could verify no
-/// server.
+/// The certificates the S3 client trusts, as [`client_roots`] decides from
+/// `system` and `root_ca`. Where
+/// [`PLATFORM_VERIFIER`](spate_core::tls::PLATFORM_VERIFIER) is unset and the
+/// options leave the system store on, `needs_root` with no certificate fails,
+/// since the client could verify no server.
 ///
-/// With `platform_verifier` the client keeps that verifier and adds
-/// `root_ca`'s. So does a client whose options set
-/// `disable_system_certificates`, which then trusts `root_ca`'s alone, and
-/// with none fails each `https` call at the handshake unless certificate
-/// checks are off.
+/// A client whose options set `disable_system_certificates` reads no system
+/// root and trusts `root_ca`'s alone. With none it fails each `https` call at
+/// the handshake unless certificate checks are off.
 ///
 /// # Errors
 ///
-/// `root_ca` cannot be used, or `needs_root` is set and no certificate loads.
-fn client_roots(
+/// `root_ca` cannot be used, or, in the case above, `needs_root` is set and no
+/// certificate loads.
+fn store_roots(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
     needs_root: bool,
     no_system: bool,
-    platform_verifier: bool,
-) -> Result<ClientRoots, String> {
-    if cfg!(target_os = "android") && root_ca.is_some() {
-        return Err("is not supported on Android".into());
-    }
-    if no_system || platform_verifier {
-        let extra = match root_ca {
-            Some(path) => spate_core::tls::read_root_ca(path).map_err(|e| e.to_string())?,
-            None => Vec::new(),
-        };
-        return Ok(ClientRoots {
-            certs: certificates(&extra)?,
-            only: false,
-        });
-    }
-    let mut roots = TrustRoots::load(system(), root_ca).map_err(|e| e.to_string())?;
-    if needs_root {
-        roots = roots.require_any().map_err(|e: TrustError| e.to_string())?;
-    }
-    Ok(ClientRoots {
-        certs: certificates(roots.certs())?,
-        only: true,
+) -> Result<StoreRoots, String> {
+    // `NoRoots` would blame a system store that was never read.
+    let system = || {
+        if no_system {
+            SystemRoots::default()
+        } else {
+            system()
+        }
+    };
+    let roots =
+        client_roots(system, root_ca, needs_root && !no_system).map_err(|e| e.to_string())?;
+    to_store_roots(roots)
+}
+
+/// `roots` as the certificates `object_store` takes, and whether they replace
+/// the system trust store.
+fn to_store_roots(roots: ClientRoots) -> Result<StoreRoots, String> {
+    let (certs, only) = match roots {
+        ClientRoots::Add(certs) => (certs, false),
+        ClientRoots::Only(certs) => (certs, true),
+    };
+    Ok(StoreRoots {
+        certs: certificates(&certs)?,
+        only,
     })
 }
 
@@ -1188,6 +1178,7 @@ fn apply_options(
 mod tests {
     use super::*;
     use spate_core::error::ErrorClass;
+    use spate_core::tls::PLATFORM_VERIFIER;
     use std::collections::BTreeMap;
 
     /// [`build_store`] with no `root_ca`, over a system trust store of one
@@ -1208,57 +1199,54 @@ mod tests {
         panic!("this client reads no system root")
     }
 
-    /// Without the platform verifier, an `https` client with no usable system
-    /// root and no `root_ca` fails, and an `http` one keeps the empty set.
+    /// An `https` client with no usable system root and no `root_ca` fails
+    /// where it verifies against the loaded roots, and an `http` one keeps the
+    /// empty set. The platform verifier reads the OS store itself.
     #[test]
     fn an_https_client_with_no_trust_root_fails() {
+        let https = store_roots(empty_system, None, true, false);
+        let http =
+            store_roots(empty_system, None, false, false).expect("an http client needs no root");
+        if PLATFORM_VERIFIER {
+            let https = https.expect("the platform verifier reads the OS store");
+            assert_eq!((https.certs.len(), https.only), (0, false));
+            assert_eq!((http.certs.len(), http.only), (0, false));
+            return;
+        }
         assert_eq!(
-            client_roots(empty_system, None, true, false, false).expect_err("no root"),
+            https.expect_err("no root"),
             "the system trust store has no certificates; install a CA bundle, point \
              SSL_CERT_FILE at one, or set this key to the issuing CA"
         );
-        let roots = client_roots(empty_system, None, false, false, false)
-            .expect("an http client needs no root");
-        assert_eq!((roots.certs.len(), roots.only), (0, true));
+        assert_eq!((http.certs.len(), http.only), (0, true));
     }
 
-    /// Without the platform verifier the client trusts the system roots and
-    /// `root_ca`'s in place of the system store. With it, or with
-    /// `disable_system_certificates`, it reads no system root and adds
-    /// `root_ca`'s.
+    /// With `disable_system_certificates` the client reads no system root and
+    /// trusts `root_ca`'s alone. It builds with none even when it needs a
+    /// root, so each `https` call fails at the handshake instead.
     #[test]
-    fn the_client_takes_the_roots_its_verifier_needs() {
+    fn disable_system_certificates_trusts_root_ca_alone() {
         let dir = tempfile::tempdir().unwrap();
         let root_ca = crate::test_servers::TestCa::new("private").write(dir.path());
-        let system =
-            || SystemRoots::from_certs(vec![crate::test_servers::TestCa::new("system").der()]);
-        let roots = client_roots(system, Some(&root_ca), true, false, false).unwrap();
-        assert_eq!((roots.certs.len(), roots.only), (2, true));
-        let roots = client_roots(empty_system, Some(&root_ca), true, false, false).unwrap();
-        assert_eq!((roots.certs.len(), roots.only), (1, true));
-        for (no_system, platform_verifier) in [(true, false), (false, true), (true, true)] {
-            let roots =
-                client_roots(unread, Some(&root_ca), true, no_system, platform_verifier).unwrap();
-            assert_eq!((roots.certs.len(), roots.only), (1, false));
-            let roots = client_roots(unread, None, true, no_system, platform_verifier).unwrap();
-            assert_eq!((roots.certs.len(), roots.only), (0, false));
+        for (root_ca, count) in [(Some(root_ca.as_path()), 1), (None, 0)] {
+            let roots = store_roots(unread, root_ca, true, true).unwrap();
+            // Either way the client takes `tls_certs_only`: `only` sets the
+            // flag the operator's options already hold.
+            assert_eq!((roots.certs.len(), roots.only), (count, !PLATFORM_VERIFIER));
         }
     }
 
-    /// A `root_ca` that cannot be used fails, whichever verifier the client
-    /// keeps.
+    /// A `root_ca` that cannot be used fails with its path.
     #[test]
     fn an_unusable_root_ca_fails() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.pem");
-        for platform_verifier in [false, true] {
-            let err = client_roots(empty_system, Some(&missing), true, false, platform_verifier)
-                .expect_err("the file is missing");
-            assert!(
-                err.starts_with(&format!("`{}`: ", missing.display())),
-                "{err}"
-            );
-        }
+        let err = store_roots(empty_system, Some(&missing), true, false)
+            .expect_err("the file is missing");
+        assert!(
+            err.starts_with(&format!("`{}`: ", missing.display())),
+            "{err}"
+        );
     }
 
     /// An S3 store called over `http://` builds on an empty system trust
@@ -1404,7 +1392,7 @@ mod tests {
     /// `disable_system_certificates` set to `no_system`, fails on a TLS
     /// rejection. The server closes each connection after the handshake, so a
     /// trusted one fails the listing too.
-    async fn rejected(url: &str, roots: ClientRoots, no_system: bool) -> bool {
+    async fn rejected(url: &str, roots: StoreRoots, no_system: bool) -> bool {
         let e = list_error(url, roots, no_system, None).await;
         spate_core::tls_rejection!(rustls, &e).is_some()
     }
@@ -1414,7 +1402,7 @@ mod tests {
     /// its client's failures carrying `hint`.
     async fn list_error(
         url: &str,
-        roots: ClientRoots,
+        roots: StoreRoots,
         no_system: bool,
         hint: Option<TrustHint>,
     ) -> object_store::Error {
@@ -1451,7 +1439,7 @@ mod tests {
         use crate::test_servers::TestCa;
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
         let url = crate::test_servers::serve(&server, None).await;
-        let roots = || ClientRoots {
+        let roots = || StoreRoots {
             certs: certificates(&[other.der()]).unwrap(),
             only: true,
         };
@@ -1502,32 +1490,35 @@ mod tests {
     }
 
     /// The client verifies a server against the roots it is given:
-    /// `root_ca`'s, with either verifier, and the system's unless
-    /// `disable_system_certificates` drops them.
+    /// `root_ca`'s, added to the platform verifier's or alone, and the
+    /// system's unless `disable_system_certificates` drops them.
     #[tokio::test]
     async fn the_client_verifies_against_the_roots_it_is_given() {
         use crate::test_servers::TestCa;
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
         let url = crate::test_servers::serve(&server, None).await;
         let dir = tempfile::tempdir().unwrap();
-        let (server_pem, other_pem) = (server.write(dir.path()), other.write(dir.path()));
+        let server_pem = server.write(dir.path());
         let system = || SystemRoots::from_certs(vec![server.der()]);
-        for platform_verifier in [false, true] {
-            for (case, root_ca, rejects) in [
-                ("the server's CA", &server_pem, false),
-                ("another CA", &other_pem, true),
+        for (case, ca, rejects) in [
+            ("the server's CA", &server, false),
+            ("another CA", &other, true),
+        ] {
+            for roots in [
+                ClientRoots::Add(vec![ca.der()]),
+                ClientRoots::Only(vec![ca.der()]),
             ] {
-                let roots =
-                    client_roots(empty_system, Some(root_ca), true, false, platform_verifier)
-                        .unwrap();
+                let roots = to_store_roots(roots).unwrap();
                 assert_eq!(rejected(&url, roots, false).await, rejects, "{case}");
             }
         }
-        let roots = client_roots(system, None, true, false, false).unwrap();
-        assert!(!rejected(&url, roots, false).await);
-        let roots = client_roots(system, None, true, true, false).unwrap();
+        if !PLATFORM_VERIFIER {
+            let roots = store_roots(system, None, true, false).unwrap();
+            assert!(!rejected(&url, roots, false).await);
+        }
+        let roots = store_roots(system, None, true, true).unwrap();
         assert!(rejected(&url, roots, true).await);
-        let roots = client_roots(system, Some(&server_pem), true, true, false).unwrap();
+        let roots = store_roots(system, Some(&server_pem), true, true).unwrap();
         assert!(!rejected(&url, roots, true).await);
     }
 

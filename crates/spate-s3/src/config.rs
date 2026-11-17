@@ -12,7 +12,7 @@ use object_store::aws::AmazonS3ConfigKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use spate_core::config::{ComponentConfig, ConfigError, Denylist, SectionPath, redact};
-use spate_core::tls::TlsSection;
+use spate_core::tls::{TlsSection, is_https};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
@@ -270,11 +270,6 @@ pub(crate) fn store_endpoint(store: &BTreeMap<String, String>) -> Option<&str> {
 /// them: `aws_endpoint_url_s3` in place of `endpoint`.
 pub(crate) const ENDPOINT_KEYS: [AmazonS3ConfigKey; 2] =
     [AmazonS3ConfigKey::S3Endpoint, AmazonS3ConfigKey::Endpoint];
-
-/// Whether `url` is an `https://` URL, in any case the URL parser accepts.
-pub(crate) fn is_https(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
-}
 
 /// The S3 client option a `store` key names, under any spelling and case
 /// `object_store` accepts.

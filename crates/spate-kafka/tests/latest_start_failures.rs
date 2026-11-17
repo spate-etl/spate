@@ -43,13 +43,7 @@ mod another_topic {
     }
 
     fn committed(probe: &BaseConsumer) -> Offset {
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition(TOPIC, 0);
-        probe
-            .committed_offsets(tpl, Duration::from_secs(5))
-            .unwrap()
-            .elements()[0]
-            .offset()
+        crate::support::committed(probe, TOPIC, 1)[0]
     }
 
     /// An offer for `other` partition 0 stops the run and leaves the group's
@@ -892,10 +886,10 @@ mod silent_coordinator {
 mod logical_committed_offset {
     use crate::support::MockKafka;
     use crate::support::wire::{request, str16};
-    use rdkafka::consumer::{BaseConsumer, Consumer};
+    use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::types::RDKafkaApiKey;
-    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use rdkafka::{ClientConfig, Offset};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
     use spate_core::config::PipelineConfig;
@@ -932,13 +926,7 @@ mod logical_committed_offset {
     }
 
     fn committed(probe: &BaseConsumer) -> Offset {
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition(TOPIC, 0);
-        probe
-            .committed_offsets(tpl, Duration::from_secs(5))
-            .unwrap()
-            .elements()[0]
-            .offset()
+        crate::support::committed(probe, TOPIC, 1)[0]
     }
 
     /// Under `latest`, a committed offset of -2 (`Beginning`) is a commit, so the

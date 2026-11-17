@@ -8,7 +8,7 @@ use super::{Read, from_start};
 use rdkafka::Offset;
 use rdkafka::admin::AdminClient;
 use rdkafka::client::DefaultClientContext;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::BaseConsumer;
 use rdkafka::message::{BorrowedMessage, Header, Message, OwnedHeaders};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::clock::TestClock as StopClock;
@@ -301,29 +301,19 @@ fn read_kept<T>(
 /// How many messages partition 0 of `topic` holds, read at the default
 /// `read_committed`: the last stable offset.
 pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
-    let consumer: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("watermark reader");
-    consumer
-        .fetch_watermarks(topic, 0, Duration::from_secs(10))
-        .expect("watermarks")
-        .1
+    high_watermarks(brokers, topic, 1)
 }
 
 /// How many messages the first `partitions` partitions of `topic` hold
-/// between them.
+/// between them. One `HANG` bounds every read.
 pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i64 {
-    let consumer: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("watermark reader");
+    let reader = spate_test_support::consumer(brokers, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let deadline = Instant::now() + HANG;
     (0..partitions)
         .map(|partition| {
-            consumer
-                .fetch_watermarks(topic, partition, Duration::from_secs(10))
-                .expect("watermarks")
-                .1
+            let left = deadline.saturating_duration_since(Instant::now());
+            spate_test_support::high_watermark(&reader, topic, partition, left)
+                .unwrap_or_else(|e| panic!("{e}"))
         })
         .sum()
 }

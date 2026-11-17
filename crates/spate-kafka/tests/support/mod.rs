@@ -361,25 +361,16 @@ pub(crate) fn settled_end(brokers: &str, topic: &str, partition: i32) -> i64 {
 
 /// The high watermark of `partition` as a client at `isolation` reads it.
 fn high_watermark(brokers: &str, topic: &str, partition: i32, isolation: &str) -> i64 {
-    let probe: BaseConsumer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("isolation.level", isolation)
-        .build()
-        .expect("probe");
-    probe
-        .fetch_watermarks(topic, partition, Duration::from_secs(10))
-        .expect("watermarks")
-        .1
+    let reader = spate_test_support::consumer(brokers, &[("isolation.level", isolation)])
+        .unwrap_or_else(|e| panic!("{e}"));
+    spate_test_support::high_watermark(&reader, topic, partition, HANG)
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// A consumer in `group` that reads or writes the group's committed offsets
 /// and joins nothing.
 pub(crate) fn probe(brokers: &str, group: &str) -> BaseConsumer {
-    raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe")
+    spate_test_support::consumer(brokers, &[("group.id", group)]).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Produce one record per offset of `offsets` to `partition`, each carrying its
@@ -453,47 +444,21 @@ pub(crate) fn delete_records_below(brokers: &str, topic: &str, partition: i32, b
     }
 }
 
-/// What `probe`'s group has committed on `topic`'s partitions `0..partitions`.
-/// No commit reads as `Offset::Invalid`.
+/// What `probe`'s group has committed on `topic`'s partitions `0..partitions`,
+/// read again while the broker refuses. No commit reads as `Offset::Invalid`.
 pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<Offset> {
-    let mut tpl = TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition(topic, p);
-    }
-    probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect()
+    spate_test_support::committed_offsets(probe, topic, partitions, HANG)
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// [`committed`] through a new [`probe`] in `group`, read again while the broker
-/// refuses: it answers `NotCoordinator` while the group's coordinator moves.
+/// [`committed`] through a new [`probe`] in `group`.
 pub(crate) fn committed_by(
     brokers: &str,
     group: &str,
     topic: &str,
     partitions: i32,
 ) -> Vec<Offset> {
-    let probe = probe(brokers, group);
-    let mut tpl = TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition(topic, p);
-    }
-    let mut read = None;
-    spate_test::wait_until(HANG, "the committed offsets read", || {
-        read = probe
-            .committed_offsets(tpl.clone(), Duration::from_secs(10))
-            .ok();
-        read.is_some()
-    });
-    read.expect("read before the wait ended")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect()
+    committed(&probe(brokers, group), topic, partitions)
 }
 
 /// One group as the broker's group listing shows it.
@@ -580,17 +545,8 @@ fn find_elem(
 /// The offset and leader epoch `group` has committed on partition 0 of
 /// `topic`, read again while the broker refuses.
 pub(crate) fn committed_epoch(brokers: &str, group: &str, topic: &str) -> (Offset, i32) {
-    let probe = probe(brokers, group);
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition(topic, 0);
-    let mut read = None;
-    spate_test::wait_until(HANG, "the committed offset reads", || {
-        read = probe
-            .committed_offsets(tpl.clone(), Duration::from_secs(10))
-            .ok();
-        read.is_some()
-    });
-    let read = read.expect("read before the wait ended");
+    let read = spate_test_support::committed(&probe(brokers, group), topic, 1, HANG)
+        .unwrap_or_else(|e| panic!("{e}"));
     let elem = find_elem(&read, topic, 0);
     // SAFETY: `elem` is a non-null element of `read`, borrowed across the read.
     let epoch = unsafe { rdkafka::bindings::rd_kafka_topic_partition_get_leader_epoch(elem) };
@@ -916,21 +872,11 @@ pub(crate) fn from_start(
     partitions: i32,
     settings: &[(&str, &str)],
 ) -> BaseConsumer {
-    let mut config = raw_config();
-    config
-        .set("bootstrap.servers", brokers)
-        .set("group.id", spate_test::unique_name("from-start"));
-    for (key, value) in settings {
-        config.set(*key, *value);
-    }
-    let consumer: BaseConsumer = config.build().expect("reader");
-    let mut tpl = TopicPartitionList::new();
-    for partition in 0..partitions {
-        tpl.add_partition_offset(topic, partition, Offset::Beginning)
-            .expect("tpl entry");
-    }
-    consumer.assign(&tpl).expect("assign");
-    consumer
+    let group = spate_test::unique_name("from-start");
+    let all = [&[("group.id", group.as_str())], settings].concat();
+    let partitions: Vec<i32> = (0..partitions).collect();
+    spate_test_support::from_start(brokers, topic, &partitions, &all)
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The reason `outcome` failed retryably, which the runtime logs and carries

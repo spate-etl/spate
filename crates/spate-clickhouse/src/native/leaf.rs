@@ -12,8 +12,6 @@ use bytes::{BufMut, BytesMut};
 #[inline]
 pub(crate) fn put_leb128(buf: &mut BytesMut, value: u64) {
     // Most lengths and counts are below 128, so they take one byte.
-    // `extend_from_slice` stays inline without LTO, where `put_u8` calls
-    // `BytesMut`'s out-of-line `put_slice`.
     if value < 0x80 {
         buf.extend_from_slice(&[value as u8]);
     } else {

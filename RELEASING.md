@@ -305,56 +305,51 @@ that it landed, which is why the check above exists. docs.rs builds
 asynchronously and lags the publish; check it later rather than waiting on
 it.
 
-## A release that fixes draft advisories
+## Security releases
 
-A fix for a draft security advisory lands on `main` on the day of the release
-that ships it. A fix merged earlier shows anyone who reads `main` the defect
-while no published version fixes it.
+A fix for a draft security advisory ships by the steps below. They assume the
+advisory is still private.
 
-Develop and review the fix in private. The temporary private fork GitHub
-creates for an advisory runs no Actions, and its merge button fails because
-the `main` ruleset requires status checks and the merge queue. Build the fix
-on a branch of a private repository in the organization instead. That
-repository holds a copy of `main` and runs CI.
+### Fix development process
 
-Request a CVE from each advisory while it is still a draft, without waiting
-for the release. GitHub reviews every CVE request before it assigns an
-identifier, so a request made from the draft gives that review the time until
-release day.
+1. Open a draft security advisory, fill out its details, and request a CVE
+   identifier.
+2. Develop the fix on a branch of a separate private repository. That
+   repository has a fresh copy of the public repository, and CI is configured
+   and enabled in it. The temporary private fork created from the draft
+   security advisory does not run GitHub Actions jobs, so its "Merge pull
+   requests" option cannot pass the `main` ruleset.
+3. Sync `main` from the public repository to the private repository before
+   each fix branch is updated.
+4. Review the fix in the private repository, and do not merge it there. It
+   lands in the public repository on fix release day.
 
-A fix normally ships in the next planned minor release. A fix that cannot wait
-ships in a release of its own, by the same steps. A patch release ships
-`main`, so once `main` carries a `**Breaking:**` fragment, that early release
-is a minor release and needs its own post.
+A fix is synchronized with the next planned minor release. If that release is
+too far away for the severity, consider an earlier one. Once `main` carries a
+`**Breaking:**` fragment, the earlier release is a minor release and needs its
+own post.
 
-The release post merges before the dispatch, as for any minor release, and
-does not mention the advisories. Its source is public as soon as it merges,
-even though the site shows it only after the release.
+The fix pull request and the release post describe the fix only. They do not
+name the advisory or its CVE. The release post merges before the dispatch, as
+for any minor release, and its source is public from that moment.
 
-On release day:
+### Fix release day
 
-1. Wait for the merge queue to empty. The queue merges one entry at a time,
-   so each entry ahead of the fixes adds a full CI run to the time they are
-   public with no release.
-2. Update each fix branch in the private repository to the current `main`, and
-   wait for its CI to pass.
-3. Open one public pull request carrying every fix and its changelog fragment,
-   and add it to the merge queue. The defects are public from the moment this
-   pull request opens. One pull request keeps that time to one CI run.
-4. Dispatch the release as soon as that pull request merges.
-5. When `cargo xtask release verify X.Y.Z` passes, set each advisory's patched
-   version to `X.Y.Z` and publish the advisory. The advisory publishes after
-   crates.io serves the release, so the version it names can be installed.
-6. Edit the release post on a pull request to link each published advisory.
-   A published advisory can wait in GitHub's review queue before it appears
-   in the global advisory database, so the post is where users learn of the
-   fixes in the meantime. A post merged between releases goes live when the
-   `Nightly` workflow is dispatched with tier `docs`.
-7. Delete the private repository once every advisory is published.
-
-The advisories are not filed with RustSec. Its advisory database declined
-Spate's earlier advisories because the crates fall below its notability
-criteria.
+1. Update each fix branch to the current `main` in the private repository, and
+   confirm that its CI succeeds.
+2. Open one public pull request carrying every fix and its changelog fragment.
+   Merge it as quickly as possible, through an empty merge queue. Once the pull
+   request is open, the information is accessible to the public, and the
+   release follows immediately afterwards.
+3. Dispatch the release as soon as that pull request merges.
+4. When `cargo xtask release verify X.Y.Z` passes, set each advisory's patched
+   version to `X.Y.Z`, and publish the security advisory.
+5. Now that everything is public, edit the release post on a pull request to
+   announce the fixes. Name the new release, each advisory with its CVE,
+   severity and impact, and the upgrade. Make the announcement actionable. A
+   post merged between releases goes live when the `Nightly` workflow is
+   dispatched with tier `docs`.
+6. Delete the private repository once it is no longer needed.
 
 ## Provenance and the SBOM
 

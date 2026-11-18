@@ -305,6 +305,52 @@ that it landed, which is why the check above exists. docs.rs builds
 asynchronously and lags the publish; check it later rather than waiting on
 it.
 
+## Security releases
+
+A fix for a draft security advisory ships by the steps below. They assume the
+advisory is still private.
+
+### Fix development process
+
+1. Open a draft security advisory, fill out its details, and request a CVE
+   identifier.
+2. Develop the fix on a branch of a separate private repository. That
+   repository has a fresh copy of the public repository, and CI is configured
+   and enabled in it. The temporary private fork created from the draft
+   security advisory does not run GitHub Actions jobs, so its "Merge pull
+   requests" option cannot pass the `main` ruleset.
+3. Sync `main` from the public repository to the private repository before
+   each fix branch is updated.
+4. Review the fix in the private repository, and do not merge it there. It
+   lands in the public repository on fix release day.
+
+A fix is synchronized with the next planned minor release. If that release is
+too far away for the severity, consider an earlier one. Once `main` carries a
+`**Breaking:**` fragment, the earlier release is a minor release and needs its
+own post.
+
+The fix pull request and the release post describe the fix only. They do not
+name the advisory or its CVE. The release post merges before the dispatch, as
+for any minor release, and its source is public from that moment.
+
+### Fix release day
+
+1. Update each fix branch to the current `main` in the private repository, and
+   confirm that its CI succeeds.
+2. Open one public pull request carrying every fix and its changelog fragment.
+   Merge it as quickly as possible, through an empty merge queue. Once the pull
+   request is open, the information is accessible to the public, and the
+   release follows immediately afterwards.
+3. Dispatch the release as soon as that pull request merges.
+4. When `cargo xtask release verify X.Y.Z` passes, set each advisory's patched
+   version to `X.Y.Z`, and publish the security advisory.
+5. Now that everything is public, edit the release post on a pull request to
+   announce the fixes. Name the new release, each advisory with its CVE,
+   severity and impact, and the upgrade. Make the announcement actionable. A
+   post merged between releases goes live when the `Nightly` workflow is
+   dispatched with tier `docs`.
+6. Delete the private repository once it is no longer needed.
+
 ## Provenance and the SBOM
 
 crates.io records and displays its own provenance for every Trusted

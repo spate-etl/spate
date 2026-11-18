@@ -124,13 +124,35 @@ identical either way. `from_reader` is never used on the hot path. Decoding
 always operates on the in-memory payload slice, which is both faster and lets
 the parser see the whole document at once.
 
-`simd` decodes faster than `serde_json` on the single-document and array
-framings, where one large document is parsed in a pass; the margin narrows on
-NDJSON, where per-parse overhead across many small lines dominates. How much
-faster is both payload- and architecture-sensitive, and aarch64 is the only
-side measured for throughput; an x86-64 host with AVX2 is unknown territory
-here. It is **off by default**: it is a per-deployment choice worth
-benchmarking against real hardware and payloads.
+`simd` is faster than `serde_json` on some payloads and slower on others, and
+the difference depends on the CPU. The table gives the change in decode time
+under `simd` on three AWS 8xlarge hosts: c7i (Intel Xeon Platinum 8488C,
+x86_64), c7a (AMD EPYC 9R14, x86_64) and c8g (Graviton, aarch64). A negative
+figure means `simd` is faster. "Under 5%" means the difference was too small
+for the measurement to resolve.
+
+| Payload | Framing | c7i | c7a | c8g |
+|---|---|---:|---:|---:|
+| Event lines of about 600 bytes, nested and mostly strings | `ndjson` | under 5% | −7.7% | +13.4% |
+| Flat records of seven fields | `ndjson` | under 5% | −9.3% | under 5% |
+| Flat records of seven fields | `array` | −8.5% | −15.0% | −16.4% |
+| 40 documents, each nested 64 levels deep | `single` | −7.9% | −13.3% | −12.9% |
+| One string of half a megabyte | `single` | −44.4% | −73.7% | −26.3% |
+| An array of 40,000 numbers | `single` | +113.4% | +162.3% | +58.9% |
+| One object of 4,000 fields | `single` | under 5% | under 5% | −5.5% |
+
+The record rows decode into a struct, and the `single` rows decode into
+`serde_json::Value`. The figures come from the
+[`decode_wall.rs`](repo:crates/spate-json/benches/decode_wall.rs) bench, run
+with `simd-json` 0.19 and `serde_json` 1.0 over 20 interleaved replicates.
+
+On both x86_64 hosts `simd-json` chose its AVX2 implementation. A CPU without
+both AVX2 and PCLMULQDQ runs its SSE4.2 implementation instead, which was not
+measured.
+
+`simd` is **off by default**, because it is slower on number-heavy payloads on
+every host and slower on the event lines on Graviton. Measure the deployment's
+own payloads on its own hardware before switching.
 
 simd-json parses a mutable buffer in place, so the
 framework copies each borrowed payload into a reused thread-local buffer

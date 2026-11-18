@@ -13,24 +13,27 @@ default `auto.offset.reset: latest`, a quiet partition restarted with 40 of its
 records unwritten, and a group whose commit had fallen below the log start
 committed past 135 retained records. This happened because librdkafka's reset
 policy does two jobs: it picks where a partition with no committed offset
-starts, and it moves a fetch the broker answers as out of range. librdkafka did
-what its documentation says, and Spate's at-least-once guarantee accounted for
-neither job. 0.5.0 closes both, and each commit now carries the leader epoch, so
-a commit that is inside the log but stale is caught as well.
+starts, and it moves a fetch the broker answers as out of range. Each job worked
+as librdkafka's documentation says, and Spate's at-least-once guarantee
+accounted for neither. 0.5.0 commits a position at each partition's first start
+and hands librdkafka `earliest` for a fetch out of range. Each commit now
+carries the leader epoch, so a commit that is inside the log but stale is caught
+as well. Under `latest`, four starts still skip records, and the end of this
+post lists them.
 
 <!-- truncate -->
 
 ## One setting picks a start and moves a fetch
 
 Spate's Kafka source runs on librdkafka 2.12.1, through the `rdkafka` crate.
-librdkafka's [configuration
+The librdkafka [configuration
 reference](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)
 defines `auto.offset.reset` as the "action to take when there is no initial
 offset in offset store or the desired offset is out of range". The first case is
 a partition the consumer group has never committed. The second is a committed
 offset the broker no longer holds, because retention deleted the records at it,
-or because the log now ends below it. `latest`, the default in librdkafka and in
-Spate, answers both cases by moving to the end of the partition.
+or because the log now ends below it. The default in librdkafka and in Spate,
+`latest`, answers both cases by moving to the end of the partition.
 
 Apache Kafka's [consumer
 configuration](https://kafka.apache.org/41/configuration/consumer-configs/)
@@ -68,19 +71,21 @@ against a real broker with one consumer and a session timeout of 6 seconds:
 Each run produced records until a commit landed, so the figures differ between
 releases. 0.4.0 ran against the pinned Apache Kafka image, and 0.1.0 against the
 default image of that release's container crate. Under `auto.offset.reset:
-earliest` every route passed on both releases. 0.2.0 and 0.3.0 were not run. Up
-to 0.4.0, Spate's invariants stated no exception for any of these routes.
+earliest` every route passed on both releases, except the second-process route
+on 0.1.0. That route reached no result under either policy. 0.2.0 and 0.3.0 were
+not run. Up to 0.4.0, Spate's invariants stated no exception for any of these
+routes.
 
 ## A commit below the log start jumped to the end
 
-librdkafka's reset policy also moves a fetch that the broker answers as out of
-range, and that happens when a group falls behind. Kafka deletes a partition's
-oldest segments once they pass the topic's retention, and the log start moves
-up. A group that is stopped, or that reads slower than retention deletes, can be
-left with a commit below the log start. Its next fetch at the commit was
-answered out of range, and under `latest` librdkafka moved the partition to its
-end. The source then committed from there, past every record the log still held
-between the log start and the end
+The reset policy also moves a fetch that the broker answers as out of range, and
+that happens when a group falls behind. Kafka deletes a partition's oldest
+segments once they pass the topic's retention, and the log start moves up. A
+group that is stopped, or that reads slower than retention deletes, can be left
+with a commit below the log start. Its next fetch at the commit was answered out
+of range, and under `latest` librdkafka moved the partition to its end. The
+source then committed from there, past every record the log still held between
+the log start and the end
 ([#1713](https://github.com/spate-etl/spate/issues/1713)).
 
 The test that showed it ran a group under `earliest` until it committed offset
@@ -106,7 +111,7 @@ That commit acknowledges nothing, since it passes only records no member was
 given. A group's first start under `latest` still begins at the end, as `latest`
 asks, and every later start resumes from a committed offset.
 
-librdkafka has no position to commit before a partition's first message, so the
+Before a partition's first message, librdkafka has no position to commit, so the
 source lists the ends itself. One consumer reads the committed offsets and end
 offsets of a whole assignment with one lookup and one listing, and each consumer
 then commits its own partitions that have no commit.
@@ -139,7 +144,7 @@ WARN librdkafka: [thrd:main]: orders [0]: offset reset (at offset 20 (leader epo
 The line names `BEGINNING` under a `latest` configuration, because `earliest` is
 what the source passed to librdkafka.
 
-librdkafka's
+The librdkafka
 [fetcher](https://github.com/confluentinc/librdkafka/blob/v2.12.1/src/rdkafka_fetcher.c#L258-L292)
 handles every out-of-range answer from a partition's leader in one branch, so it
 cannot tell a commit below the log start from a commit past the log end. A
@@ -161,8 +166,8 @@ written to the reused offsets below it
 
 Kafka detects this case through leader epochs. Each leader of a partition has an
 epoch number, and a consumer whose position carries one can ask the leader where
-that epoch ended, then move back to the point of truncation. librdkafka skips
-that check for a position with no epoch, and every commit Spate made carried
+that epoch ended, then move back to the point of truncation. For a position
+with no epoch, librdkafka skips that check, and every commit Spate made carried
 none, because the `rdkafka` crate 0.39 has no way to set an epoch on a committed
 offset. The source now sets the epoch of the record before each committed offset
 through `rd_kafka_topic_partition_set_leader_epoch`, from the C bindings that
@@ -206,18 +211,18 @@ Under `error`, a detected truncation fails the source.
 Under `latest`, four starts still skip records, and
 [INV-1](/docs/INVARIANTS#inv-1) states each one. A group's first start begins at
 the end, as `latest` asks. A partition added to the topic starts at its end,
-past the records written before the group first assigned it. librdkafka finds a
-new partition when it refreshes metadata, and by default it does that every five
-minutes. A group left empty past its offset retention starts at the end again.
-That retention is `offsets.retention.minutes` on Apache Kafka and
+past the records written before the group first assigned it. New partitions
+appear when librdkafka refreshes metadata, by default every five minutes. A
+group left empty past its offset retention starts at the end again. That
+retention is `offsets.retention.minutes` on Apache Kafka and
 `group_offset_retention_sec` on Redpanda, and each defaults to seven days. A
 commit with no epoch starts without the truncation check, and every commit from
-an earlier Spate release has none. A partition whose committed-offset read or
-seek fails also starts without it.
+an earlier Spate release has none. A partition whose seek fails also starts
+without it.
 
-`earliest` closes the first three. If you need every record of a partition added
-to a running topic, or of a group that sits idle for more than a week, set
-`auto.offset.reset: earliest` in the `rdkafka` passthrough:
+Setting `earliest` closes the first three. If you need every record of a
+partition added to a running topic, or of a group that sits idle for more than a
+week, set `auto.offset.reset: earliest` in the `rdkafka` passthrough:
 
 ```yaml
 source:

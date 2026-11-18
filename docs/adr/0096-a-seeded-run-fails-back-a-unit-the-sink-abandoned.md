@@ -1,5 +1,5 @@
 ---
-description: "On a seeded S3 run, a unit whose batch the sink abandons is failed back to its feed, so the run ends by itself and reports only the units with records in the abandoned batch."
+description: "On a seeded S3 run, a unit whose batch the sink abandons is failed back to its feed, so the run ends by itself and reports only the units in that batch."
 ---
 
 # ADR-0096 — A seeded run fails back a unit the sink abandoned

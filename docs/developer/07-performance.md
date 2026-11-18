@@ -1,5 +1,5 @@
 ---
-description: "Keep the per-record path allocation-free, choose a benchmark tier, add a counted bench, an allocation snapshot or a wall-clock bench, and land the benchmark before the change."
+description: "Keep the per-record path allocation-free, choose a benchmark tier, add a counted bench, allocation snapshot or wall-clock bench, and land the benchmark first."
 ---
 
 # Performance

@@ -11,6 +11,10 @@ import SiteLayout from '../components/SiteLayout';
 
 const DESCRIPTION =
   'A reproducible comparison of streaming ETL systems on one fixed pipeline: Kafka to Avro to ClickHouse, every system on the same hardware under the same delivery guarantee.';
+// The hero lead runs past what a search result shows, so the page
+// description is a shorter one.
+const META_DESCRIPTION =
+  'A reproducible comparison of streaming ETL systems on one pipeline, Kafka to Avro to ClickHouse, each on the same hardware under the same delivery guarantee.';
 
 function Headline() {
   const arm = useVendorArm();
@@ -118,7 +122,7 @@ function TheField() {
 
 export default function BenchmarksPage(): React.JSX.Element {
   return (
-    <SiteLayout title="Benchmarks" description={DESCRIPTION} className="benchmarks-page">
+    <SiteLayout title="Benchmarks" description={META_DESCRIPTION} className="benchmarks-page">
       <Headline />
       <TheField />
     </SiteLayout>

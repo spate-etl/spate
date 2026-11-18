@@ -174,7 +174,7 @@ pub(crate) enum Command {
         cmd: fuzz::Fuzz,
     },
 
-    /// Assert the built site is complete
+    /// Assert the built site is complete and each sitemap page is described
     SiteCheck,
 
     /// The documentation site

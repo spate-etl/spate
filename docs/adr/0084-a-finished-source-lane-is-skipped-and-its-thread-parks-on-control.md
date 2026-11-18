@@ -1,5 +1,5 @@
 ---
-description: "A source lane reports when it has read its input to the end, and the pipeline thread stops polling it and parks on its control channel once every lane it holds has finished."
+description: "A source lane reports when it has read its input to the end; the pipeline thread stops polling it, and parks on control once all its lanes have finished."
 ---
 
 # ADR-0084 — A finished source lane is skipped and its thread parks on control

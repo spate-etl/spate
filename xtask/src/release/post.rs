@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use super::version::Version;
+use crate::checks::site_check;
 use crate::run::Error;
 
 /// The blog's source directory, relative to the repository root.
@@ -79,6 +80,14 @@ fn slug_of(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The `description` value of a post's front matter.
+fn description_of(text: &str) -> Option<String> {
+    front_matter_map(text)?
+        .get("description")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// The post's text with the `draft: true` line removed from its front matter,
 /// or `None` when it carries none. Every other byte is kept.
 pub(crate) fn undraft(text: &str) -> Option<String> {
@@ -146,7 +155,8 @@ pub(crate) fn publish(path: &Path) -> Result<(), Error> {
 ///
 /// When a minor release has no post with its slug, or more than one, or its
 /// post's front matter has a key that could keep it a draft after the release
-/// commit.
+/// commit, or a `description` that is missing or outside
+/// [`site_check::DESCRIPTION`].
 pub(crate) fn required(blog: &Path, version: Version) -> Result<Option<PathBuf>, Error> {
     let Some(slug) = version.post_slug() else {
         return Ok(None);
@@ -163,6 +173,12 @@ pub(crate) fn required(blog: &Path, version: Version) -> Result<Option<PathBuf>,
                      The release removes only the exact line '{DRAFT}'; write the flag that way.",
                     path.display()
                 )));
+            }
+            // A production build leaves a draft out, so the site check first
+            // sees this post's description after the release commit.
+            if let Some(problem) = site_check::description_problem(description_of(&text).as_deref())
+            {
+                return Err(Error::msg(format!("{}: {problem}", path.display())));
             }
             Ok(Some(path))
         }
@@ -207,6 +223,7 @@ pub(crate) fn url(manifest: &str, version: Version) -> Result<Option<String>, Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
 
     const POST: &str = "---\ntitle: Spate 0.4\nslug: releases/0.4\nauthors: [marcus]\ntags: [release]\ndraft: true\n---\n\nThe opener.\n\n<!-- truncate -->\n\ndraft: true\n";
 
@@ -255,6 +272,44 @@ mod tests {
             Some("releases/0.4")
         );
         assert_eq!(slug_of("# Title\n\nslug: releases/0.4\n"), None);
+    }
+
+    /// Writes the 0.4 release post with `description` as its front matter
+    /// value, or with none, and returns the outcome of requiring it.
+    fn require_with(description: Option<&str>) -> Result<Option<PathBuf>, Error> {
+        let scratch = Scratch::new("spate-xtask-post").unwrap();
+        let line = description.map_or(String::new(), |d| format!("description: \"{d}\"\n"));
+        std::fs::write(
+            scratch.join("post.mdx"),
+            format!("---\ntitle: Spate 0.4\n{line}slug: releases/0.4\ndraft: true\n---\n"),
+        )
+        .unwrap();
+        required(scratch.dir(), Version::parse("0.4.0").unwrap())
+    }
+
+    /// The release post is held to the bounds a search result shows, counted
+    /// in characters: 160 em dashes are 480 bytes.
+    #[test]
+    fn the_release_post_description_is_held_to_the_bounds() {
+        assert!(require_with(Some(&"a".repeat(50))).unwrap().is_some());
+        assert!(require_with(Some(&"—".repeat(160))).unwrap().is_some());
+        for (description, problem) in [
+            (
+                Some("a".repeat(49)),
+                "description is 49 characters; a search result shows 50 to 160",
+            ),
+            (
+                Some("a".repeat(161)),
+                "description is 161 characters; a search result shows 50 to 160",
+            ),
+            (None, "no description"),
+        ] {
+            let message = require_with(description.as_deref()).unwrap_err().message;
+            assert!(
+                message.ends_with(&format!("post.mdx: {problem}")),
+                "{message}"
+            );
+        }
     }
 
     /// A minor release's post is served under the manifest's homepage; a patch

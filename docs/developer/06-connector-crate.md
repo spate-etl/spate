@@ -1,5 +1,5 @@
 ---
-description: "What a connector crate carries beyond its source: the manifest, the testing feature and its seams, test targets, container suites and lanes, bench and fuzz targets, its docs page and its changelog fragment."
+description: "What a connector crate carries beyond its source: manifest, testing feature, tests, container suites, bench and fuzz targets, docs page and changelog fragment."
 ---
 
 # Adding a connector crate

@@ -514,7 +514,8 @@ fn stand_in_post(blog: &Path, version: Version) -> Result<Option<String>, Error>
         return Ok(None);
     }
     Ok(Some(format!(
-        "---\ntitle: Release rehearsal stand-in\nslug: {slug}\ndraft: true\n---\n"
+        "---\ntitle: Release rehearsal stand-in\ndescription: \"A rehearsal's stand-in for the \
+         release post, committed to a throwaway worktree.\"\nslug: {slug}\ndraft: true\n---\n"
     )))
 }
 

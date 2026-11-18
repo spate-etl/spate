@@ -1,5 +1,5 @@
 ---
-description: "A bounded feed job keeps its lister's checkpoint, end marker and fingerprint at a per-job object-store location every worker reads; a mismatched worker refuses to start."
+description: "A bounded feed job keeps its lister's checkpoint, end marker and fingerprint at a per-job object-store location; a mismatched worker refuses to start."
 ---
 
 # ADR-0073 — A per-job location holds the lister's checkpoint, end marker and fingerprint

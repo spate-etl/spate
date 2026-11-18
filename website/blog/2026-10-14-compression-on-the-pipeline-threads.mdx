@@ -1,6 +1,6 @@
 ---
 title: Moving insert compression onto the pipeline threads
-description: "The ClickHouse sink compressed every insert on two I/O workers, which capped it at about 19.7M rows/s with lz4 and 8.3M with zstd:3. Compressing each chunk on the pipeline thread that seals it lifts both to about 32M on the same box."
+description: "The ClickHouse sink compressed every insert on two I/O workers, capping it near 19.7M rows/s with lz4. Compressing on pipeline threads lifts it to about 32M."
 slug: compression-on-the-pipeline-threads
 authors: [marcus]
 tags: [engineering]

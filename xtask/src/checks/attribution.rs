@@ -19,6 +19,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::checks::read;
 use crate::checks::scratch::{Scratch, unique_name};
 use crate::run::{self, Error, Outcome, Step, Streams};
 
@@ -449,10 +450,6 @@ fn records(text: &str) -> Vec<&str> {
         .unwrap_or(text)
         .split('\n')
         .collect()
-}
-
-fn read(path: &Path) -> Result<String, Error> {
-    fs::read_to_string(path).map_err(|e| Error::msg(format!("{}: {e}", path.display())))
 }
 
 /// Writes through a sibling of the destination, so the rename stays on one

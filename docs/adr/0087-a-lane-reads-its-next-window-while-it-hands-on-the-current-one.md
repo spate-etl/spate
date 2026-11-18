@@ -1,5 +1,5 @@
 ---
-description: "An S3 lane reads its next GET window while it hands on the current one, so its read-ahead no longer depends on chunk_bytes; at the defaults a lane holds three windows."
+description: "An S3 lane reads its next GET window while it hands on the current one, so read-ahead no longer depends on chunk_bytes; a lane holds three windows by default."
 ---
 
 # ADR-0087 — A lane reads its next window while it hands on the current one

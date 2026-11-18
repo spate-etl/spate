@@ -1,5 +1,5 @@
 ---
-description: "On Apache Kafka, a broker cut off from its cluster answers the Kafka feed's depth reads with stale ends; the feed page states the case and the feed adds no second client."
+description: "On Apache Kafka, a cut-off broker answers the feed's depth reads with stale ends. The feed page states the case, and the feed adds no second client."
 ---
 
 # ADR-0097 — A cut-off Kafka leader can end a bounded job early, and the feed page says so

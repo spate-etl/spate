@@ -317,6 +317,16 @@ the `main` ruleset requires status checks and the merge queue. Build the fix
 on a branch of a private repository in the organization instead. That
 repository holds a copy of `main` and runs CI.
 
+Request a CVE from each advisory while it is still a draft, without waiting
+for the release. GitHub reviews every CVE request before it assigns an
+identifier, so a request made from the draft gives that review the time until
+release day.
+
+A fix normally ships in the next planned minor release. A fix that cannot wait
+ships in a release of its own, by the same steps. A patch release ships
+`main`, so once `main` carries a `**Breaking:**` fragment, that early release
+is a minor release and needs its own post.
+
 The release post merges before the dispatch, as for any minor release, and
 does not mention the advisories. Its source is public as soon as it merges,
 even though the site shows it only after the release.
@@ -335,9 +345,11 @@ On release day:
 5. When `cargo xtask release verify X.Y.Z` passes, set each advisory's patched
    version to `X.Y.Z` and publish the advisory. The advisory publishes after
    crates.io serves the release, so the version it names can be installed.
-6. To link the advisories from the release post, edit the post on a pull
-   request. A post merged between releases goes live when the `Nightly`
-   workflow is dispatched with tier `docs`.
+6. Edit the release post on a pull request to link each published advisory.
+   A published advisory can wait in GitHub's review queue before it appears
+   in the global advisory database, so the post is where users learn of the
+   fixes in the meantime. A post merged between releases goes live when the
+   `Nightly` workflow is dispatched with tier `docs`.
 7. Delete the private repository once every advisory is published.
 
 The advisories are not filed with RustSec. Its advisory database declined

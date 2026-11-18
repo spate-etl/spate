@@ -43,11 +43,11 @@ counted instructions in malloc and free, because the struct owns its strings.
 ## How the four hosts were measured
 
 I ran every comparison on November 11, 2026, on four AWS hosts in one
-availability zone, and each host ran nothing but the benchmark. `c6a.8xlarge` is
-an AMD host with AVX2 and no AVX-512. `c7a.8xlarge` is an AMD Genoa host and
-`c7i.8xlarge` is an Intel Sapphire Rapids host, and both have AVX-512.
-`c8g.8xlarge` is an ARM host with a Graviton4 CPU. All four ran Linux with glibc
-and rustc 1.99.1.
+availability zone, and each host ran nothing but the benchmark. The
+`c6a.8xlarge` host is an AMD machine with AVX2 and no AVX-512. The `c7a.8xlarge`
+host is AMD Genoa and the `c7i.8xlarge` host is Intel Sapphire Rapids, and both
+have AVX-512. The `c8g.8xlarge` host is ARM, with a Graviton4 CPU. All four ran
+Linux with glibc and rustc 1.99.1.
 
 Each setting was one commit on `main` that changed a single thing from the
 default build: thin LTO, fat LTO with `codegen-units = 1`, mimalloc 0.1.52,
@@ -60,17 +60,17 @@ binary has 80,809 instructions on 256-bit `ymm` registers, where the default has
 29,488. The two Neoverse binaries have 2,677 and 4,273 SVE instructions, where
 the default has none.
 
-Each comparison ran under `cargo xtask bench ab`. It first primes the two builds
-with 4 passes, then runs them in 20 interleaved replicates, and reports a 90%
-bootstrapped interval. It reports a change only when that interval excludes zero
-and the change is at least 5%. The pipeline case reads 64 objects, each holding
-16,384 line-delimited JSON records of 627 bytes a line, stored either plain or
-compressed with ZSTD. It decodes each line into a typed struct, encodes the
-struct in ClickHouse's Native format, and writes the batches to a sink that
-discards them. The case ran at one pipeline thread and at four pipeline threads.
-Compared against itself, the default build stayed within ±0.3% on every host at
-one thread. That ±0.3% is the noise floor for the pipeline figures below. The
-full results, with every component benchmark, are in
+Each comparison ran under `cargo xtask bench ab`. It first runs each case once
+on each build to prime it, then runs them in 20 interleaved replicates, and
+reports a 90% bootstrapped interval. It reports a change only when that interval
+excludes zero and the change is at least 5%. The pipeline case reads 64 objects,
+each holding 16,384 line-delimited JSON records of 627 bytes a line, stored
+either plain or compressed with ZSTD. It decodes each line into a typed struct,
+encodes the struct in ClickHouse's Native format, and writes the batches to a
+sink that discards them. The case ran at one pipeline thread and at four
+pipeline threads. Compared against itself, the default build stayed within ±0.3%
+on every host at one thread. That ±0.3% is the noise floor for the pipeline
+figures below. The full results, with every component benchmark, are in
 [#1246](https://github.com/spate-etl/spate/issues/1246).
 
 ## Replacing glibc malloc made the pipeline 8–16% faster
@@ -96,9 +96,10 @@ mimalloc saved 8.3–13.3%, and jemalloc saved 9.0–15.2%.
   decimals={1}
   caption={<>
     Wall time saved per iteration on the plain objects at one pipeline thread,
-    against glibc's malloc. mimalloc saved 8.9% on <code>c6a</code>, 8.5% on
-    <code>c7a</code>, 14.8% on <code>c7i</code>, and 15.6% on <code>c8g</code>.
-    jemalloc saved 7.9%, 7.7%, 11.1%, and 16.1% on the same hosts.
+    against glibc's malloc. The mimalloc build saved 8.9% on <code>c6a</code>,
+    8.5% on <code>c7a</code>, 14.8% on <code>c7i</code>, and 15.6% on
+    <code>c8g</code>. The jemalloc build saved 7.9%, 7.7%, 11.1%, and 16.1%
+    on the same hosts.
   </>}
 />
 
@@ -110,11 +111,12 @@ component benchmarks, mimalloc cut the median CPU time of the decode cases by
 
 I picked mimalloc for the [tuning
 page](/docs/user-guide/deployment/tuning#replace-the-system-allocator) because
-its costs elsewhere were narrower and it bought more in decode. jemalloc slowed
-the `encode_*_metrics` and `encode_rowbinary_exotic` cases by 8–11% on all three
-x86 hosts, while mimalloc slowed one case, `encode_native_metrics`, by 13.1% on
-`c8g` in one run. In decode, mimalloc cut 9–15% where jemalloc cut 2–6%. On the
-pipeline itself the two are level.
+its costs elsewhere were narrower and it bought more in decode. The jemalloc
+build slowed the `encode_*_metrics` and `encode_rowbinary_exotic` cases by 8–11%
+on all three x86 hosts, while mimalloc slowed one case, `encode_native_metrics`,
+by 13.1% on `c8g` in one run. In decode, mimalloc cut 9–15% where jemalloc cut
+2–6%. On the pipeline's plain objects the two came within a point of each other
+on three hosts, and mimalloc saved 3.7 points more on `c7i`.
 
 Switching takes one dependency and two lines in your binary:
 
@@ -139,21 +141,22 @@ across the crate boundary. The [ClickHouse sink's tuning
 page](/docs/user-guide/connectors/sinks/clickhouse/performance-tuning#link-time-optimization)
 has the figures for each encoder case.
 
-`bytes` 1.12.2, released on November 17, 2026, inlines `BytesMut::put_slice`,
-and a new build resolves it. I counted the instructions of the five encoder
-benchmark cases under valgrind in an aarch64 container, at three settings.
-Without LTO, moving from `bytes` 1.12.1 to 1.12.2 cut them by 16.0–48.8%. Adding
-thin LTO on top of 1.12.2 moved them by a further −7.9% to +1.6%. On these
-counts, the new `bytes` release alone closes 92–104% of the gap between no LTO
-and thin LTO. The container's valgrind is 3.19, below the 3.24 that Spate's
-counted benchmarks require, so these are smoke-level figures, and an instruction
-count does not give wall time. I have not rerun the wall-clock encoder
-benchmarks against 1.12.2.
+Version 1.12.2 of `bytes`, released on November 17, 2026, inlines
+`BytesMut::put_slice` and the other `BufMut` methods `BytesMut` specializes, and
+adds fast paths for `put_u8`. A new build resolves it. I counted the
+instructions of the five encoder benchmark cases under valgrind in an aarch64
+container, at three settings. Without LTO, moving from `bytes` 1.12.1 to 1.12.2
+cut them by 16.0–48.8%. Adding thin LTO on top of 1.12.2 moved them by a further
+−7.9% to +1.6%. On these counts, the new `bytes` release alone closes 92–104% of
+the gap between no LTO and thin LTO. The container's valgrind is 3.19, below the
+3.24 that Spate's counted benchmarks require, so these are smoke-level figures,
+and an instruction count does not give wall time. I have not rerun the
+wall-clock encoder benchmarks against 1.12.2.
 
 Under thin LTO the pipeline ran 1.0–4.6% faster, much less than the encoders,
 because encoding is a small share of a line's work next to decompression,
 framing, and decode. That figure was also measured on `bytes` 1.12.1. Fat LTO
-landed within two points of thin LTO on the pipeline, faster on some hosts and
+landed within 2.3 points of thin LTO on the pipeline, faster on some hosts and
 slower on others.
 
 Set thin LTO in your own `Cargo.toml`, since Spate's setting does not reach your
@@ -173,14 +176,15 @@ improvement, under 2% on the pipeline on every host. On the pipeline,
 ran 0.5–0.7% faster. None of these reached the 5% that `bench ab` needs before
 it reports a change.
 
-Libraries that do heavy byte work, such as `zstd` and `memchr`, detect the CPU
-at run time on x86_64 and pick wider code paths themselves. A raised target
-mostly removes that detection. The `x86-64-v4` binary adds only 668 instructions
-on 512-bit `zmm` registers to the 72,759 that the default binary already carries
-behind run-time checks. The `x86-64-v3` binary carries nearly three times the
-default's `ymm` instructions, and the pipeline still did not get faster. A
-raised target also has a cost of its own, because running a binary built for a
-newer CPU on an older one is undefined behavior.
+Libraries that do heavy byte work detect the CPU at run time on x86_64 and pick
+faster code paths themselves. The `memchr` crate picks its AVX2 search this way,
+and `zstd` its BMI2 code. A raised target mostly removes that detection. The
+`x86-64-v4` binary adds only 668 instructions on 512-bit `zmm` registers to the
+72,759 that the default binary already carries behind run-time checks. The
+`x86-64-v3` binary carries nearly three times the default's `ymm` instructions,
+and the pipeline still did not get faster. A raised target also has a cost of
+its own, because running a binary built for a newer CPU on an older one is
+undefined behavior.
 
 ## How `x86-64-v3` made `split` 45% slower
 
@@ -212,8 +216,8 @@ Every other setting also beats the old default, except `split_two_branches`
 under `x86-64-v4` on `c7a`, which ties at +0.3%. The change ships in Spate 0.5.
 
 Part of the gap remains. Against the fixed default, one codegen unit is still up
-to 11.8% slower, and `x86-64-v3` is up to 8.3% slower on the AMD hosts.
-`split_two_branches` under `x86-64-v4` on `c7a` is 17.2% slower
+to 11.8% slower, and `x86-64-v3` is up to 8.3% slower on the AMD hosts. Under
+`x86-64-v4` on `c7a`, `split_two_branches` is 17.2% slower
 ([#2072](https://github.com/spate-etl/spate/issues/2072)). The split also still
 walks every branch after every payload to ask it to drain parked output
 ([#2071](https://github.com/spate-etl/spate/issues/2071)).
@@ -230,10 +234,11 @@ costs both builds the same. At four threads every thread wrote the same cache
 line, so the case measured the contention on it. How often threads allocated at
 the same moment depended on code layout, and LTO changes code layout.
 
-`perf` showed where the time went. On `c7a`, the instruction count stayed level
-from one thread to four, at 135.0B against 135.6B. Instructions per cycle fell
-from 2.89 to 1.31, and the counting wrapper's `alloc` held 61.2% of samples. On
-`c8g`, the outlined atomic add `__aarch64_ldadd8_relax` held 40.4% of samples.
+A `perf` profile showed where the time went. On `c7a`, the instruction count
+stayed level from one thread to four, at 135.0B against 135.6B. Instructions per
+cycle fell from 2.89 to 1.31, and the counting wrapper's `alloc` held 61.2% of
+samples. On `c8g`, the outlined atomic add `__aarch64_ldadd8_relax` held 40.4%
+of samples.
 
 [#2068](https://github.com/spate-etl/spate/pull/2068) splits the counters into
 64 shards, each on a 128-byte cache line, so each thread counts into a shard of
@@ -253,14 +258,15 @@ lines/s on `c7a` and 0.50M on `c8g`.
 ## What these settings cost you
 
 LTO costs build time and memory. A clean build of the pipeline benchmark on 32
-vCPUs took 36–48 s with the default profile. Thin LTO made it 11.2–18.0% longer
-and raised peak memory from 1.3–1.5 GiB to 2.2–2.4 GiB. Fat LTO with one codegen
-unit took 121–138 s, about three times the default, and peaked at 4.2–4.5 GiB.
+vCPUs, with Cargo's default release settings and debug info, took 36–48 s. Thin
+LTO made it 11.2–18.0% longer and raised peak memory from 1.3–1.5 GiB to 2.2–2.4
+GiB. Fat LTO with one codegen unit took 121–138 s, about three times the
+default, and peaked at 4.2–4.5 GiB.
 
-Each replacement allocator slowed some encoder cases on one architecture.
-jemalloc slowed them by up to 11% on x86_64, and mimalloc slowed one case by
-13.1% on aarch64. The `mimalloc` crate also compiles its C library from source,
-so your build needs a C compiler.
+Each replacement allocator slowed some encoder cases on one architecture. On
+x86_64 jemalloc slowed them by up to 11%, and on aarch64 mimalloc slowed one
+case by 13.1%. The `mimalloc` crate also compiles its C library from source, so
+your build needs a C compiler.
 
 A raised target CPU narrows the machines your binary can run on, and on these
 hosts it changed the pipeline's speed by less than 2%.

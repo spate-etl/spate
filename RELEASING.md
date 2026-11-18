@@ -305,6 +305,45 @@ that it landed, which is why the check above exists. docs.rs builds
 asynchronously and lags the publish; check it later rather than waiting on
 it.
 
+## A release that fixes draft advisories
+
+A fix for a draft security advisory lands on `main` on the day of the release
+that ships it. A fix merged earlier shows anyone who reads `main` the defect
+while no published version fixes it.
+
+Develop and review the fix in private. The temporary private fork GitHub
+creates for an advisory runs no Actions, and its merge button fails because
+the `main` ruleset requires status checks and the merge queue. Build the fix
+on a branch of a private repository in the organization instead. That
+repository holds a copy of `main` and runs CI.
+
+The release post merges before the dispatch, as for any minor release, and
+does not mention the advisories. Its source is public as soon as it merges,
+even though the site shows it only after the release.
+
+On release day:
+
+1. Wait for the merge queue to empty. The queue merges one entry at a time,
+   so each entry ahead of the fixes adds a full CI run to the time they are
+   public with no release.
+2. Update each fix branch in the private repository to the current `main`, and
+   wait for its CI to pass.
+3. Open one public pull request carrying every fix and its changelog fragment,
+   and add it to the merge queue. The defects are public from the moment this
+   pull request opens. One pull request keeps that time to one CI run.
+4. Dispatch the release as soon as that pull request merges.
+5. When `cargo xtask release verify X.Y.Z` passes, set each advisory's patched
+   version to `X.Y.Z` and publish the advisory. The advisory publishes after
+   crates.io serves the release, so the version it names can be installed.
+6. To link the advisories from the release post, edit the post on a pull
+   request. A post merged between releases goes live when the `Nightly`
+   workflow is dispatched with tier `docs`.
+7. Delete the private repository once every advisory is published.
+
+The advisories are not filed with RustSec. Its advisory database declined
+Spate's earlier advisories because the crates fall below its notability
+criteria.
+
 ## Provenance and the SBOM
 
 crates.io records and displays its own provenance for every Trusted

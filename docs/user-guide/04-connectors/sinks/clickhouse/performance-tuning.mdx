@@ -183,21 +183,24 @@ bottleneck or your network egress is the constraint (cross-region, metered), and
 
 ## Link-time optimization
 
-Both formats' encoders run much faster in a binary built with link-time
-optimization (LTO) across crates. Cargo's default release profile does none,
-and [Tuning](../../../05-deployment/tuning.mdx#set-thin-lto-in-your-own-profile)
-shows how to set it.
+Both formats' encoders run faster in a binary built with fat link-time
+optimization (LTO) and one codegen unit. Cargo's default release profile does
+no LTO across crates, and
+[Tuning](../../../05-deployment/tuning.mdx#set-lto-in-your-own-profile) shows
+how to set it.
 
-Thin LTO cut the CPU time of each case in
+Fat LTO with one codegen unit cut the CPU time of each case in
 [`spate-clickhouse/benches/encode_wall.rs`](repo:crates/spate-clickhouse/benches/encode_wall.rs)
-by 12–78% against Cargo's default profile. The two `events` cases gained least,
-12–32%, and the RowBinary `metrics` and `exotic` cases gained most, 65–78%. Fat
-LTO with one codegen unit cut 21–88%. Each figure compares two builds over 20
-interleaved runs, on four hosts: three x86_64 and one aarch64.
+by 5–68% against Cargo's default profile. The Native `events` and `metrics`
+cases gained least, 5–13%. The RowBinary `events` and `metrics` cases and the
+Native `exotic` case gained most, 37–68%. Thin LTO changed each case by less
+than 7%, some faster and some slower. Each figure compares two builds over 20
+interleaved runs, on one x86_64 and one aarch64 host, built with `bytes`
+1.12.2.
 
 Encoding is a small share of a whole pipeline. On the
 [pipeline the tuning page measures](../../../05-deployment/tuning.mdx#build-the-binary-for-throughput),
-thin LTO made the pipeline 1–5% faster.
+fat LTO with one codegen unit made the measured pipeline 2–8% faster.
 
 ## Compression
 

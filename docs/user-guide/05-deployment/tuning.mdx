@@ -65,11 +65,12 @@ records, stored plain or zstd-compressed, into a typed struct, which allocates
 about 26 times a record. It then encodes them into a columnar format for a sink
 that discards them. It ran on two Linux hosts with glibc, one x86_64 and one
 aarch64, on one pipeline thread unless a figure names four. The builds used
-`bytes` 1.12.2. Each figure compares two builds over 20 interleaved runs. A
+`bytes` 1.12.2, except for the target CPU figures. Those come from an earlier
+run on four hosts, three x86_64 and one aarch64, with `bytes` 1.12.1. Each
+figure compares two builds over 20 interleaved runs. A
 difference is stated as no measurable difference when its 90% confidence
 interval includes zero, or when it is no larger than the difference between two
-runs of the same build. The target CPU figures come from an earlier run on four
-hosts, three x86_64 and one aarch64. Other pipeline shapes, operating systems
+runs of the same build. Other pipeline shapes, operating systems
 and C libraries were not measured. The build times come from a clean build of
 that bench crate with debug info, on 32 vCPUs.
 
@@ -113,8 +114,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 The jemalloc allocator, through `tikv-jemallocator`, gave a gain in the same
 range on the measured pipeline. Each allocator also slowed some encoder
 benchmark cases. On x86_64, jemalloc slowed two cases by 6–10%. It also slowed
-one case on each host by 1% or less. The `mimalloc` allocator slowed the Native
-`metrics` case by 4–9%.
+one case on each host by 1% or less. The `mimalloc` allocator slowed one case
+by 4–9%.
 
 At four pipeline threads, the allocator was measured only together with fat
 LTO. That build, with jemalloc, was 6–20% faster than Cargo's defaults.

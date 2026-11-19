@@ -88,13 +88,30 @@ pub(crate) enum ThreadControl<L> {
     },
 }
 
+/// Why a driver thread wants a lane paused at the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PauseCause {
+    /// The thread's in-flight budget or a sink queue is over its limit.
+    Backpressure,
+    /// The lane's partition has stayed at `checkpoint.max_pending_batches`,
+    /// under the assignment epoch its gate belongs to.
+    Ceiling { epoch: u32 },
+}
+
 /// Requests and reports a driver thread sends the controller.
 #[derive(Debug)]
 pub(crate) enum DriverEvent {
-    /// Backpressure tripped: pause these lanes at the source.
-    PauseLanes { lanes: Vec<LaneId> },
-    /// Backpressure cleared: resume these lanes.
-    ResumeLanes { lanes: Vec<LaneId> },
+    /// Pause these lanes at the source for `cause`.
+    PauseLanes {
+        lanes: Vec<LaneId>,
+        cause: PauseCause,
+    },
+    /// `cause` no longer holds for these lanes. A lane resumes at the source
+    /// once no cause holds for it.
+    ResumeLanes {
+        lanes: Vec<LaneId>,
+        cause: PauseCause,
+    },
     /// The chain failed or panicked; the pipeline must stop.
     Fatal { thread: usize, error: FatalError },
 }

@@ -3139,6 +3139,15 @@ fn a_batch_keeps_its_event_time_past_a_chunk_without_one() {
     assert!(sum >= 7200.0, "aged from ingest: {sum}");
 }
 
+/// An event time at the bottom of the `i64` range has an age no `i64` holds.
+/// The batch is still acknowledged, and it records the largest age.
+#[test]
+fn an_age_past_the_i64_range_records_the_largest_age_and_acks() {
+    let sum = event_basis_latency_sum(&[i64::MIN], Duration::ZERO);
+    let largest = Duration::from_millis(i64::MAX.unsigned_abs()).as_secs_f64();
+    assert_eq!(sum, largest);
+}
+
 /// `SinkPool` stays `Send` and `Sync` with the clock it holds.
 #[test]
 fn sink_pool_keeps_its_auto_traits() {

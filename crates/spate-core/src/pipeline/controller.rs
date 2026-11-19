@@ -6,7 +6,7 @@
 //! implementation never needs internal locking for the control plane.
 
 use super::runtime::StopRequest;
-use super::{DriverEvent, ExitState, FatalErrorReport, ThreadControl};
+use super::{DriverEvent, ExitState, FatalErrorReport, PauseCause, ThreadControl};
 use crate::admin::HealthState;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::Checkpointer;
@@ -20,6 +20,7 @@ use crate::metrics::{
 use crate::record::PartitionId;
 use crate::sink::SinkFailures;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
+use crate::telemetry::RateLimit;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -32,6 +33,8 @@ use std::time::{Duration, Instant};
 /// commit interval by the chase deadline, after which the partition is
 /// polled at the ordinary cadence and committed when it advances.
 pub(crate) const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
+
+static PAUSE_WARN: RateLimit = RateLimit::hot_path();
 
 /// How long before the drain deadline the drivers and the sink drain end
 /// when the pipeline's feed hands back, so the feed's close has this time
@@ -145,7 +148,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     let mut state = State {
         assignment: FastMap::default(),
         thread_load: vec![0usize; control_txs.len()],
-        paused: FastSet::default(),
+        paused: FastMap::default(),
         epoch: 0,
         pending_commit: BTreeMap::new(),
         committed: BTreeMap::new(),
@@ -218,7 +221,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
 
         // Driver requests.
         while let Ok(event) = events_rx.try_recv() {
-            handle_driver_event(event, &mut source, &mut state);
+            handle_driver_event(event, &mut source, &mut state, &checkpoint_metrics);
         }
         if state.failure.is_some() {
             break;
@@ -256,6 +259,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 None,
                 false,
             );
+            settle_pauses(&mut source, &mut state);
 
             // A watermark stalled behind a failed batch is permanent; acks
             // only ever fail, never un-fail. If one has been stalled past the
@@ -707,8 +711,9 @@ struct State {
     assignment: FastMap<LaneId, (PartitionId, usize)>,
     /// Lanes owned per thread (assignment balancing).
     thread_load: Vec<usize>,
-    /// Lanes paused at the source by a driver's backpressure request.
-    paused: FastSet<LaneId>,
+    /// Lanes a driver asked to pause at the source, and lanes whose resume the
+    /// source has yet to accept.
+    paused: FastMap<LaneId, LanePause>,
     /// Assignment epoch counter (strictly increasing).
     epoch: u32,
     /// Watermarks taken from the checkpointer but not yet successfully
@@ -753,43 +758,147 @@ fn pending_gate(
     gate
 }
 
-fn handle_driver_event<S: Source>(event: DriverEvent, source: &mut S, state: &mut State) {
-    match event {
-        DriverEvent::PauseLanes { lanes } => {
-            let newly: Vec<LaneId> = lanes
-                .into_iter()
-                .filter(|l| !state.paused.contains(l) && state.assignment.contains_key(l))
-                .collect();
-            if newly.is_empty() {
-                return;
-            }
-            match source.pause(&newly) {
-                Ok(()) => state.paused.extend(newly),
-                Err(e) => tracing::warn!(error = %e, "source pause failed"),
-            }
+/// Why one lane is wanted paused at the source, and whether the source has
+/// accepted the call that state asks for.
+#[derive(Debug, Default)]
+struct LanePause {
+    backpressure: bool,
+    ceiling: bool,
+    /// Whether the last call made for the wanted state succeeded. A lane with
+    /// no cause and an unsettled call may still be paused at the source.
+    settled: bool,
+}
+
+impl LanePause {
+    fn wanted(&self) -> bool {
+        self.backpressure || self.ceiling
+    }
+
+    fn cause_mut(&mut self, cause: PauseCause) -> &mut bool {
+        match cause {
+            PauseCause::Backpressure => &mut self.backpressure,
+            PauseCause::Ceiling { .. } => &mut self.ceiling,
         }
-        DriverEvent::ResumeLanes { lanes } => {
-            let resumable: Vec<LaneId> = lanes
-                .into_iter()
-                .filter(|l| state.paused.contains(l))
-                .collect();
-            if resumable.is_empty() {
+    }
+}
+
+/// Whether a request under `cause` belongs to the assignment `epoch`. A
+/// ceiling request names the epoch of its gate, and one from an earlier epoch
+/// names lanes that have been revoked since, whose ids a source may reuse.
+fn cause_is_current(cause: PauseCause, epoch: u32) -> bool {
+    match cause {
+        PauseCause::Backpressure => true,
+        PauseCause::Ceiling { epoch: of } => of == epoch,
+    }
+}
+
+fn handle_driver_event<S: Source>(
+    event: DriverEvent,
+    source: &mut S,
+    state: &mut State,
+    checkpoint_metrics: &CheckpointMetrics,
+) {
+    match event {
+        DriverEvent::PauseLanes { lanes, cause } => {
+            if !cause_is_current(cause, state.epoch) {
                 return;
             }
-            match source.resume(&resumable) {
-                Ok(()) => {
-                    for l in &resumable {
-                        state.paused.remove(l);
-                    }
+            let mut gained = false;
+            let mut to_pause = Vec::new();
+            for lane in lanes {
+                if !state.assignment.contains_key(&lane) {
+                    continue;
                 }
-                Err(e) => tracing::warn!(error = %e, "source resume failed"),
+                let pause = state.paused.entry(lane).or_default();
+                let was_wanted = pause.wanted();
+                gained |= !std::mem::replace(pause.cause_mut(cause), true);
+                if !was_wanted {
+                    to_pause.push(lane);
+                }
             }
+            if gained && matches!(cause, PauseCause::Ceiling { .. }) {
+                checkpoint_metrics.ceiling_pause();
+            }
+            pause_at_source(source, state, &to_pause);
+        }
+        DriverEvent::ResumeLanes { lanes, cause } => {
+            if !cause_is_current(cause, state.epoch) {
+                return;
+            }
+            let mut to_resume = Vec::new();
+            for lane in lanes {
+                let Some(pause) = state.paused.get_mut(&lane) else {
+                    continue;
+                };
+                let was_wanted = pause.wanted();
+                *pause.cause_mut(cause) = false;
+                if was_wanted && !pause.wanted() {
+                    to_resume.push(lane);
+                }
+            }
+            resume_at_source(source, state, &to_resume);
         }
         DriverEvent::Fatal { thread, error } => {
             tracing::error!(thread, error = %error, "pipeline thread reported fatal");
             state.failure.get_or_insert(error);
         }
     }
+}
+
+/// Pause `lanes` at the source. A refusal leaves them unsettled for
+/// [`settle_pauses`].
+fn pause_at_source<S: Source>(source: &mut S, state: &mut State, lanes: &[LaneId]) {
+    if lanes.is_empty() {
+        return;
+    }
+    let settled = match source.pause(lanes) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::rate_limited_warn!(PAUSE_WARN, error = %e, "source pause failed");
+            false
+        }
+    };
+    for lane in lanes {
+        if let Some(pause) = state.paused.get_mut(lane) {
+            pause.settled = settled;
+        }
+    }
+}
+
+/// Resume `lanes` at the source and forget them. A refusal keeps them,
+/// unsettled, for [`settle_pauses`].
+fn resume_at_source<S: Source>(source: &mut S, state: &mut State, lanes: &[LaneId]) {
+    if lanes.is_empty() {
+        return;
+    }
+    match source.resume(lanes) {
+        Ok(()) => {
+            for lane in lanes {
+                state.paused.remove(lane);
+            }
+        }
+        Err(e) => {
+            crate::rate_limited_warn!(PAUSE_WARN, error = %e, "source resume failed");
+            for lane in lanes {
+                if let Some(pause) = state.paused.get_mut(lane) {
+                    pause.settled = false;
+                }
+            }
+        }
+    }
+}
+
+/// Call the source again for every lane whose last pause or resume it
+/// refused, with what is wanted of the lane now.
+fn settle_pauses<S: Source>(source: &mut S, state: &mut State) {
+    let (to_pause, to_resume): (Vec<LaneId>, Vec<LaneId>) = state
+        .paused
+        .iter()
+        .filter(|(_, pause)| !pause.settled)
+        .map(|(lane, _)| *lane)
+        .partition(|lane| state.paused[lane].wanted());
+    pause_at_source(source, state, &to_pause);
+    resume_at_source(source, state, &to_resume);
 }
 
 /// Drain registrations and acknowledgments into the trackers and fold the
@@ -1234,6 +1343,239 @@ fn revoke_lanes<S: Source>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SourceError;
+    use crate::metrics::{ComponentLabels, names, render_local};
+    use crate::pipeline::fakes::{FakeSource, SharedLog};
+
+    const BACKPRESSURE: PauseCause = PauseCause::Backpressure;
+    const CEILING: PauseCause = PauseCause::Ceiling { epoch: 3 };
+
+    /// A controller at epoch 3 with lanes 0 and 1 assigned, its fake source
+    /// and that source's log.
+    struct Pauses {
+        source: FakeSource,
+        log: SharedLog,
+        state: State,
+        metrics: CheckpointMetrics,
+    }
+
+    impl Pauses {
+        fn new() -> Pauses {
+            let (source, log, _script) = FakeSource::new();
+            let mut state = State {
+                assignment: FastMap::default(),
+                thread_load: vec![2],
+                paused: FastMap::default(),
+                epoch: 3,
+                pending_commit: BTreeMap::new(),
+                committed: BTreeMap::new(),
+                revoked_committed: BTreeMap::new(),
+                failure: None,
+            };
+            state.assignment.insert(LaneId(0), (PartitionId(0), 0));
+            state.assignment.insert(LaneId(1), (PartitionId(1), 0));
+            let metrics = CheckpointMetrics::new(
+                &ComponentLabels::new("pauses", "checkpoint", "checkpoint"),
+                false,
+            );
+            Pauses {
+                source,
+                log,
+                state,
+                metrics,
+            }
+        }
+
+        fn pause(&mut self, lanes: &[u32], cause: PauseCause) {
+            let lanes = lanes.iter().map(|&l| LaneId(l)).collect();
+            let event = DriverEvent::PauseLanes { lanes, cause };
+            handle_driver_event(event, &mut self.source, &mut self.state, &self.metrics);
+        }
+
+        fn resume(&mut self, lanes: &[u32], cause: PauseCause) {
+            let lanes = lanes.iter().map(|&l| LaneId(l)).collect();
+            let event = DriverEvent::ResumeLanes { lanes, cause };
+            handle_driver_event(event, &mut self.source, &mut self.state, &self.metrics);
+        }
+
+        fn settle(&mut self) {
+            settle_pauses(&mut self.source, &mut self.state);
+        }
+
+        fn refuse_pause(&self) {
+            let refusal = SourceError::retryable("scripted pause refusal");
+            self.log.lock().unwrap().pause_errors.push_back(refusal);
+        }
+
+        fn refuse_resume(&self) {
+            let refusal = SourceError::retryable("scripted resume refusal");
+            self.log.lock().unwrap().resume_errors.push_back(refusal);
+        }
+
+        /// The source's pause calls and resume calls so far.
+        fn calls(&self) -> (Vec<Vec<LaneId>>, Vec<Vec<LaneId>>) {
+            let log = self.log.lock().unwrap();
+            (log.pauses.clone(), log.resumes.clone())
+        }
+    }
+
+    fn only(lane: u32) -> Vec<Vec<LaneId>> {
+        vec![vec![LaneId(lane)]]
+    }
+
+    /// A lane paused for the ceiling and then for backpressure is paused at
+    /// the source once, and resumes only when both causes have cleared.
+    #[test]
+    fn a_ceiling_pause_outlasts_a_backpressure_resume() {
+        let mut p = Pauses::new();
+        p.pause(&[0], CEILING);
+        p.pause(&[0, 1], BACKPRESSURE);
+        assert_eq!(p.calls().0, vec![vec![LaneId(0)], vec![LaneId(1)]]);
+        p.resume(&[0, 1], BACKPRESSURE);
+        assert_eq!(p.calls().1, only(1), "lane 0 is still at the ceiling");
+        p.resume(&[0], CEILING);
+        assert_eq!(p.calls().1, vec![vec![LaneId(1)], vec![LaneId(0)]]);
+        assert!(p.state.paused.is_empty());
+    }
+
+    /// The same with the causes arriving the other way round: the ceiling's
+    /// resume does not lift a backpressure pause.
+    #[test]
+    fn a_backpressure_pause_outlasts_a_ceiling_resume() {
+        let mut p = Pauses::new();
+        p.pause(&[0], BACKPRESSURE);
+        p.pause(&[0], CEILING);
+        assert_eq!(p.calls().0, only(0));
+        p.resume(&[0], CEILING);
+        assert_eq!(p.calls().1, Vec::<Vec<LaneId>>::new());
+        p.resume(&[0], BACKPRESSURE);
+        assert_eq!(p.calls(), (only(0), only(0)));
+        assert!(p.state.paused.is_empty());
+    }
+
+    /// A resume for a lane nobody paused makes no source call.
+    #[test]
+    fn a_resume_with_no_pause_makes_no_call() {
+        let mut p = Pauses::new();
+        p.resume(&[0], BACKPRESSURE);
+        p.resume(&[0], CEILING);
+        assert_eq!(p.calls(), (vec![], vec![]));
+    }
+
+    /// A pause the source refuses is made again on each later pass until it
+    /// succeeds, and not after.
+    #[test]
+    fn a_refused_pause_is_retried_until_the_source_accepts_it() {
+        let mut p = Pauses::new();
+        p.refuse_pause();
+        p.refuse_pause();
+        p.pause(&[0], CEILING);
+        p.settle();
+        assert_eq!(p.calls().0.len(), 2);
+        p.settle();
+        p.settle();
+        assert_eq!(p.calls(), (vec![vec![LaneId(0)]; 3], vec![]));
+    }
+
+    /// A refused pause whose cause then clears is followed by a resume, since
+    /// the source may have paused the lane, and by no further pause.
+    #[test]
+    fn a_refused_pause_whose_cause_clears_becomes_a_resume() {
+        let mut p = Pauses::new();
+        p.refuse_pause();
+        p.pause(&[0], CEILING);
+        p.resume(&[0], CEILING);
+        p.settle();
+        assert_eq!(p.calls(), (only(0), only(0)));
+        assert!(p.state.paused.is_empty());
+    }
+
+    /// A resume the source refuses is made again on each later pass until it
+    /// succeeds, and not after.
+    #[test]
+    fn a_refused_resume_is_retried_until_the_source_accepts_it() {
+        let mut p = Pauses::new();
+        p.pause(&[0], BACKPRESSURE);
+        p.refuse_resume();
+        p.refuse_resume();
+        p.resume(&[0], BACKPRESSURE);
+        p.settle();
+        assert_eq!(p.calls().1.len(), 2);
+        p.settle();
+        p.settle();
+        assert_eq!(p.calls(), (only(0), vec![vec![LaneId(0)]; 3]));
+        assert!(p.state.paused.is_empty());
+    }
+
+    /// A refused resume followed by a new cause ends with the lane paused: the
+    /// pause is made at once and the owed resume is dropped.
+    #[test]
+    fn a_refused_resume_followed_by_a_new_cause_ends_paused() {
+        let mut p = Pauses::new();
+        p.pause(&[0], BACKPRESSURE);
+        p.refuse_resume();
+        p.resume(&[0], BACKPRESSURE);
+        p.pause(&[0], CEILING);
+        p.settle();
+        assert_eq!(p.calls(), (vec![vec![LaneId(0)]; 2], only(0)));
+        assert!(p.state.paused[&LaneId(0)].wanted());
+    }
+
+    /// A request for a lane outside the assignment is dropped.
+    #[test]
+    fn a_pause_for_an_unassigned_lane_makes_no_call() {
+        let mut p = Pauses::new();
+        p.pause(&[9], BACKPRESSURE);
+        p.pause(&[9], CEILING);
+        assert_eq!(p.calls(), (vec![], vec![]));
+        assert!(p.state.paused.is_empty());
+    }
+
+    /// A ceiling request names the epoch of its gate. One from an earlier
+    /// epoch is dropped, so it cannot pause or resume a lane of the current
+    /// epoch that reuses the id.
+    #[test]
+    fn a_ceiling_request_from_an_earlier_epoch_is_dropped() {
+        let mut p = Pauses::new();
+        let stale = PauseCause::Ceiling { epoch: 2 };
+        p.pause(&[0], stale);
+        assert_eq!(p.calls(), (vec![], vec![]));
+        p.pause(&[0], CEILING);
+        p.resume(&[0], stale);
+        assert_eq!(p.calls(), (only(0), vec![]));
+    }
+
+    /// The counter moves once per ceiling pause the controller accepts: not
+    /// for backpressure, a stale epoch, an unassigned lane or a repeat.
+    #[test]
+    fn the_ceiling_pause_counter_counts_accepted_ceiling_pauses() {
+        let rendered = render_local(|| {
+            let mut p = Pauses::new();
+            p.pause(&[0], BACKPRESSURE);
+            p.pause(&[1], PauseCause::Ceiling { epoch: 2 });
+            p.pause(&[9], CEILING);
+            p.pause(&[0], CEILING);
+            p.pause(&[0], CEILING);
+            p.resume(&[0], CEILING);
+            p.pause(&[0, 1], CEILING);
+        });
+        assert_eq!(
+            spate_test::metric_value(&rendered, names::CHECKPOINT_CEILING_PAUSES_TOTAL, &[]),
+            Some(2.0),
+            "{rendered}"
+        );
+    }
+
+    /// The counter is published at zero before any pause.
+    #[test]
+    fn the_ceiling_pause_counter_is_registered_at_zero() {
+        let rendered = render_local(|| drop(Pauses::new()));
+        assert_eq!(
+            spate_test::metric_value(&rendered, names::CHECKPOINT_CEILING_PAUSES_TOTAL, &[]),
+            Some(0.0),
+            "{rendered}"
+        );
+    }
 
     /// Pins that the reserve sits `STOP_RESERVE` before the deadline, and at
     /// the trigger when the drain timeout is shorter than the reserve.

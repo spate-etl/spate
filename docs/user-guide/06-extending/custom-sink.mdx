@@ -54,6 +54,9 @@ Contracts:
   type can never match the target schema) and every subsequent record would
   fail identically. See
   [Error handling](../02-concepts/04-error-handling.mdx).
+- **Error text is logged.** Spate writes a `SinkError`'s text to the `WARN`
+  line for a skipped record and uses it as the pipeline's failure reason. Keep
+  the record's content out of that text.
 - **The terminal stage clones one encoder per shard**, which is why the type is
   `Clone`. Shards never share encoder state, so anything you buffer is private
   to one shard and you do not need to synchronize it.

@@ -208,7 +208,7 @@ pub enum DecimalConvertError {
     /// `rust_decimal`'s 96-bit mantissa ran out of precision. (This is
     /// also why `Decimal128` columns with large precision cannot always
     /// be filled from a `rust_decimal::Decimal`.)
-    #[error("{value} cannot be rescaled to {scale} fractional digits")]
+    #[error("the value cannot be rescaled to {scale} fractional digits")]
     Rescale {
         /// The original value.
         value: rust_decimal::Decimal,
@@ -216,14 +216,14 @@ pub enum DecimalConvertError {
         scale: u32,
     },
     /// The rescaled mantissa overflows the column's integer width.
-    #[error("scaled mantissa of {value} overflows the column's integer width")]
+    #[error("the scaled mantissa overflows the column's integer width")]
     Overflow {
         /// The original value.
         value: rust_decimal::Decimal,
     },
     /// A wrapper's raw value exceeds `rust_decimal`'s range (96-bit
     /// mantissa, scale ≤ 28) when converting back out of the wire type.
-    #[error("raw decimal {raw} at scale {scale} exceeds rust_decimal's range")]
+    #[error("the raw decimal at scale {scale} exceeds rust_decimal's range")]
     Unrepresentable {
         /// The wrapper's raw pre-scaled integer.
         raw: i128,
@@ -492,6 +492,31 @@ mod tests {
             Decimal::try_from(Decimal128::<2>(i128::MAX)),
             Err(DecimalConvertError::Unrepresentable { .. })
         ));
+    }
+
+    #[cfg(feature = "rust_decimal")]
+    #[test]
+    fn a_decimal_conversion_error_does_not_print_the_value() {
+        use rust_decimal::Decimal;
+
+        assert_eq!(
+            Decimal128::<10>::try_from(Decimal::MAX)
+                .unwrap_err()
+                .to_string(),
+            "the value cannot be rescaled to 10 fractional digits"
+        );
+        assert_eq!(
+            Decimal32::<0>::try_from(Decimal::MAX)
+                .unwrap_err()
+                .to_string(),
+            "the scaled mantissa overflows the column's integer width"
+        );
+        assert_eq!(
+            Decimal::try_from(Decimal128::<2>(i128::MAX))
+                .unwrap_err()
+                .to_string(),
+            "the raw decimal at scale 2 exceeds rust_decimal's range"
+        );
     }
 
     #[test]

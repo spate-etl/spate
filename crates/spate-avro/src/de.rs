@@ -41,13 +41,10 @@
 //!   where the decode paths (both of them) walk the items and ignore the
 //!   size, so a corrupt payload whose size field lies about the block can
 //!   skip differently than it decodes.
-//! - **Collections carry a per-datum item budget** of
-//!   `max(payload length, 65 536)` claimed items, charged as each block
-//!   opens. A legitimate item costs at least one wire byte except for
-//!   zero-width shapes (an array of `null`s or of empty records), where a
-//!   hostile block count would otherwise drive an unbounded walk;
-//!   apache-avro instead caps each single block at 512 Mi items and walks
-//!   it.
+//! - **The depth limits differ.** This decode allows [`MAX_DEPTH`] levels of
+//!   nesting. The two-pass path allows [`VALUE_MAX_DEPTH`], checked by
+//!   [`check_datum`], because apache-avro's decode and the conversions over
+//!   its `Value` tree take far more stack per level.
 //! - **Two accepting-direction corners.** A zero-length decimal passes its
 //!   (empty) wire bytes through where `Decimal::to_vec` errors, and a
 //!   bytes-shaped target over a string position receives the raw bytes
@@ -66,19 +63,39 @@
 //! Every length and block count read from the wire is checked against the
 //! *remaining buffer* before any slice or allocation; collection
 //! `size_hint`s are capped the same way, so a hostile count cannot drive a
-//! large `Vec::with_capacity`, and the per-datum item budget above bounds
-//! the collection walk itself. Varints are capped at 10 bytes. Recursion is
+//! large `Vec::with_capacity`. Varints are capped at 10 bytes. Recursion is
 //! schema-and-data driven (nested records, arrays, unions), so a depth
 //! guard of [`MAX_DEPTH`] bounds it; nothing here panics or loops
 //! unboundedly on any input.
+//!
+//! Collections carry a per-datum item budget of `max(payload length,
+//! 65 536)` claimed items, charged as each block opens. A legitimate item
+//! costs at least one wire byte except for zero-width shapes (an array of
+//! `null`s or of empty records), where a hostile block count would otherwise
+//! drive an unbounded walk. The two-pass path charges the same budget in
+//! [`check_datum`] before apache-avro decodes the datum, because apache-avro
+//! caps only each array at 512 MiB and builds every item a block claims.
+//! [`check_datum`] also charges an estimate of the `Value` tree the decode
+//! builds against `max(payload length, 65 536) × 1 024` bytes. The writer
+//! schema decides each item's size, and a registry serves it from the
+//! writer: apache-avro copies a field name into every record and an enum
+//! symbol into every item.
+//!
+//! [`check_datum`] reuses [`skip_datum`]'s walk with three differences: a
+//! size-prefixed block is walked item by item, as the decode walks it, the
+//! bytes inside a decimal take a level, as apache-avro decodes them, and each
+//! node is charged against the decoded-size budget.
 
 use apache_avro::Schema;
 use apache_avro::schema::{
-    DecimalSchema, InnerDecimalSchema, RecordSchema, UnionSchema, UuidSchema,
+    DecimalSchema, InnerDecimalSchema, RecordField, RecordSchema, SchemaKind, UnionSchema,
+    UuidSchema,
 };
+use apache_avro::types::Value;
 use serde::de::{self, DeserializeSeed, Visitor};
 use spate_core::hash::QualityMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Named types (record/enum/fixed) keyed by namespace (`""` for none),
 /// then by simple name, cloned out of the schema once at compile time so a
@@ -92,16 +109,31 @@ pub(crate) type Names = QualityMap<String, QualityMap<String, Schema>>;
 /// while keeping a recursive-schema depth bomb from overflowing the stack.
 const MAX_DEPTH: u16 = 128;
 
+/// Nesting bound for a datum apache-avro decodes to a `Value`: the number of
+/// nested decodes apache-avro 0.23 allows by default. Its decode and the
+/// conversions over the `Value` tree use far more stack per level than this
+/// walk, and 32 levels fit a 2 MiB thread stack in a debug build.
+const VALUE_MAX_DEPTH: u16 = 32;
+
 /// Floor of the per-datum collection-item budget (see the module docs): a
 /// datum's collections may claim at most `max(payload length, this)` items
 /// in total, so zero-width items cannot drive an unbounded walk.
 const MIN_ITEMS_BUDGET: u64 = 1 << 16;
 
+/// Bytes [`check_datum`] admits per byte of datum, and per byte of the item
+/// budget's floor, for the `Value` tree apache-avro builds from it.
+const BUILT_BYTES_PER_BYTE: u64 = 1024;
+
+/// The in-place size of one decoded `Value`, and of a record field's or map
+/// key's `String`.
+const VALUE_BYTES: u64 = size_of::<apache_avro::types::Value>() as u64;
+const STRING_BYTES: u64 = size_of::<String>() as u64;
+
 /// The depth-limit check every walk entry shares.
-fn check_depth(depth: u16) -> Result<(), DatumError> {
-    if depth >= MAX_DEPTH {
+fn check_depth(depth: u16, limit: u16) -> Result<(), DatumError> {
+    if depth >= limit {
         return Err(DatumError(format!(
-            "datum nesting exceeds the depth limit of {MAX_DEPTH}"
+            "datum nesting exceeds the depth limit of {limit}"
         )));
     }
     Ok(())
@@ -120,9 +152,80 @@ impl fmt::Display for DatumError {
 
 impl std::error::Error for DatumError {}
 
+/// The kind of a value serde did not expect, without the value.
+struct Kind<'a>(de::Unexpected<'a>);
+
+impl fmt::Display for Kind<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use de::Unexpected as U;
+        match self.0 {
+            U::Bool(_) => f.write_str("boolean"),
+            U::Unsigned(_) | U::Signed(_) => f.write_str("integer"),
+            U::Float(_) => f.write_str("floating point"),
+            U::Char(_) => f.write_str("character"),
+            U::Str(_) => f.write_str("string"),
+            U::Bytes(_) => f.write_str("byte array"),
+            U::Other(_) => f.write_str("value"),
+            // The remaining kinds print no value.
+            other => other.fmt(f),
+        }
+    }
+}
+
+/// The names a field or variant could have had, which come from the record
+/// type.
+struct OneOf(&'static [&'static str]);
+
+impl fmt::Display for OneOf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("none is defined");
+        }
+        f.write_str("expected one of: ")?;
+        for (i, name) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "`{name}`")?;
+        }
+        Ok(())
+    }
+}
+
+/// serde's default messages quote the value, variant or field they refused,
+/// and a record type's own message can quote anything. Each constructor
+/// here keeps what was expected and drops what was found.
 impl de::Error for DatumError {
-    fn custom<T: fmt::Display>(msg: T) -> Self {
-        DatumError(msg.to_string())
+    fn custom<T: fmt::Display>(_msg: T) -> Self {
+        DatumError("the datum does not match the record type".to_owned())
+    }
+
+    fn invalid_type(unexp: de::Unexpected<'_>, exp: &dyn de::Expected) -> Self {
+        DatumError(format!("invalid type: {}, expected {exp}", Kind(unexp)))
+    }
+
+    fn invalid_value(unexp: de::Unexpected<'_>, exp: &dyn de::Expected) -> Self {
+        DatumError(format!("invalid value: {}, expected {exp}", Kind(unexp)))
+    }
+
+    fn invalid_length(len: usize, exp: &dyn de::Expected) -> Self {
+        DatumError(format!("invalid length {len}, expected {exp}"))
+    }
+
+    fn unknown_variant(_variant: &str, expected: &'static [&'static str]) -> Self {
+        DatumError(format!("unknown variant, {}", OneOf(expected)))
+    }
+
+    fn unknown_field(_field: &str, expected: &'static [&'static str]) -> Self {
+        DatumError(format!("unknown field, {}", OneOf(expected)))
+    }
+
+    fn missing_field(field: &'static str) -> Self {
+        DatumError(format!("missing field `{field}`"))
+    }
+
+    fn duplicate_field(field: &'static str) -> Self {
+        DatumError(format!("duplicate field `{field}`"))
     }
 }
 
@@ -132,14 +235,20 @@ impl de::Error for DatumError {
 pub(crate) struct Cursor<'de> {
     buf: &'de [u8],
     items_budget: u64,
+    built_budget: u64,
+    built_limit: u64,
 }
 
 impl<'de> Cursor<'de> {
     pub(crate) fn new(buf: &'de [u8]) -> Self {
+        let items_budget = u64::try_from(buf.len())
+            .unwrap_or(u64::MAX)
+            .max(MIN_ITEMS_BUDGET);
+        let built_limit = items_budget.saturating_mul(BUILT_BYTES_PER_BYTE);
         Cursor {
-            items_budget: u64::try_from(buf.len())
-                .unwrap_or(u64::MAX)
-                .max(MIN_ITEMS_BUDGET),
+            items_budget,
+            built_budget: built_limit,
+            built_limit,
             buf,
         }
     }
@@ -161,6 +270,22 @@ impl<'de> Cursor<'de> {
             None => Err(DatumError(format!(
                 "block claims {count} items, over the datum's remaining item budget of {}",
                 self.items_budget
+            ))),
+        }
+    }
+
+    /// Charge `bytes` of the `Value` tree a decode would build against the
+    /// per-datum budget [`check_datum`] keeps.
+    #[inline]
+    fn charge_built(&mut self, bytes: u64) -> Result<(), DatumError> {
+        match self.built_budget.checked_sub(bytes) {
+            Some(rest) => {
+                self.built_budget = rest;
+                Ok(())
+            }
+            None => Err(DatumError(format!(
+                "datum decodes to more than {} bytes of values",
+                self.built_limit
             ))),
         }
     }
@@ -221,7 +346,7 @@ impl<'de> Cursor<'de> {
     #[inline]
     fn zag_i32(&mut self) -> Result<i32, DatumError> {
         let v = self.zag_i64()?;
-        i32::try_from(v).map_err(|_| DatumError(format!("int value {v} does not fit in an i32")))
+        i32::try_from(v).map_err(|_| DatumError("int value does not fit in an i32".to_owned()))
     }
 
     /// A non-negative length prefix, bounds-checked against the remaining
@@ -253,7 +378,7 @@ impl<'de> Cursor<'de> {
         match self.byte()? {
             0 => Ok(false),
             1 => Ok(true),
-            b => Err(DatumError(format!("invalid boolean byte {b:#04x}"))),
+            _ => Err(DatumError("invalid boolean byte".to_owned())),
         }
     }
 
@@ -280,6 +405,17 @@ fn str_from_utf8(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
 /// per-record type error the schema is refused up front: a build error for
 /// fixed schemas, `SchemaUnavailable` per record for registry ids.
 pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
+    let names = compile_names(schema)?;
+    scan_supported(schema)?;
+    for named in names.values().flat_map(|types| types.values()) {
+        scan_supported(named)?;
+    }
+    Ok(names)
+}
+
+/// The named-type index of a schema, or the pre-rendered reason its
+/// references cannot be resolved.
+pub(crate) fn compile_names(schema: &Schema) -> Result<Names, String> {
     let resolved = apache_avro::schema::ResolvedSchema::try_from(schema)
         .map_err(|e| format!("schema references cannot be resolved: {e}"))?;
     let mut names = Names::default();
@@ -289,11 +425,457 @@ pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
             .or_default()
             .insert(name.name().to_owned(), (*s).clone());
     }
-    scan_supported(schema)?;
-    for named in names.values().flat_map(|types| types.values()) {
-        scan_supported(named)?;
-    }
     Ok(names)
+}
+
+/// Check one datum's structure before apache-avro decodes it to a `Value`.
+///
+/// This refuses a datum nested deeper than [`VALUE_MAX_DEPTH`], a datum
+/// whose collections claim more items than its budget, a datum whose
+/// `Value` tree would pass [`BUILT_BYTES_PER_BYTE`] times that budget in
+/// bytes (see the module docs), and a length or count that runs past the
+/// bytes present, all before apache-avro allocates for it. With a `reader`,
+/// the size also counts what resolution into it builds. Depth counts one
+/// level per nested decode, as apache-avro 0.23 does: a record field, a
+/// collection item, a union branch, a named reference, and the bytes inside a
+/// decimal or big-decimal. A size-prefixed block is walked item by item, as
+/// the decode walks it.
+///
+/// Errors name the counts, lengths, indexes and limits read from the datum,
+/// never string or bytes contents.
+pub(crate) fn check_datum(
+    schema: &Schema,
+    names: &Names,
+    reader: Option<&ReaderSide>,
+    datum: &[u8],
+) -> Result<(), DatumError> {
+    let cur = &mut Cursor::new(datum);
+    match reader {
+        Some(side) => {
+            let at = Resolve::At(side, side.schema.as_ref(), None);
+            skip_datum(cur, schema, names, None, 0, Walk::Check, at)
+        }
+        None => skip_datum(cur, schema, names, None, 0, Walk::Check, NoReader),
+    }
+}
+
+/// The reader schema a two-pass decode resolves each datum into. apache-avro
+/// builds every field of a reader record, filling each one the writer lacks
+/// from its default, and copies a reader enum symbol, so [`check_datum`]
+/// charges those too.
+pub(crate) struct ReaderSide {
+    schema: Arc<Schema>,
+    names: Names,
+    /// Each named reader record's and enum's charge, keyed as `names` is.
+    costs: QualityMap<String, QualityMap<String, NamedCost>>,
+    /// The most any one reader record charges, for a writer record or map
+    /// the walk cannot place in the reader schema.
+    widest: u64,
+    /// The longest reader enum symbol, for a writer enum or string the walk
+    /// cannot place.
+    longest_symbol: u64,
+}
+
+/// What resolution into one named reader type builds.
+enum NamedCost {
+    /// A record: every field name and default together, and each field's
+    /// default alone, by field index.
+    Record { full: u64, defaults: Box<[u64]> },
+    /// An enum: its longest symbol.
+    Enum(u64),
+}
+
+impl ReaderSide {
+    pub(crate) fn compile(schema: Arc<Schema>) -> Result<ReaderSide, String> {
+        let names = compile_names(&schema)?;
+        let mut costs: QualityMap<String, QualityMap<String, NamedCost>> = QualityMap::default();
+        let (mut widest, mut longest_symbol) = (0, 0);
+        for (ns, types) in &names {
+            for (name, named) in types {
+                let cost = match named {
+                    Schema::Record(r) => {
+                        let defaults: Box<[u64]> = r
+                            .fields
+                            .iter()
+                            .map(|f| default_charge(f, &schema))
+                            .collect();
+                        let full = r
+                            .fields
+                            .iter()
+                            .zip(&defaults)
+                            .map(|(f, default)| STRING_BYTES + f.name.len() as u64 + default)
+                            .sum();
+                        widest = widest.max(full);
+                        NamedCost::Record { full, defaults }
+                    }
+                    Schema::Enum(e) => {
+                        let longest = e.symbols.iter().map(String::len).max().unwrap_or(0) as u64;
+                        longest_symbol = longest_symbol.max(longest);
+                        NamedCost::Enum(longest)
+                    }
+                    _ => continue,
+                };
+                costs
+                    .entry(ns.clone())
+                    .or_default()
+                    .insert(name.clone(), cost);
+            }
+        }
+        Ok(ReaderSide {
+            schema,
+            names,
+            costs,
+            widest,
+            longest_symbol,
+        })
+    }
+
+    pub(crate) fn schema(&self) -> &Arc<Schema> {
+        &self.schema
+    }
+
+    fn cost(
+        &self,
+        name: &apache_avro::schema::Name,
+        enclosing: Option<&str>,
+    ) -> Option<&NamedCost> {
+        let ns = name.namespace().or(enclosing).unwrap_or_default();
+        self.costs.get(ns)?.get(name.name())
+    }
+}
+
+/// The `Value` a field's default becomes when apache-avro fills it in for a
+/// field the writer lacks: resolved into the field's schema, or into a
+/// union's first variant and boxed. A default that does not resolve fails
+/// that decode, so it charges nothing.
+fn default_charge(field: &RecordField, root: &Schema) -> u64 {
+    let Some(default) = &field.default else {
+        return 0;
+    };
+    let resolve = |schema: &Schema| {
+        Value::try_from(default.clone()).and_then(|v| v.resolve_schemata(schema, vec![root]))
+    };
+    let resolved = match &field.schema {
+        Schema::Union(u) => match u.variants().first() {
+            Some(Schema::Null) => Ok(Value::Union(0, Box::new(Value::Null))),
+            Some(first) => resolve(first).map(|v| Value::Union(0, Box::new(v))),
+            None => return 0,
+        },
+        other => resolve(other),
+    };
+    resolved.map_or(0, |v| value_charge(&v))
+}
+
+/// What [`check_datum`] would charge for `value` had it been decoded.
+fn value_charge(value: &Value) -> u64 {
+    VALUE_BYTES
+        + match value {
+            Value::String(s) | Value::Enum(_, s) => s.len() as u64,
+            Value::Bytes(b) | Value::Fixed(_, b) => b.len() as u64,
+            Value::Decimal(d) => Vec::<u8>::try_from(d).map_or(0, |b| b.len() as u64),
+            Value::Array(items) => items.iter().map(value_charge).sum(),
+            Value::Record(fields) => fields
+                .iter()
+                .map(|(k, v)| STRING_BYTES + k.len() as u64 + value_charge(v))
+                .sum(),
+            Value::Map(entries) => entries
+                .iter()
+                .map(|(k, v)| STRING_BYTES + k.len() as u64 + value_charge(v))
+                .sum(),
+            Value::Union(_, inner) => value_charge(inner),
+            _ => 0,
+        }
+}
+
+/// Where [`check_datum`]'s walk stands in the reader schema.
+#[derive(Clone, Copy)]
+enum Resolve<'a> {
+    /// No reader schema, or a writer field the reader drops.
+    Off,
+    /// The reader node at this position, and its enclosing namespace.
+    At(&'a ReaderSide, &'a Schema, Option<&'a str>),
+    /// A reader schema the walk cannot place this position in.
+    Lost(&'a ReaderSide),
+}
+
+impl<'a> Resolve<'a> {
+    /// Follow a named reference in the reader schema.
+    fn deref(self) -> Resolve<'a> {
+        match self {
+            Resolve::At(side, Schema::Ref { name }, enclosing) => {
+                match lookup_named(&side.names, name, enclosing) {
+                    Some(target) => Resolve::At(side, target, name.namespace().or(enclosing)),
+                    None => Resolve::Lost(side),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Place a writer value that is not a union. A reader union wraps it in a
+    /// boxed branch, charged here, as is the box a reader union the walk
+    /// cannot place may add.
+    fn place(self, cur: &mut Cursor<'_>, writer: &Schema) -> Result<Resolve<'a>, DatumError> {
+        match self.deref() {
+            Resolve::At(side, Schema::Union(u), enclosing) => {
+                cur.charge_built(VALUE_BYTES)?;
+                Ok(Resolve::variant(side, u, enclosing, writer))
+            }
+            Resolve::Lost(side) => {
+                cur.charge_built(VALUE_BYTES)?;
+                Ok(Resolve::Lost(side))
+            }
+            other => Ok(other),
+        }
+    }
+
+    /// The reader union variant a writer value resolves to, when only one
+    /// variant can take it: the one of the writer's kind, or for a writer map
+    /// a map or record. apache-avro takes the first named variant the value
+    /// resolves into, whatever its name, so a union with two records leaves
+    /// the walk lost.
+    fn variant(
+        side: &'a ReaderSide,
+        union: &'a UnionSchema,
+        enclosing: Option<&'a str>,
+        writer: &Schema,
+    ) -> Resolve<'a> {
+        let kind = SchemaKind::from(writer);
+        let mut takers = union
+            .variants()
+            .iter()
+            .map(|variant| Resolve::At(side, variant, enclosing).deref())
+            .filter(|placed| match placed {
+                Resolve::At(_, target, _) => {
+                    let taker = SchemaKind::from(*target);
+                    taker == kind || (kind == SchemaKind::Map && taker == SchemaKind::Record)
+                }
+                _ => true,
+            });
+        match (takers.next(), takers.next()) {
+            (Some(placed @ Resolve::At(..)), None) => placed,
+            _ => Resolve::Lost(side),
+        }
+    }
+
+    /// The reader enum symbol a writer enum or string resolves to.
+    fn symbol_charge(self) -> u64 {
+        match self {
+            Resolve::At(side, Schema::Enum(e), enclosing) => match side.cost(&e.name, enclosing) {
+                Some(NamedCost::Enum(longest)) => *longest,
+                _ => side.longest_symbol,
+            },
+            Resolve::Lost(side) => side.longest_symbol,
+            _ => 0,
+        }
+    }
+}
+
+/// Where [`skip_datum`]'s walk stands in a reader schema. [`NoReader`] is a
+/// walk with none, and compiles to no work.
+trait ReaderPos: Copy {
+    /// A record's state between its fields.
+    type Record;
+    /// Place a writer value that is not a union or a reference.
+    fn place(self, cur: &mut Cursor<'_>, writer: &Schema) -> Result<Self, DatumError>;
+    /// Pick the reader position for a writer union's `branch`.
+    fn branch(self, names: &Names, enclosing: Option<&str>, branch: &Schema) -> Self;
+    /// Charge the reader enum symbol a writer enum or string resolves to.
+    fn charge_symbol(self, cur: &mut Cursor<'_>) -> Result<(), DatumError>;
+    /// The position of an array's items.
+    fn items(self) -> Self;
+    /// The position of a map's values.
+    fn values(self, cur: &mut Cursor<'_>) -> Result<Self, DatumError>;
+    /// Enter a writer record.
+    fn record(self, cur: &mut Cursor<'_>) -> Result<Self::Record, DatumError>;
+    /// The position of the writer record's field `name`.
+    fn field(record: &mut Self::Record, name: &str) -> Self;
+    /// Leave a writer record.
+    fn end_record(record: Self::Record, cur: &mut Cursor<'_>) -> Result<(), DatumError>;
+}
+
+/// No reader schema.
+#[derive(Clone, Copy)]
+struct NoReader;
+
+impl ReaderPos for NoReader {
+    type Record = ();
+    fn place(self, _: &mut Cursor<'_>, _: &Schema) -> Result<Self, DatumError> {
+        Ok(self)
+    }
+    fn branch(self, _: &Names, _: Option<&str>, _: &Schema) -> Self {
+        self
+    }
+    fn charge_symbol(self, _: &mut Cursor<'_>) -> Result<(), DatumError> {
+        Ok(())
+    }
+    fn items(self) -> Self {
+        self
+    }
+    fn values(self, _: &mut Cursor<'_>) -> Result<Self, DatumError> {
+        Ok(self)
+    }
+    fn record(self, _: &mut Cursor<'_>) -> Result<(), DatumError> {
+        Ok(())
+    }
+    fn field(_: &mut (), _: &str) -> Self {
+        NoReader
+    }
+    fn end_record(_: (), _: &mut Cursor<'_>) -> Result<(), DatumError> {
+        Ok(())
+    }
+}
+
+/// The reader record a writer record resolves into, with its costs.
+#[derive(Clone, Copy)]
+struct PlacedRecord<'a> {
+    side: &'a ReaderSide,
+    record: &'a RecordSchema,
+    /// The namespace its fields' named types resolve in.
+    ns: Option<&'a str>,
+    /// Every field name and default.
+    full: u64,
+    /// Each field's default, by field index.
+    defaults: &'a [u64],
+}
+
+/// A writer record's place in the reader schema, as [`Resolve`] walks it.
+struct RecordWalk<'a> {
+    /// The reader record and its costs, when the walk placed one.
+    into: Option<PlacedRecord<'a>>,
+    /// The position the record was entered at.
+    outer: Resolve<'a>,
+    /// The defaults of the reader fields the writer record carries.
+    present: u64,
+}
+
+impl<'a> ReaderPos for Resolve<'a> {
+    type Record = RecordWalk<'a>;
+
+    fn place(self, cur: &mut Cursor<'_>, writer: &Schema) -> Result<Self, DatumError> {
+        Resolve::place(self, cur, writer)
+    }
+
+    // A writer union keeps its box when the reader is a union too, so the
+    // reader's variant is picked here with no charge.
+    fn branch(self, names: &Names, enclosing: Option<&str>, branch: &Schema) -> Self {
+        match self.deref() {
+            Resolve::At(side, Schema::Union(r), rns) => {
+                let target = match branch {
+                    Schema::Ref { name } => lookup_named(names, name, enclosing).unwrap_or(branch),
+                    other => other,
+                };
+                Resolve::variant(side, r, rns, target)
+            }
+            other => other,
+        }
+    }
+
+    fn charge_symbol(self, cur: &mut Cursor<'_>) -> Result<(), DatumError> {
+        cur.charge_built(self.symbol_charge())
+    }
+
+    fn items(self) -> Self {
+        match self {
+            Resolve::At(side, Schema::Array(r), rns) => Resolve::At(side, &r.items, rns),
+            Resolve::At(side, ..) | Resolve::Lost(side) => Resolve::Lost(side),
+            Resolve::Off => Resolve::Off,
+        }
+    }
+
+    // apache-avro resolves a map into a reader record as well, taking each
+    // field from the entry of its name, so a map placed at a record is
+    // charged all of that record's fields and defaults.
+    fn values(self, cur: &mut Cursor<'_>) -> Result<Self, DatumError> {
+        Ok(match self {
+            Resolve::At(side, Schema::Map(r), rns) => Resolve::At(side, &r.types, rns),
+            Resolve::At(side, Schema::Record(r), rns) => {
+                let full = match side.cost(&r.name, rns) {
+                    Some(NamedCost::Record { full, .. }) => *full,
+                    _ => side.widest,
+                };
+                cur.charge_built(full)?;
+                Resolve::Lost(side)
+            }
+            Resolve::At(side, ..) => Resolve::Lost(side),
+            Resolve::Lost(side) => {
+                cur.charge_built(side.widest)?;
+                Resolve::Lost(side)
+            }
+            Resolve::Off => Resolve::Off,
+        })
+    }
+
+    // The widest charge when the walk cannot place this record.
+    fn record(self, cur: &mut Cursor<'_>) -> Result<RecordWalk<'a>, DatumError> {
+        let into = match self {
+            Resolve::At(side, Schema::Record(r), rns) => match side.cost(&r.name, rns) {
+                Some(NamedCost::Record { full, defaults }) => Some(PlacedRecord {
+                    side,
+                    record: r,
+                    ns: r.name.namespace().or(rns),
+                    full: *full,
+                    defaults,
+                }),
+                _ => {
+                    cur.charge_built(side.widest)?;
+                    None
+                }
+            },
+            Resolve::At(side, ..) | Resolve::Lost(side) => {
+                cur.charge_built(side.widest)?;
+                None
+            }
+            Resolve::Off => None,
+        };
+        Ok(RecordWalk {
+            into,
+            outer: self,
+            present: 0,
+        })
+    }
+
+    // apache-avro matches a writer field to a reader field by name alone, and
+    // `lookup` also holds each field's aliases.
+    fn field(record: &mut RecordWalk<'a>, name: &str) -> Self {
+        match (record.into, record.outer) {
+            (Some(placed), _) => match placed.record.lookup.get(name) {
+                Some(&i) if placed.record.fields[i].name == name => {
+                    record.present += placed.defaults[i];
+                    Resolve::At(placed.side, &placed.record.fields[i].schema, placed.ns)
+                }
+                _ => Resolve::Off,
+            },
+            (None, Resolve::At(side, ..) | Resolve::Lost(side)) => Resolve::Lost(side),
+            (None, Resolve::Off) => Resolve::Off,
+        }
+    }
+
+    fn end_record(record: RecordWalk<'a>, cur: &mut Cursor<'_>) -> Result<(), DatumError> {
+        match record.into {
+            Some(placed) => cur.charge_built(placed.full - record.present),
+            None => Ok(()),
+        }
+    }
+}
+
+/// How [`skip_datum`] walks a datum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Walk {
+    /// Skip a position the datum path's target ignores: depth limit
+    /// [`MAX_DEPTH`], and a size-prefixed block is skipped by its byte size.
+    Skip,
+    /// [`check_datum`]'s walk.
+    Check,
+}
+
+impl Walk {
+    fn limit(self) -> u16 {
+        match self {
+            Walk::Skip => MAX_DEPTH,
+            Walk::Check => VALUE_MAX_DEPTH,
+        }
+    }
 }
 
 /// Reject schema nodes the single-pass path does not decode. Named types
@@ -430,7 +1012,7 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
 
     /// One nesting level down, or the depth-limit error.
     fn deeper(&self) -> Result<u16, DatumError> {
-        check_depth(self.depth)?;
+        check_depth(self.depth, MAX_DEPTH)?;
         Ok(self.depth + 1)
     }
 
@@ -476,7 +1058,8 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
             UuidSchema::String => {
                 let s = cur.utf8()?;
                 apache_avro::Uuid::parse_str(s)
-                    .map_err(|e| DatumError(format!("invalid uuid string: {e}")))
+                    // uuid's own text prints the character it stopped at.
+                    .map_err(|_| DatumError("invalid uuid string".to_owned()))
             }
             UuidSchema::Bytes => Self::uuid_from_bytes(cur.len_prefixed()?),
             UuidSchema::Fixed(f) => Self::uuid_from_bytes(cur.take(f.size)?),
@@ -504,22 +1087,40 @@ impl<'a, 'de> DatumDeserializer<'a, 'de> {
     }
 }
 
-/// Structurally skip one datum position the target type ignores. Lengths,
+/// Structurally walk one datum position without decoding it. Lengths,
 /// block counts, union and enum indexes stay bounds-checked; string
-/// contents are not UTF-8-validated (see the module docs).
-fn skip_datum(
+/// contents are not UTF-8-validated (see the module docs). `reader` is the
+/// matching reader-schema position under [`Walk::Check`], and [`NoReader`]
+/// otherwise.
+fn skip_datum<P: ReaderPos>(
     cur: &mut Cursor<'_>,
     schema: &Schema,
     names: &Names,
     enclosing: Option<&str>,
     depth: u16,
+    walk: Walk,
+    reader: P,
 ) -> Result<(), DatumError> {
-    check_depth(depth)?;
+    check_depth(depth, walk.limit())?;
+    let check = walk == Walk::Check;
+    if check && !matches!(schema, Schema::Ref { .. }) {
+        cur.charge_built(VALUE_BYTES)?;
+    }
+    let reader = match schema {
+        Schema::Union(_) | Schema::Ref { .. } => reader,
+        _ => reader.place(cur, schema)?,
+    };
     match schema {
         Schema::Null => Ok(()),
         Schema::Boolean => cur.bool().map(drop),
         Schema::Int | Schema::Date | Schema::TimeMillis => cur.zag_i32().map(drop),
-        Schema::Enum(e) => DatumDeserializer::enum_symbol(cur, &e.symbols).map(drop),
+        Schema::Enum(e) => {
+            let symbol = DatumDeserializer::enum_symbol(cur, &e.symbols)?;
+            if check {
+                cur.charge_built(symbol.len() as u64)?;
+            }
+            reader.charge_symbol(cur)
+        }
         Schema::Long
         | Schema::TimeMicros
         | Schema::TimestampMillis
@@ -531,68 +1132,82 @@ fn skip_datum(
         Schema::Float => cur.take(4).map(drop),
         Schema::Double => cur.take(8).map(drop),
         Schema::Bytes | Schema::String | Schema::Uuid(UuidSchema::String | UuidSchema::Bytes) => {
-            cur.len_prefixed().map(drop)
-        }
-        Schema::Fixed(f) | Schema::Uuid(UuidSchema::Fixed(f)) => cur.take(f.size).map(drop),
-        Schema::Decimal(DecimalSchema { inner, .. }) => match inner {
-            InnerDecimalSchema::Bytes => cur.len_prefixed().map(drop),
-            InnerDecimalSchema::Fixed(f) => cur.take(f.size).map(drop),
-        },
-        Schema::Record(rec) => {
-            let ns = rec.name.namespace().or(enclosing);
-            for field in &rec.fields {
-                skip_datum(cur, &field.schema, names, ns, depth + 1)?;
+            let bytes = cur.len_prefixed()?;
+            if check {
+                cur.charge_built(bytes.len() as u64)?;
+            }
+            if matches!(schema, Schema::String) {
+                reader.charge_symbol(cur)?;
             }
             Ok(())
         }
-        Schema::Array(inner) => loop {
-            let count = cur.zag_i64()?;
-            match count.cmp(&0) {
-                std::cmp::Ordering::Equal => break Ok(()),
-                std::cmp::Ordering::Less => {
-                    // A negative count is followed by the block's byte
-                    // size, the wire format's fast-skip path.
-                    let size = cur.zag_i64()?;
-                    let size = usize::try_from(size)
-                        .map_err(|_| DatumError(format!("negative block size {size}")))?;
-                    cur.take(size)?;
-                }
-                std::cmp::Ordering::Greater => {
-                    #[expect(clippy::cast_sign_loss, reason = "the Greater arm: count is positive")]
-                    {
-                        cur.charge_items(count as u64)?;
-                    }
-                    for _ in 0..count {
-                        skip_datum(cur, inner.items.as_ref(), names, enclosing, depth + 1)?;
-                    }
-                }
+        Schema::Fixed(f) | Schema::Uuid(UuidSchema::Fixed(f)) => {
+            if check {
+                cur.charge_built(f.size as u64)?;
             }
-        },
-        Schema::Map(inner) => loop {
-            let count = cur.zag_i64()?;
-            match count.cmp(&0) {
-                std::cmp::Ordering::Equal => break Ok(()),
-                std::cmp::Ordering::Less => {
-                    let size = cur.zag_i64()?;
-                    let size = usize::try_from(size)
-                        .map_err(|_| DatumError(format!("negative block size {size}")))?;
-                    cur.take(size)?;
-                }
-                std::cmp::Ordering::Greater => {
-                    #[expect(clippy::cast_sign_loss, reason = "the Greater arm: count is positive")]
-                    {
-                        cur.charge_items(count as u64)?;
-                    }
-                    for _ in 0..count {
-                        cur.len_prefixed()?;
-                        skip_datum(cur, inner.types.as_ref(), names, enclosing, depth + 1)?;
-                    }
-                }
+            cur.take(f.size).map(drop)
+        }
+        Schema::Decimal(DecimalSchema { inner, .. }) => {
+            if walk == Walk::Check {
+                check_depth(depth + 1, walk.limit())?;
             }
-        },
+            let bytes = match inner {
+                InnerDecimalSchema::Bytes => cur.len_prefixed()?,
+                InnerDecimalSchema::Fixed(f) => cur.take(f.size)?,
+            };
+            if check {
+                cur.charge_built(bytes.len() as u64)?;
+            }
+            Ok(())
+        }
+        Schema::Record(rec) => {
+            let ns = rec.name.namespace().or(enclosing);
+            let mut record = reader.record(cur)?;
+            for field in &rec.fields {
+                if check {
+                    cur.charge_built(STRING_BYTES + field.name.len() as u64)?;
+                }
+                let child = P::field(&mut record, &field.name);
+                skip_datum(cur, &field.schema, names, ns, depth + 1, walk, child)?;
+            }
+            P::end_record(record, cur)
+        }
+        Schema::Array(inner) => {
+            let items = reader.items();
+            skip_blocks(cur, walk, |cur| {
+                skip_datum(
+                    cur,
+                    inner.items.as_ref(),
+                    names,
+                    enclosing,
+                    depth + 1,
+                    walk,
+                    items,
+                )
+            })
+        }
+        Schema::Map(inner) => {
+            let values = reader.values(cur)?;
+            skip_blocks(cur, walk, |cur| {
+                let key = cur.len_prefixed()?;
+                if check {
+                    cur.charge_built(STRING_BYTES + key.len() as u64)?;
+                }
+                skip_datum(
+                    cur,
+                    inner.types.as_ref(),
+                    names,
+                    enclosing,
+                    depth + 1,
+                    walk,
+                    values,
+                )
+            })
+        }
         Schema::Union(u) => {
             let (_, branch) = DatumDeserializer::union_branch(cur, u)?;
-            skip_datum(cur, branch, names, enclosing, depth + 1)
+            let reader = reader.branch(names, enclosing, branch);
+            skip_datum(cur, branch, names, enclosing, depth + 1, walk, reader)
         }
         Schema::Ref { name } => {
             let target =
@@ -603,11 +1218,61 @@ fn skip_datum(
                 names,
                 name.namespace().or(enclosing),
                 depth + 1,
+                walk,
+                reader,
             )
         }
-        Schema::Duration(_) | Schema::BigDecimal => Err(DatumError(format!(
-            "unsupported schema {schema:?} survived spec compilation"
-        ))),
+        // The datum path refuses these two schemas when the spec compiles,
+        // so only `check_datum` meets them.
+        Schema::Duration(_) => cur.take(12).map(drop),
+        Schema::BigDecimal => {
+            check_depth(depth + 1, walk.limit())?;
+            let bytes = cur.len_prefixed()?;
+            if check {
+                cur.charge_built(bytes.len() as u64)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Read an array's or map's block header: `None` at the terminating zero
+/// count, else the block's item count and, for a size-prefixed block (a
+/// negative count, the wire format's fast-skip path), the byte size after it.
+fn block_header(cur: &mut Cursor<'_>) -> Result<Option<(u64, Option<i64>)>, DatumError> {
+    let count = cur.zag_i64()?;
+    Ok(match count.cmp(&0) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Less => Some((count.unsigned_abs(), Some(cur.zag_i64()?))),
+        std::cmp::Ordering::Greater => Some((count.unsigned_abs(), None)),
+    })
+}
+
+/// Walk an array's or map's blocks up to the terminating zero count, calling
+/// `item` once per claimed item after charging the block against the item
+/// budget. Under [`Walk::Skip`] a size-prefixed block is skipped by its byte
+/// size. Under [`Walk::Check`] its size is read and ignored, and its items
+/// are walked, as apache-avro's decode does.
+fn skip_blocks<'de>(
+    cur: &mut Cursor<'de>,
+    walk: Walk,
+    mut item: impl FnMut(&mut Cursor<'de>) -> Result<(), DatumError>,
+) -> Result<(), DatumError> {
+    loop {
+        let items = match block_header(cur)? {
+            None => return Ok(()),
+            Some((_, Some(size))) if walk == Walk::Skip => {
+                let size = usize::try_from(size)
+                    .map_err(|_| DatumError(format!("negative block size {size}")))?;
+                cur.take(size)?;
+                continue;
+            }
+            Some((items, _)) => items,
+        };
+        cur.charge_items(items)?;
+        for _ in 0..items {
+            item(cur)?;
+        }
     }
 }
 
@@ -743,28 +1408,9 @@ impl<'a, 'de> BlockSeqAccess<'a, 'de> {
         done: &mut bool,
         remaining: &mut u64,
     ) -> Result<(), DatumError> {
-        let count = cur.zag_i64()?;
-        match count.cmp(&0) {
-            std::cmp::Ordering::Equal => *done = true,
-            std::cmp::Ordering::Less => {
-                let _size = cur.zag_i64()?;
-                let count = count
-                    .checked_neg()
-                    .ok_or_else(|| DatumError("block count overflow".into()))?;
-                #[expect(
-                    clippy::cast_sign_loss,
-                    reason = "checked_neg of a negative is positive"
-                )]
-                {
-                    *remaining = count as u64;
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                #[expect(clippy::cast_sign_loss, reason = "the Greater arm: count is positive")]
-                {
-                    *remaining = count as u64;
-                }
-            }
+        match block_header(cur)? {
+            None => *done = true,
+            Some((items, _)) => *remaining = items,
         }
         cur.charge_items(*remaining)
     }
@@ -1400,6 +2046,8 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
             self.names,
             self.enclosing,
             self.depth,
+            Walk::Skip,
+            NoReader,
         )?;
         visitor.visit_unit()
     }
@@ -1961,8 +2609,87 @@ mod tests {
             E::B
         );
         let err = decode::<E>(&schema(r#""string""#), &avro_str("C")).unwrap_err();
-        assert!(err.0.contains("unknown variant"), "{err}");
+        assert_eq!(err.0, "unknown variant, expected one of: `A`, `B`");
         let _ = E::A;
+    }
+
+    /// serde's default constructors quote what they refused. Each one here
+    /// keeps what was expected.
+    #[test]
+    fn serde_constructors_keep_the_expectation_and_drop_the_value() {
+        use serde::de::{Error as _, Unexpected as U};
+        let invalid_type = |u| DatumError::invalid_type(u, &"u32").0;
+        for (unexpected, kind) in [
+            (U::Bool(true), "boolean"),
+            (U::Unsigned(4242), "integer"),
+            (U::Signed(-4242), "integer"),
+            (U::Float(42.5), "floating point"),
+            (U::Char('h'), "character"),
+            (U::Str("hunter2"), "string"),
+            (U::Bytes(b"hunter2"), "byte array"),
+            (U::Other("hunter2"), "value"),
+            (U::Map, "map"),
+        ] {
+            assert_eq!(
+                invalid_type(unexpected),
+                format!("invalid type: {kind}, expected u32")
+            );
+        }
+        assert_eq!(
+            DatumError::invalid_value(U::Str("hunter2"), &"a date").0,
+            "invalid value: string, expected a date"
+        );
+        assert_eq!(
+            DatumError::invalid_length(3, &"2 elements").0,
+            "invalid length 3, expected 2 elements"
+        );
+        assert_eq!(
+            DatumError::unknown_variant("hunter2", &["A", "B"]).0,
+            "unknown variant, expected one of: `A`, `B`"
+        );
+        assert_eq!(
+            DatumError::unknown_variant("hunter2", &[]).0,
+            "unknown variant, none is defined"
+        );
+        assert_eq!(
+            DatumError::unknown_field("hunter2", &["id"]).0,
+            "unknown field, expected one of: `id`"
+        );
+        assert_eq!(DatumError::missing_field("id").0, "missing field `id`");
+        assert_eq!(DatumError::duplicate_field("id").0, "duplicate field `id`");
+        assert_eq!(
+            DatumError::custom("hunter2 is not a known user").0,
+            "the datum does not match the record type"
+        );
+    }
+
+    /// A record type's own message can quote the value it refused.
+    #[test]
+    fn a_record_types_own_message_is_not_printed() {
+        #[derive(Debug)]
+        struct Picky;
+        impl<'de> Deserialize<'de> for Picky {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let s = String::deserialize(d)?;
+                Err(serde::de::Error::custom(format!("{s} is not a known user")))
+            }
+        }
+        let err = decode::<Picky>(&schema(r#""string""#), &avro_str("hunter2")).unwrap_err();
+        assert_eq!(err.0, "the datum does not match the record type");
+    }
+
+    #[test]
+    fn own_texts_name_the_refusal_without_the_value() {
+        let int = decode::<i32>(&schema(r#""int""#), &zig(5_000_000_000)).unwrap_err();
+        assert_eq!(int.0, "int value does not fit in an i32");
+        let boolean = decode::<bool>(&schema(r#""boolean""#), &[7]).unwrap_err();
+        assert_eq!(boolean.0, "invalid boolean byte");
+        let uuid = decode::<apache_avro::Uuid>(
+            &schema(r#"{"type":"string","logicalType":"uuid"}"#),
+            &avro_str("hunter2"),
+        )
+        .unwrap_err();
+        assert_eq!(uuid.0, "invalid uuid string");
     }
 
     #[test]

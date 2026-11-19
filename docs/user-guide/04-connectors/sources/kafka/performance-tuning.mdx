@@ -123,6 +123,16 @@ entirely, because the budget governs what the pipeline holds, not what the
 client prefetches. If your pod has a memory limit, set
 `queued.max.messages.kbytes` explicitly.
 
+Both thresholds count what the client will deliver. A fetch response stays in
+memory until the pipeline has polled the last record or transaction marker in
+it, and it is counted at the size of the records it delivers
+([`rdkafka_op.c`](https://github.com/confluentinc/librdkafka/blob/master/src/rdkafka_op.c)).
+The records of an aborted transaction are in the response and are not
+delivered, so on a topic that carries aborted transactions a partition can
+hold more than the formula gives while the pipeline polls it slowly. A
+partition that backpressure or the pending-batch ceiling has
+[paused](README.mdx#backpressure-pause-and-resume) has its queue purged.
+
 The formula holds whatever the [consumer count](#more-consumers-in-one-process):
 the caps apply per partition, and each partition belongs to one consumer. What
 each extra consumer adds is its own librdkafka threads (one per broker it talks
@@ -190,7 +200,9 @@ series are still worth reading, with their limits understood:
 `spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at
 or near **zero** means the pipeline is draining the queue as fast as the broker
 refills it, i.e. the source is **broker-bound** rather than chain- or
-sink-bound. It does *not* separate "prefetch is too shallow" from "prefetch is
+sink-bound. A paused partition also adds nothing to it, because a pause
+purges the partition's queue. It does *not* separate "prefetch is too
+shallow" from "prefetch is
 fine and the broker is the limit": in the source-ceiling study it reads ~0 both
 at the shallow depth that runs 22x slow *and* at the recommended depth. Use it
 to decide whether the bottleneck is upstream or downstream of the source, not to

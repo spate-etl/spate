@@ -18,7 +18,6 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use std::process::Command;
 use std::time::Duration;
 use support::*;
 
@@ -34,21 +33,6 @@ fn rounds() -> u64 {
     std::env::var("SPATE_E2E_LONG_RUN_ROUNDS").map_or(DEFAULT_ROUNDS, |rounds| {
         rounds.parse().expect("a round count")
     })
-}
-
-/// This process's resident memory in KiB. It holds the pipeline and the harness's
-/// own clients, so it shows growth and says nothing of a pipeline's footprint.
-fn resident_kib() -> u64 {
-    let pid = std::process::id().to_string();
-    let out = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .expect("run ps");
-    assert!(out.status.success(), "ps failed: {out:?}");
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .expect("a resident size")
 }
 
 /// Records `range`, spread over the partitions as [`events`] spreads them.
@@ -104,7 +88,7 @@ fn sustained_traffic_holds_pending_work_and_memory() {
             }
             rows >= round * ROUND
         });
-        last = resident_kib();
+        last = spate_test_support::resident_kib();
         let base = *baseline.get_or_insert(last);
         println!(
             "round {round}/{rounds}: peak pending {}, resident {last} KiB, baseline {base} KiB",

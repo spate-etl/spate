@@ -96,7 +96,7 @@ impl DecoderCore {
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, P>,
     ) -> Result<(), DeserError> {
-        if let Some(payload) = self.decode_item::<P>(bytes)? {
+        if let Some(payload) = self.decode_item::<P>(bytes, &meta)? {
             let _ = out.emit(Record {
                 payload,
                 meta,
@@ -120,7 +120,7 @@ impl DecoderCore {
             // and the good lines around it still flow.
             OnError::Skip => {
                 for line in ndjson_lines(bytes) {
-                    if let Some(payload) = self.decode_item::<P>(line)? {
+                    if let Some(payload) = self.decode_item::<P>(line, &meta)? {
                         let _ = out.emit(Record {
                             payload,
                             meta,
@@ -138,7 +138,7 @@ impl DecoderCore {
             OnError::Fail => {
                 let mut decoded = Vec::new();
                 for line in ndjson_lines(bytes) {
-                    if let Some(payload) = self.decode_item::<P>(line)? {
+                    if let Some(payload) = self.decode_item::<P>(line, &meta)? {
                         decoded.push(payload);
                     }
                 }
@@ -167,7 +167,7 @@ impl DecoderCore {
         if self.reject_duplicate_keys
             && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {
-            return self.on_item_error(&e, dup_check_reason(&e));
+            return self.on_item_error(&e, dup_check_reason(&e), &meta);
         }
         match backend::decode_one::<Vec<P>>(bytes) {
             Ok(items) => {
@@ -180,23 +180,28 @@ impl DecoderCore {
                 }
                 Ok(())
             }
-            Err(e) => self.on_item_error(&e, Reason::Malformed),
+            Err(e) => self.on_item_error(&e, Reason::Malformed, &meta),
         }
     }
 
     /// Decode one JSON document into `P`. `Ok(Some)` = decoded, `Ok(None)` =
-    /// dropped under `on_error: skip`, `Err` = `on_error: fail`.
-    fn decode_item<P: DeserializeOwned>(&self, bytes: &[u8]) -> Result<Option<P>, DeserError> {
+    /// dropped under `on_error: skip`, `Err` = `on_error: fail`. `meta` is
+    /// the payload's, for the skip warning.
+    fn decode_item<P: DeserializeOwned>(
+        &self,
+        bytes: &[u8],
+        meta: &RecordMeta,
+    ) -> Result<Option<P>, DeserError> {
         if self.reject_duplicate_keys
             && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {
-            self.on_item_error(&e, dup_check_reason(&e))?;
+            self.on_item_error(&e, dup_check_reason(&e), meta)?;
             return Ok(None);
         }
         match backend::decode_one::<P>(bytes) {
             Ok(payload) => Ok(Some(payload)),
             Err(e) => {
-                self.on_item_error(&e, Reason::Malformed)?;
+                self.on_item_error(&e, Reason::Malformed, meta)?;
                 Ok(None)
             }
         }
@@ -204,7 +209,12 @@ impl DecoderCore {
 
     /// Apply the error policy to a decode failure: `Skip` counts it and
     /// returns `Ok`, `Fail` returns [`DeserError::Malformed`].
-    fn on_item_error(&self, e: &backend::DecodeError, reason: Reason) -> Result<(), DeserError> {
+    fn on_item_error(
+        &self,
+        e: &backend::DecodeError,
+        reason: Reason,
+        meta: &RecordMeta,
+    ) -> Result<(), DeserError> {
         match self.on_error {
             OnError::Skip => {
                 if let Some(m) = &self.metrics {
@@ -216,6 +226,8 @@ impl DecoderCore {
                 spate_core::rate_limited_warn!(
                     SKIP_WARN,
                     reason = reason.label(),
+                    partition = meta.partition.0,
+                    offset = meta.offset,
                     error = %e,
                     "json record skipped by on_error policy"
                 );

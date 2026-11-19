@@ -152,7 +152,11 @@ checkpoint:
 Batches not yet acknowledged by every sink leg are tracked for the at-least-once
 watermark, and `max_pending_batches` is a hard per-partition ceiling on that
 tracking, and a partition at the ceiling stops being polled until
-acknowledgments retire batches. Under very high insert rates, especially with
+acknowledgments retire batches. A partition that stays there for
+`backpressure.min_pause` is also paused at its source, which can cost the
+source the data it has buffered
+([Backpressure](../../../02-concepts/03-backpressure.mdx#the-checkpoint-ceiling)).
+Under very high insert rates, especially with
 many small parts, a partition can sit at the ceiling before ClickHouse is
 saturated. The signals are a `partition at the pending-batch ceiling` warning in
 the logs and `spate_checkpoint_pending_batches` plateauing at the configured

@@ -102,6 +102,16 @@ pub trait SourceLane: Send {
     fn finished(&self) -> bool {
         false
     }
+
+    /// Give up what the last batch borrowed.
+    ///
+    /// The pipeline thread calls this once it has finished a batch
+    /// [`poll`](Self::poll) returned, and the next poll may be a long way
+    /// off: a lane is not polled while its partition is at
+    /// `checkpoint.max_pending_batches` or while it is paused. A lane whose
+    /// batches keep client memory alive, such as fetched messages, frees it
+    /// here. Never waits. The default does nothing.
+    fn release_batch(&mut self) {}
 }
 
 /// Control-plane event returned by [`Source::poll_events`].
@@ -400,8 +410,12 @@ pub trait Source: Send {
         Ok(())
     }
 
-    /// Stop fetching for `lanes` (backpressure). Optional capability:
-    /// sources that cannot pause rely on bounded-queue pushback alone.
+    /// Stop fetching for `lanes`. The runtime calls this under backpressure,
+    /// and for a partition that has stayed at
+    /// `checkpoint.max_pending_batches` for `backpressure.min_pause`. A lane
+    /// paused for both is resumed once neither holds. A call that fails is
+    /// made again on a later commit tick. Optional capability: sources that
+    /// cannot pause rely on bounded-queue pushback alone.
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
         Ok(())

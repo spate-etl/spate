@@ -446,6 +446,19 @@ mod tests {
         assert!((4100.0..4101.0).contains(&sum), "{sum}");
     }
 
+    /// On the event basis, an event time in the future records zero.
+    #[test]
+    fn event_basis_e2e_latency_is_zero_for_an_event_in_the_future() {
+        let rendered = render_local(|| {
+            let shard =
+                SinkShardMetrics::new(&labels("e2e_future"), 0, &["r".into()], E2eBasis::Event);
+            shard.e2e_observed(Duration::from_secs(500), i64::MAX - 1);
+        });
+        let sum = spate_test::metric_value(&rendered, "spate_e2e_latency_seconds_sum", &[])
+            .unwrap_or_else(|| panic!("no e2e sum in:\n{rendered}"));
+        assert_eq!(sum, 0.0);
+    }
+
     #[test]
     fn handle_structs_register_and_render_the_taxonomy() {
         let rendered = render_local(|| {

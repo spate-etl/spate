@@ -17,10 +17,13 @@
 //! once the fetch lands. Records are never dropped or duplicated, and
 //! the CPU-pinned pipeline threads never perform I/O. Ids the registry
 //! cannot serve are negatively cached (with a TTL) and handled by the
-//! deserializer's `ErrorPolicy` like any other poison payload. A registry
-//! that rejects the credentials or the TLS handshake, or whose certificate
-//! fails verification, makes the next cache miss stop the pipeline, whatever
-//! the `ErrorPolicy`.
+//! deserializer's `ErrorPolicy` like any other poison payload. The cache
+//! holds at most 1,024 compiled schemas and an estimated 64 MiB of them, and
+//! an evicted id is fetched again on its next payload. A schema estimated
+//! to hold more than that once compiled is refused and negatively cached. A
+//! registry that rejects the credentials or the TLS handshake, or whose
+//! certificate fails verification, makes the next cache miss stop the
+//! pipeline, whatever the `ErrorPolicy`.
 //!
 //! # Schema evolution
 //!
@@ -29,6 +32,9 @@
 //! resolved into, using Avro's schema-resolution rules (field reordering,
 //! defaults, promotions). Registry schemas using references are not
 //! supported yet and are surfaced as unavailable.
+//!
+//! A reader schema that recurses through a union limits how deep a datum may
+//! recurse: see [`AvroValueDeserializer`].
 //!
 //! A reader **field** alias is not applied. A reader field that renames a
 //! writer's field and lists the old name in `aliases` fails every payload;
@@ -42,8 +48,19 @@ mod datum;
 mod de;
 mod deser;
 mod registry;
+mod resolve;
 mod wire;
 
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub use cache::{InsertRig, nested_schema, schema_weight};
+/// The schema cache's bounds, for tests that derive their counts.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub const MAX_READY_ENTRIES: usize = cache::MAX_READY_ENTRIES;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub const MAX_READY_BYTES: usize = cache::MAX_READY_BYTES;
 pub use config::{
     AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection,
     SchemaSource, TlsSection,

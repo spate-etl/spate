@@ -364,6 +364,10 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
 
     /// Fallibly transform each record into family `NF` with a per-stage
     /// [`ErrorPolicy`]. For borrowing families pass a `fn` item.
+    ///
+    /// The stage logs the error's text for a skipped record and uses it as
+    /// the pipeline's failure reason, so `f` keeps the record's content out
+    /// of it.
     #[must_use]
     pub fn try_map_rec<NF, G, E>(
         self,
@@ -571,6 +575,10 @@ impl<DF: RecFamily, T: Send + 'static, D, P> ChainBuilder<DF, Owned<T>, D, P> {
 
     /// Fallibly transform each record's payload with a per-stage
     /// [`ErrorPolicy`].
+    ///
+    /// The stage logs the error's text for a skipped record and uses it as
+    /// the pipeline's failure reason, so `f` keeps the record's content out
+    /// of it.
     #[must_use]
     pub fn try_map<U, G, E>(
         self,

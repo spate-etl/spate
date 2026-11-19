@@ -43,6 +43,11 @@ What the framework holds you to:
   copies out of the source. The batch is dropped before the next `poll` on
   the same lane; records derived from it are consumed or encoded within
   that window (the operator chain guarantees this by construction).
+- **`release_batch` frees what a batch borrowed.** The pipeline thread calls
+  it once it has finished a batch, because the next `poll` can be a long way
+  off: a lane is not polled while its partition is at the pending ceiling or
+  while it is paused. If your batches keep client memory alive, free it
+  there. The default does nothing.
 - **One `AckRef` per batch.** Issue it through the `AckIssuer` you received
   at `open` (`issuer.issue(partition, last_offset)`, the **highest offset the
   batch covers**). Every record deserialized from the batch clones this
@@ -116,10 +121,13 @@ them wherever your source resumes from instead.
   `run` waits for them for a short grace. A `Drop` still running after it
   goes on in the background, and `run` returns
   ([Graceful shutdown](../03-guides/graceful-shutdown.mdx#the-drain-choreography)).
-- **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
-  and restart fetching for specific lanes. Sources that can't pause rely on
-  bounded-queue pushback alone, but a pausable source keeps memory flat
-  under sink pressure.
+- **`pause`/`resume`** (default no-ops) stop and restart fetching for
+  specific lanes. The runtime calls them under backpressure, and for a
+  partition that has stayed at `checkpoint.max_pending_batches` for
+  `backpressure.min_pause`. A lane paused for both resumes once neither
+  holds, and a call that fails is made again on a later commit tick. Sources
+  that can't pause rely on bounded-queue pushback alone, but a pausable
+  source keeps memory flat under sink pressure.
 - **`stalled`** (default no-op) names the partitions whose watermark is
   stalled behind a failed batch, such as one the sink abandoned. The runtime
   calls it on each commit tick while any partition is stalled. The stall lasts

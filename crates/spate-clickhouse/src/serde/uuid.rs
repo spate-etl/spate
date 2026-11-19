@@ -36,7 +36,8 @@ where
 {
     if deserializer.is_human_readable() {
         let s = String::deserialize(deserializer)?;
-        Uuid::parse_str(&s).map_err(D::Error::custom)
+        // uuid's own text prints the character it stopped at.
+        Uuid::parse_str(&s).map_err(|_| D::Error::custom("invalid uuid string"))
     } else {
         let (hi, lo) = <(u64, u64)>::deserialize(deserializer)?;
         Ok(Uuid::from_u64_pair(hi, lo))
@@ -103,5 +104,16 @@ mod tests {
         let id = Uuid::from_u128(0xdead_beef_0000_0001_cafe_babe_0000_0002);
         let (hi, lo) = id.as_u64_pair();
         assert_eq!(Uuid::from_u64_pair(hi, lo), id);
+    }
+
+    /// uuid's own text prints the character it stopped at.
+    #[test]
+    fn a_string_that_is_no_uuid_is_not_quoted() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error, StrDeserializer};
+
+        let text: StrDeserializer<'_, Error> = "hunter2".into_deserializer();
+        let err = deserialize(text).unwrap_err();
+        assert_eq!(err.to_string(), "invalid uuid string");
     }
 }

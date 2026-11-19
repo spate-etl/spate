@@ -56,7 +56,12 @@ serde_json = { workspace = true }
 spate-bench = { workspace = true }
 spate-test-support = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "test-util"] }
+tokio = { workspace = true, features = ["io-util", "macros", "test-util"] }
+
+# `setrlimit`, for the admin server tests that run the process out of
+# descriptors.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
 
 # spate-test depends on this crate, so the edge has no version: packaging strips
 # it, and a versioned one would close a cycle no publish order satisfies. Off

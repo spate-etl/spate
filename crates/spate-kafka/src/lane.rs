@@ -12,9 +12,10 @@
 //!
 //! The lane therefore **owns** the polled messages across the batch's
 //! lifetime: `held` stores them with an erased lifetime, and is cleared
-//! only at the start of the next `poll(&mut self)`, at which point the
-//! borrow checker has already proven no batch (and no payload borrowed
-//! from it) is still alive, because the batch borrows `&mut self`. The
+//! only in `release_batch(&mut self)` and at the start of the next
+//! `poll(&mut self)`. At either point the borrow checker has already
+//! proven no batch (and no payload borrowed from it) is still alive,
+//! because the batch borrows `&mut self`. The
 //! erased lifetime is never observable: everything handed out is re-tied
 //! to the lane borrow.
 //!
@@ -395,6 +396,11 @@ impl SourceLane for KafkaLane {
         self.covered_to = Some(last_offset.saturating_add(1));
         self.saw_error = false;
         Ok(Some(self.issue_batch(last_offset)))
+    }
+
+    fn release_batch(&mut self) {
+        // Each message keeps its whole fetch response alive.
+        self.held.clear();
     }
 }
 

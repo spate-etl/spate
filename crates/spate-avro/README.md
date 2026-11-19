@@ -96,6 +96,18 @@ payload.
   `negative_cache_ttl`, and its payloads take the error policy. The negative
   cache holds at most 1,024 ids and drops the oldest for a new one. A dropped id
   is fetched again on its next payload.
+- The cache holds at most 1,024 compiled schemas and an estimated 64 MiB of
+  them. At either bound it evicts the oldest schema that no payload has used
+  since the cache last considered it, and it evicts the 256 newest last. An
+  evicted id is fetched again on its next payload, and that fetch can fail as
+  a first fetch can. A pre-warm above a bound keeps the subjects listed last.
+  A pipeline thread keeps the schemas it last saw until its next payload, so
+  each thread that receives no payloads can hold up to the bounds again.
+- A schema estimated to hold more than 64 MiB compiled is refused. Its id is
+  negatively cached and its payloads take the error policy. The estimate is
+  20 bytes for each byte of the schema's JSON, and 20 more for each byte of a
+  record, enum or fixed, once per name it has and again inside each record
+  that holds it.
 - Any other failure, such as another `5xx`, a `429`, a timeout or a refused
   connection, is transient. The id stays uncached and its batch stays held. Each
   later fetch of the id waits a backoff that starts at 200 ms and doubles up to
@@ -135,6 +147,16 @@ field the writer lacks takes its default, and a writer `int` can be read as a
 and `#[serde(default)]` and `#[serde(alias)]` on the record type cover added and
 renamed fields.
 
+A `reader_schema` that recurses through a union, such as a linked list whose
+`next` field is `["null", "Node"]`, limits how deep a datum may recurse. Each
+pass through the same union doubles what resolving the values below it costs,
+so a datum is refused as a malformed record when its doubling adds more than
+1,024 steps, and more than three times what it costs with no doubling. Where
+the datum's encoded length in bytes is less than that undoubled cost, the
+length takes its place. A linked list
+resolves up to 9 nodes when its nodes have one other field, and up to 5 when
+they have 40. A reader schema that does not recurse refuses nothing.
+
 [Schema evolution](https://spate.kainth.dev/docs/user-guide/connectors/formats/avro#schema-evolution)
 lists what resolves and what does not, and
 [`avro_schema_evolution.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/avro_schema_evolution.rs)
@@ -144,15 +166,18 @@ asserts the rules in one program.
 
 A payload that does not decode is a record-level error. That covers a short or
 mis-tagged header, a single-object fingerprint that does not match `schema`, a
-truncated datum, a datum that does not fit the target type, and a schema id the
-registry cannot serve. One payload is at most one record, so a payload fails
-whole.
+truncated datum, a datum that does not fit the target type, a datum nested
+deeper than the deserializer's depth limit or past its item or decoded-size
+budget, and a schema id the registry cannot serve. One payload
+is at most one record, so a payload fails whole.
 
 Such a payload takes the deserializer stage's error policy, which
 `deser_error_policy` on the chain sets:
 
 - **Skip** is the default for the deserializer stage. The payload is dropped, a
-  rate-limited `WARN` is logged, and the chain moves on. The source commits past
+  rate-limited `WARN` is logged with an error text that quotes no string,
+  bytes or field value from the record, and the chain moves on. A refusal by
+  the decode bounds names the count, length or index it read from the payload. The source commits past
   it, and it does not replay.
 - **Fail** stops the pipeline at that payload. The batch's acknowledgement
   fails, so the source does not commit past it, and the payload replays after a

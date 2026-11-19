@@ -12,15 +12,19 @@
 //! mode.
 
 use crate::cache::{CacheSnapshot, CompiledSchema, Lookup};
+use crate::de::{Names, ReaderSide, check_datum, compile_names};
 use crate::registry::RegistryHandle;
+use crate::resolve::{REFUSED, check_resolution};
 use crate::wire;
 use apache_avro::Schema;
 use apache_avro::reader::datum::GenericDatumReader;
+use apache_avro::schema::ResolvedSchema;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
 use spate_core::hash::QualityMap;
 use spate_core::record::{RawPayload, Record};
+use std::borrow::Cow;
 use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -48,7 +52,8 @@ pub(crate) enum SchemaSourceMode {
         registry: RegistryHandle,
         /// Per-deserializer lock-free memo of the shared cache. Consulted
         /// first on every payload so a repeated (already-`Ready`) schema id
-        /// costs no shared-lock acquisition; refreshed only on a miss.
+        /// costs no shared-lock acquisition; refreshed on a miss, and after
+        /// the cache has evicted a compiled schema.
         memo: CacheSnapshot,
     },
     /// The whole payload is a bare datum; the writer schema is fixed.
@@ -63,16 +68,41 @@ pub(crate) enum SchemaSourceMode {
 
 /// A [`GenericDatumReader`] beside the schemas it borrows.
 ///
-/// The reader resolves each schema's named types once at construction. Both
-/// schemas outlive it here: the writer's is owned by the `CompiledSchema` the
-/// cache hands out, the reader's by the deserializer.
+/// Each schema's named types are resolved once at construction. Both schemas
+/// outlive it here: the writer's is owned by the `CompiledSchema` the cache
+/// hands out, the reader's by the deserializer. The reader decodes in the
+/// writer's shape, and [`read_datum`] resolves the value against the reader
+/// schema itself, so that it can weigh the resolution first. `names` indexes
+/// the writer schema's named types for the check that runs before each
+/// decode: the datum path's index when the schema has one, else its own.
+/// `reader_side` is the reader schema as that check charges it.
 #[ouroboros::self_referencing]
 struct HeldReader {
     writer: Arc<CompiledSchema>,
     reader_schema: Option<Arc<Schema>>,
-    #[borrows(writer, reader_schema)]
+    reader_side: Option<Arc<ReaderSide>>,
+    #[borrows(writer)]
+    #[covariant]
+    names: Cow<'this, Names>,
+    #[borrows(writer)]
+    schema: &'this Schema,
+    #[borrows(writer)]
     #[covariant]
     reader: GenericDatumReader<'this>,
+    #[borrows(reader_schema)]
+    #[covariant]
+    resolution: Option<(&'this Schema, ResolvedSchema<'this>)>,
+}
+
+/// The parsed writer schema, or the pre-rendered reason it did not parse.
+fn writer_schema(writer: &CompiledSchema) -> Result<&Schema, DeserError> {
+    writer
+        .schema
+        .as_ref()
+        .map_err(|reason| DeserError::SchemaUnavailable {
+            // Pre-rendered in `CompiledSchema::compile`: clone, never format.
+            reason: reason.clone(),
+        })
 }
 
 impl HeldReader {
@@ -81,25 +111,39 @@ impl HeldReader {
     fn compile(
         writer: Arc<CompiledSchema>,
         reader_schema: Option<Arc<Schema>>,
+        reader_side: Option<Arc<ReaderSide>>,
     ) -> Result<HeldReader, DeserError> {
+        let id = writer.id;
         HeldReaderTryBuilder {
             writer,
             reader_schema,
-            reader_builder: |writer, reader_schema| {
-                let schema =
-                    writer
-                        .schema
-                        .as_ref()
-                        .map_err(|reason| DeserError::SchemaUnavailable {
-                            // Pre-rendered in `CompiledSchema::compile`:
-                            // clone, never format.
-                            reason: reason.clone(),
-                        })?;
-                GenericDatumReader::builder(schema)
-                    .maybe_reader_schema(reader_schema.as_deref())
+            reader_side,
+            names_builder: |writer| match &writer.datum {
+                Ok(names) => Ok(Cow::Borrowed(names)),
+                // The datum path refused the schema (a `duration` or
+                // `big-decimal`), so its index was not kept.
+                Err(_) => compile_names(writer_schema(writer)?)
+                    .map(Cow::Owned)
+                    .map_err(|reason| DeserError::SchemaUnavailable {
+                        reason: format!("schema {}: {reason}", writer.id),
+                    }),
+            },
+            schema_builder: |writer| writer_schema(writer),
+            reader_builder: |writer| {
+                GenericDatumReader::builder(writer_schema(writer)?)
                     .build()
                     .map_err(|e| DeserError::SchemaUnavailable {
                         reason: format!("schema {} cannot be resolved: {e}", writer.id),
+                    })
+            },
+            resolution_builder: |reader_schema| {
+                let Some(reader) = reader_schema.as_deref() else {
+                    return Ok(None);
+                };
+                ResolvedSchema::new(reader)
+                    .map(|names| Some((reader, names)))
+                    .map_err(|e| DeserError::SchemaUnavailable {
+                        reason: format!("schema {id} cannot be resolved: {e}"),
                     })
             },
         }
@@ -114,6 +158,8 @@ pub(crate) struct DecoderCore {
     /// (Avro schema-resolution rules: field reordering, defaults, type
     /// promotions).
     pub(crate) reader_schema: Option<Arc<Schema>>,
+    /// The reader schema as [`check_datum`] charges it.
+    reader_side: Option<Arc<ReaderSide>>,
     /// Readers by writer schema id, holding each id's resolved named types
     /// across payloads. At most [`MAX_HELD_READERS`] entries; at the ceiling an
     /// arriving id displaces an arbitrary resident one.
@@ -124,12 +170,16 @@ pub(crate) struct DecoderCore {
     /// reader-schema identity, so a reader stored there is correct only while
     /// every consumer of one cache shares one reader schema.
     held: QualityMap<u32, HeldReader>,
+    /// The cache's eviction count when `held` was last checked against the
+    /// memo. A reader whose schema the cache has evicted is dropped, so a
+    /// deserializer does not keep a schema the cache let go.
+    pruned_at: u64,
 }
 
 /// A clone starts with no held readers and builds its own on first payload.
 impl Clone for DecoderCore {
     fn clone(&self) -> Self {
-        DecoderCore::new(self.mode.clone(), self.reader_schema.clone())
+        DecoderCore::new(self.mode.clone(), self.reader_side.clone())
     }
 }
 
@@ -166,21 +216,59 @@ impl Read for DatumReader<'_, '_> {
     }
 }
 
-/// Decode one datum through a reader.
+/// Decode one datum through a reader, once [`check_datum`] has bounded its
+/// depth, its collection items and its lengths, and resolve it against the
+/// reader schema once [`check_resolution`] has bounded what that costs.
 fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserError> {
+    let side = held.borrow_reader_side().as_deref();
+    check_datum(held.borrow_schema(), held.borrow_names(), side, datum).map_err(|e| {
+        DeserError::Malformed {
+            reason: format!("avro datum refused: {e}"),
+        }
+    })?;
+    let payload = datum.len();
     let mut input = DatumReader {
         bytes: datum,
         truncated: false,
     };
     let result = held.borrow_reader().read_value(&mut input);
+    // The bytes the datum took. Bytes after it are not part of it and earn
+    // the resolution check nothing.
+    let encoded = payload - input.bytes.len();
     if input.truncated {
         return Err(DeserError::Malformed {
             reason: "avro datum is truncated".into(),
         });
     }
-    result.map_err(|e| DeserError::Malformed {
-        reason: format!("avro datum decode failed: {e}"),
-    })
+    let failed = |e: apache_avro::Error| refusal("avro datum decode failed", &e);
+    let Some((reader, names)) = held.borrow_resolution() else {
+        return result.map_err(failed);
+    };
+    let value = result.map_err(failed)?;
+    check_resolution(&value, encoded, reader, names.get_names()).map_err(|_| {
+        DeserError::Malformed {
+            reason: REFUSED.into(),
+        }
+    })?;
+    value
+        .resolve_with_names(reader, names.get_names())
+        .map_err(failed)
+}
+
+/// The reason for a datum `apache-avro` refused: `lead`, and the reader
+/// field the record lacks when that is the cause.
+///
+/// The rest of `apache-avro`'s text is left out, because most of it prints
+/// the value it refused.
+fn refusal(lead: &str, e: &apache_avro::Error) -> DeserError {
+    let reason = match e.details() {
+        // The name is the reader schema's.
+        apache_avro::error::Details::GetField(field) => {
+            format!("{lead}: reader field `{field}` is missing from the record")
+        }
+        _ => lead.to_owned(),
+    };
+    DeserError::Malformed { reason }
 }
 
 /// A resolved payload: the writer schema plus the datum slice, which borrows
@@ -188,11 +276,13 @@ fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserEr
 type Resolved<'buf> = Option<(Arc<CompiledSchema>, &'buf [u8])>;
 
 impl DecoderCore {
-    pub(crate) fn new(mode: SchemaSourceMode, reader_schema: Option<Arc<Schema>>) -> DecoderCore {
+    pub(crate) fn new(mode: SchemaSourceMode, reader_side: Option<Arc<ReaderSide>>) -> DecoderCore {
         DecoderCore {
             mode,
-            reader_schema,
+            reader_schema: reader_side.as_ref().map(|side| side.schema().clone()),
+            reader_side,
             held: QualityMap::default(),
+            pruned_at: 0,
         }
     }
 
@@ -210,7 +300,12 @@ impl DecoderCore {
         let resolved: (Arc<CompiledSchema>, &'buf [u8]) = match &mut self.mode {
             SchemaSourceMode::Confluent { registry, memo } => {
                 let (id, datum) = wire::parse_confluent(raw.bytes)?;
-                match registry.cache.lookup(memo, id) {
+                let found = registry.cache.lookup(memo, id);
+                if memo.evictions() != self.pruned_at {
+                    self.held.retain(|_, held| memo.holds(held.borrow_writer()));
+                    self.pruned_at = memo.evictions();
+                }
+                match found {
                     Lookup::Ready(schema) => (schema, datum),
                     Lookup::Missing => {
                         if let Some(reason) = registry.rejection.get() {
@@ -261,7 +356,8 @@ impl DecoderCore {
         // Build before the eviction and cache before the read: a schema that
         // will not build must not displace a resident reader, and a payload
         // that will not decode must not discard a valid one.
-        let built = HeldReader::compile(writer, self.reader_schema.clone())?;
+        let built =
+            HeldReader::compile(writer, self.reader_schema.clone(), self.reader_side.clone())?;
         if self.held.len() >= MAX_HELD_READERS {
             // An arbitrary resident id, neither the oldest nor a uniform draw.
             if let Some(&victim) = self.held.keys().next() {
@@ -279,6 +375,31 @@ impl DecoderCore {
 /// *is* known, [`crate::AvroDatumDeserializer`] decodes it in a single
 /// pass without materialising the [`AvroValue`] tree at all, and is the
 /// faster choice.
+///
+/// # Limits
+///
+/// Each datum is checked before it is decoded, and refused as
+/// [`DeserError::Malformed`] when it nests more than 32 levels deep, when its
+/// arrays and maps claim more than `max(payload length, 65 536)` items, or
+/// when its decoded [`AvroValue`] tree would take more than 1,024 bytes for
+/// each of those. A level is a record field, a collection item, a union
+/// branch, a named-type reference, or the bytes of a `decimal` or
+/// `big-decimal`, so a linked list of a recursive record decodes up to 10
+/// nodes deep. The size counts each value, the field names copied into every
+/// record, enum symbols, and string, bytes and map key contents. With a
+/// `reader_schema`, it also counts the fields, defaults and enum symbols that
+/// resolution into the reader schema adds.
+///
+/// # Resolution limit
+///
+/// With a `reader_schema` that recurses through a union, each datum is
+/// weighed before it is resolved. A value weighs one, plus one for each 64
+/// bytes of content it holds, doubled for each time its path has already
+/// passed through the union it is under. A datum is refused as
+/// [`DeserError::Malformed`] when the doubling adds more than
+/// `max(3 × min(its weight with no doubling, its encoded bytes), 1 024)`. A list whose `next` field is `["null", "Node"]`
+/// resolves up to 9 nodes when its nodes have one other field, and up to 5
+/// when they have 40. A reader schema that does not recurse refuses nothing.
 #[derive(Clone, Debug)]
 pub struct AvroValueDeserializer {
     core: DecoderCore,
@@ -321,6 +442,16 @@ impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
 /// defaults). When you don't,
 /// [`crate::AvroDatumDeserializer`] decodes the same `T` in a single pass
 /// and is substantially cheaper.
+///
+/// # Limits
+///
+/// The intermediate decode checks each datum as
+/// [`AvroValueDeserializer`] does, with the same limits.
+///
+/// # Resolution limit
+///
+/// A `reader_schema` that recurses through a union limits how deep a datum
+/// may recurse, as on [`AvroValueDeserializer`].
 pub struct AvroSerdeDeserializer<T> {
     core: DecoderCore,
     _t: PhantomData<fn() -> T>,
@@ -368,10 +499,8 @@ where
         if let Some(value) = self.core.decode(raw)? {
             // The second decode pass, which applies the reader schema's
             // resolution rules. See the type-level `# Performance` note.
-            let payload =
-                apache_avro::from_value::<T>(&value).map_err(|e| DeserError::Malformed {
-                    reason: format!("avro record does not match the target type: {e}"),
-                })?;
+            let payload = apache_avro::from_value::<T>(&value)
+                .map_err(|e| refusal("avro record does not match the target type", &e))?;
             let _ = out.emit(Record {
                 payload,
                 meta: raw.meta(),
@@ -430,6 +559,68 @@ mod tests {
         assert!(lane.held.is_empty(), "a clone holds none");
         lane.decode(&raw_payload(&bytes)).unwrap().unwrap();
         assert_eq!(lane.held.len(), 1, "and builds its own on first payload");
+    }
+
+    /// A deserializer drops the reader of a schema the cache has evicted on
+    /// its next payload, so the schema is freed, and keeps the reader of one
+    /// the cache still holds.
+    #[test]
+    fn held_readers_leave_with_their_schema() {
+        use crate::cache::{Lookup, SchemaCache};
+        use spate_core::clock::SyncClock;
+
+        let cache = Arc::new(SchemaCache::new(
+            std::time::Duration::from_secs(30),
+            SyncClock::system(),
+        ));
+        let mut core = DecoderCore::new(
+            SchemaSourceMode::Confluent {
+                registry: crate::registry::RegistryHandle::detached(Arc::clone(&cache)),
+                memo: SchemaCache::empty_snapshot(),
+            },
+            None,
+        );
+        let body = datum(1, "a");
+        let decode = |core: &mut DecoderCore, id: u32| {
+            let frame = spate_test::confluent_frame(id, &body);
+            core.decode(&raw_payload(&frame))
+        };
+
+        cache.insert_ready(crate::cache::CompiledSchema::compile(1, WRITER_V1));
+        decode(&mut core, 1).unwrap().unwrap();
+        let first = match cache.get(1) {
+            Lookup::Ready(schema) => Arc::downgrade(&schema),
+            other => panic!("id 1 is held, got {other:?}"),
+        };
+        assert!(
+            first.upgrade().is_some(),
+            "the cache and the reader hold it"
+        );
+
+        // Id 1 was looked up once, so it takes two passes of the eviction
+        // queue to leave. Id 2 is decoded throughout and stays.
+        let cap = u32::try_from(crate::cache::MAX_READY_ENTRIES).unwrap();
+        cache.insert_ready(crate::cache::CompiledSchema::compile(2, WRITER_V1));
+        for id in 3..3 * cap {
+            decode(&mut core, 2).unwrap().unwrap();
+            cache.insert_ready(crate::cache::CompiledSchema::compile(id, WRITER_V1));
+        }
+        assert!(matches!(cache.get(1), Lookup::Missing), "id 1 is evicted");
+
+        decode(&mut core, 2).unwrap().unwrap();
+        assert!(
+            first.upgrade().is_none(),
+            "nothing holds the evicted schema"
+        );
+        assert_eq!(
+            core.held.keys().copied().collect::<Vec<_>>(),
+            [2],
+            "the reader of a held schema stays"
+        );
+        assert!(matches!(
+            decode(&mut core, 1),
+            Err(DeserError::NotReady { .. })
+        ));
     }
 
     /// At the ceiling an arriving id takes a resident id's place, so the cache
@@ -567,7 +758,9 @@ mod tests {
             SchemaSourceMode::Raw {
                 schema: Arc::new(crate::cache::CompiledSchema::compile(0, WRITER_V1)),
             },
-            reader.map(|r| Arc::new(Schema::parse_str(r).unwrap())),
+            reader.map(|r| {
+                Arc::new(ReaderSide::compile(Arc::new(Schema::parse_str(r).unwrap())).unwrap())
+            }),
         )
     }
 
@@ -646,7 +839,86 @@ mod tests {
         let err = AvroSerdeDeserializer::<Wrong>::new(raw_core(None))
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "malformed payload: avro record does not match the target type"
+        );
+    }
+
+    /// `apache-avro` words this refusal with the number it could not narrow.
+    #[test]
+    fn a_value_the_reader_schema_refuses_is_not_quoted() {
+        const WIDE_WRITER: &str =
+            r#"{"type":"record","name":"Count","fields":[{"name":"quantity","type":"long"}]}"#;
+        const NARROW_READER: &str =
+            r#"{"type":"record","name":"Count","fields":[{"name":"quantity","type":"int"}]}"#;
+        let writer = Schema::parse_str(WIDE_WRITER).unwrap();
+        let mut rec = apache_avro::types::Record::new(&writer).unwrap();
+        rec.put("quantity", 5_000_000_000_i64);
+        let payload = to_avro_datum(&writer, rec).unwrap();
+        let core = DecoderCore::new(
+            SchemaSourceMode::Raw {
+                schema: Arc::new(crate::cache::CompiledSchema::compile(0, WIDE_WRITER)),
+            },
+            Some(Arc::new(
+                ReaderSide::compile(Arc::new(Schema::parse_str(NARROW_READER).unwrap())).unwrap(),
+            )),
+        );
+        let mut out = EmitCollector::<AvroValue>::new();
+        let err = AvroValueDeserializer::new(core)
+            .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "malformed payload: avro datum decode failed"
+        );
+    }
+
+    /// apache-avro's decode text prints the character it stopped at. The
+    /// refusal leaves it out, with and without a reader schema.
+    #[test]
+    fn a_failed_decode_is_not_quoted() {
+        const UUID: &str = r#"{"type":"string","logicalType":"uuid"}"#;
+        let mut datum = vec![14];
+        datum.extend(b"hunter2");
+        for reader in [None, Some(UUID)] {
+            let core = DecoderCore::new(
+                SchemaSourceMode::Raw {
+                    schema: Arc::new(crate::cache::CompiledSchema::compile(0, UUID)),
+                },
+                reader.map(|r| {
+                    Arc::new(ReaderSide::compile(Arc::new(Schema::parse_str(r).unwrap())).unwrap())
+                }),
+            );
+            let mut out = EmitCollector::<AvroValue>::new();
+            let err = AvroValueDeserializer::new(core)
+                .deserialize(&raw_payload(&datum), &test_ack(), &mut out)
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "malformed payload: avro datum decode failed",
+                "reader {reader:?}"
+            );
+        }
+    }
+
+    /// The field's name comes from the reader schema, so it is kept.
+    #[test]
+    fn a_reader_field_the_record_lacks_is_named() {
+        const READER: &str = r#"{"type":"record","name":"Event","fields":[
+            {"name":"id","type":"int"},
+            {"name":"name","type":"string"},
+            {"name":"region","type":"string"}]}"#;
+        let payload = datum(1, "hunter2");
+        let mut out = EmitCollector::<AvroValue>::new();
+        let err = AvroValueDeserializer::new(raw_core(Some(READER)))
+            .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "malformed payload: avro datum decode failed: reader field `region` is missing from \
+             the record"
+        );
     }
 
     #[test]

@@ -71,6 +71,15 @@ testcontainers-modules = { workspace = true, features = ["clickhouse"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 url = { workspace = true }
 
+# Both encode rows through a `chrono` helper.
+[[test]]
+name = "encode_skip_line"
+required-features = ["chrono", "testing"]
+
+[[test]]
+name = "encode_refusal_text"
+required-features = ["chrono", "testing"]
+
 [[bench]]
 name = "encode_gungraun"
 harness = false

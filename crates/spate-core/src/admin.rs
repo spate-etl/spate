@@ -14,14 +14,24 @@
 //! ([`RenderFn`]) and has no dependency on exporter internals. The probes
 //! are served regardless of the exporter; `/metrics` exists only when a
 //! renderer is supplied, and is a 404 otherwise.
+//!
+//! The port has no authentication, so every limit below holds against any
+//! client that can reach it. A connection carries one request and closes
+//! after [`CONNECTION_DEADLINE`] at the latest. The server serves at most
+//! [`MAX_CONNECTIONS`] at once: a new connection past that closes the oldest, so a
+//! probe is served while slow clients hold the rest. An error from
+//! `accept` is logged and retried; it never stops the server.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::clock::tokio::{Clock as _, Sleep, SystemClock as RuntimeClock, before};
 use crate::clock::{SharedClock, SystemClock};
+use crate::telemetry::RateLimit;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -30,10 +40,28 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, Id, JoinSet};
 
 /// Renders the current metrics exposition snapshot.
 pub type RenderFn = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// The most connections the admin server serves at once, across all clients.
+/// A connection accepted past this closes the oldest one it serves. Its socket
+/// closes when the runtime next polls its task.
+pub const MAX_CONNECTIONS: usize = 256;
+
+/// The longest the admin server keeps one connection open, from accept to
+/// close, whatever the client sends or reads in that time.
+pub const CONNECTION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the admin server waits before accepting again after `accept`
+/// fails for a reason other than the one connection, such as the process
+/// running out of descriptors.
+const ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// hyper's read buffer per connection, its minimum. A probe or scrape
+/// request head fits many times over.
+const READ_BUFFER: usize = 8 * 1024;
 
 /// Staleness thresholds for the liveness probe.
 #[derive(Clone, Copy, Debug)]
@@ -222,57 +250,165 @@ impl AdminServer {
 
     /// Accept and serve connections until `shutdown` observes `true`.
     /// Every open connection is closed when this returns.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
+    ///
+    /// Runs on a tokio runtime with its time driver enabled, which the
+    /// connection deadline and the accept backoff read.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a failed accept when the runtime was built without its time
+    /// driver, through `enable_time` or `enable_all`. On such a runtime each
+    /// connection also closes unanswered, and its panic is logged.
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut conns = JoinSet::new();
-        let result = loop {
+        let mut live = Live::new(MAX_CONNECTIONS);
+        let evicted = RateLimit::hot_path();
+        let refused = RateLimit::hot_path();
+        let mut backoff: Option<Sleep> = None;
+        loop {
             tokio::select! {
-                accepted = self.listener.accept() => {
-                    let (stream, _peer) = match accepted {
-                        Ok(accepted) => accepted,
-                        Err(err) => break Err(err),
+                accepted = self.listener.accept(), if backoff.is_none() => {
+                    let stream = match accepted {
+                        Ok((stream, _peer)) => stream,
+                        Err(err) => {
+                            tracing::debug!(error = %err, "admin accept failed");
+                            if accept_error(&err) == AcceptError::Backoff {
+                                crate::rate_limited_warn!(
+                                    refused,
+                                    error = %err,
+                                    "the admin server cannot accept a connection; retrying"
+                                );
+                                backoff = Some(RuntimeClock.sleep_until(RuntimeClock.now() + ACCEPT_BACKOFF));
+                            }
+                            continue;
+                        }
                     };
-                    let render = self.render.clone();
-                    let health = Arc::clone(&self.health);
                     #[expect(
                         clippy::disallowed_methods,
                         reason = "the set is local to `run`, so returning drops it and aborts every open connection"
                     )]
-                    conns.spawn(async move {
-                        let io = hyper_util::rt::TokioIo::new(stream);
-                        let service = service_fn(move |req| {
-                            let render = render.clone();
-                            let health = Arc::clone(&health);
-                            async move { respond(&req, render.as_ref(), &health) }
-                        });
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
-                            tracing::debug!(error = %err, "admin connection error");
-                        }
-                    });
-                }
-                Some(joined) = conns.join_next(), if !conns.is_empty() => {
-                    if let Err(err) = joined
-                        && let Ok(payload) = err.try_into_panic()
-                    {
-                        tracing::error!(
-                            panic = crate::task::panic_text(&*payload),
-                            "admin connection panicked"
+                    let handle = conns.spawn(serve(
+                        hyper_util::rt::TokioIo::new(stream),
+                        self.render.clone(),
+                        Arc::clone(&self.health),
+                    ));
+                    if let Some(oldest) = live.admit(handle) {
+                        oldest.abort();
+                        crate::rate_limited_warn!(
+                            evicted,
+                            limit = MAX_CONNECTIONS,
+                            "admin connections at the limit; closed the oldest"
                         );
+                    }
+                }
+                () = async { backoff.as_mut().expect("guarded by the branch condition").await },
+                    if backoff.is_some() =>
+                {
+                    backoff = None;
+                }
+                Some(joined) = conns.join_next_with_id(), if !conns.is_empty() => {
+                    match joined {
+                        Ok((id, ())) => live.finished(id),
+                        Err(err) => {
+                            live.finished(err.id());
+                            if let Ok(payload) = err.try_into_panic() {
+                                tracing::error!(
+                                    panic = crate::task::panic_text(&*payload),
+                                    "admin connection panicked"
+                                );
+                            }
+                        }
                     }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        break Ok(());
+                        break;
                     }
                 }
             }
-        };
+        }
         // Aborting alone leaves each connection open until its task is next
         // polled; waiting here closes them before `run` returns.
         conns.shutdown().await;
-        result
+    }
+}
+
+/// Serves one admin connection: one request, closed by
+/// [`CONNECTION_DEADLINE`] at the latest.
+pub(crate) async fn serve<IO>(io: IO, render: Option<RenderFn>, health: Arc<HealthState>)
+where
+    IO: hyper::rt::Read + hyper::rt::Write + Unpin,
+{
+    let service = service_fn(move |req| {
+        let render = render.clone();
+        let health = Arc::clone(&health);
+        async move { respond(&req, render.as_ref(), &health) }
+    });
+    let mut builder = http1::Builder::new();
+    builder.keep_alive(false).max_buf_size(READ_BUFFER);
+    let conn = builder.serve_connection(io, service);
+    let deadline = RuntimeClock.now() + CONNECTION_DEADLINE;
+    match before(&RuntimeClock, deadline, conn).await {
+        Some(Ok(())) => {}
+        Some(Err(err)) => tracing::debug!(error = %err, "admin connection error"),
+        None => tracing::debug!("admin connection closed at its deadline"),
+    }
+}
+
+/// What the accept loop does after `accept` fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptError {
+    /// The failure belongs to the one pending connection: accept the next.
+    Connection,
+    /// The failure is the process's, such as running out of descriptors:
+    /// wait [`ACCEPT_BACKOFF`] before accepting again.
+    Backoff,
+}
+
+fn accept_error(err: &io::Error) -> AcceptError {
+    match err.kind() {
+        io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset => AcceptError::Connection,
+        _ => AcceptError::Backoff,
+    }
+}
+
+/// The open connections, oldest first, held to a cap.
+#[derive(Debug)]
+struct Live {
+    cap: usize,
+    open: VecDeque<AbortHandle>,
+}
+
+impl Live {
+    fn new(cap: usize) -> Self {
+        Live {
+            cap,
+            open: VecDeque::with_capacity(cap),
+        }
+    }
+
+    /// Records a newly accepted connection. At the cap, returns the oldest
+    /// open connection, which the caller closes.
+    fn admit(&mut self, handle: AbortHandle) -> Option<AbortHandle> {
+        let oldest = (self.open.len() >= self.cap)
+            .then(|| self.open.pop_front())
+            .flatten();
+        self.open.push_back(handle);
+        oldest
+    }
+
+    /// Forgets a connection whose task has ended.
+    fn finished(&mut self, id: Id) {
+        if let Some(at) = self.open.iter().position(|h| h.id() == id) {
+            self.open.remove(at);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.open.len()
     }
 }
 
@@ -415,8 +551,7 @@ mod tests {
         assert!(health.healthy_at(now));
     }
 
-    /// Minimal HTTP/1.1 GET over the readiness API. Hand-rolled to avoid
-    /// adding tokio's `io-util` feature for one test.
+    /// Minimal HTTP/1.1 GET over the readiness API, on a real socket.
     async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
         let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
         let req = format!("GET {path} HTTP/1.1\r\nHost: admin\r\nConnection: close\r\n\r\n");
@@ -484,11 +619,11 @@ mod tests {
         buf
     }
 
-    /// Pins that a kept-alive connection is closed by the time `run` returns: the
-    /// client reads end of stream and the connection releases the health
-    /// state it held.
+    /// Pins that a connection still open is closed by the time `run`
+    /// returns: the client reads end of stream and the connection releases
+    /// the health state it held.
     #[tokio::test]
-    async fn a_kept_alive_connection_ends_when_run_returns() {
+    async fn an_open_connection_ends_when_run_returns() {
         let health = HealthState::new(0, HealthThresholds::default());
         let server = AdminServer::bind(
             "127.0.0.1:0".parse().expect("addr"),
@@ -500,33 +635,35 @@ mod tests {
         let addr = server.local_addr();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (client_tx, client_rx) = oneshot::channel();
+        let held = Arc::clone(&health);
         let _client = tokio::spawn(async move {
             let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-            write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n").await;
-            let response = read_until(&stream, |b| b.ends_with(b"\r\n\r\nok")).await;
+            // A head the server waits on: the connection stays open.
+            write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n").await;
+            // Held here, by the test and by the server: a fourth holder is
+            // the connection's task, once accepted.
+            while Arc::strong_count(&held) < 4 {
+                tokio::task::yield_now().await;
+            }
+            drop(held);
             shutdown_tx.send(true).expect("signal shutdown");
-            let _ = client_tx.send((stream, response));
+            let _ = client_tx.send(stream);
         });
 
         // Awaited inline, so no other task runs between `run` returning and
         // the count below.
-        server.run(shutdown_rx).await.expect("clean shutdown");
+        server.run(shutdown_rx).await;
         assert_eq!(
             Arc::strong_count(&health),
             1,
             "the connection still holds the health state"
         );
 
-        let (stream, response) = client_rx.await.expect("the client finished");
-        assert!(
-            response.starts_with(b"HTTP/1.1 200"),
-            "{}",
-            String::from_utf8_lossy(&response)
-        );
+        let stream = client_rx.await.expect("the client finished");
         let rest = tokio::time::timeout(Duration::from_secs(30), read_until(&stream, |_| false))
             .await
             .expect("the connection closes when run returns");
-        assert_eq!(rest, b"");
+        assert_eq!(rest, b"", "no response to an unfinished head");
     }
 
     /// Pins that a connection whose request panics is logged once at
@@ -571,28 +708,219 @@ mod tests {
 
                 let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
                 write_all(&stream, b"GET /metrics HTTP/1.1\r\nHost: admin\r\n\r\n").await;
-                let line = tokio::time::timeout(Duration::from_secs(30), lines_rx.recv())
-                    .await
-                    .expect("a line within the deadline")
-                    .expect("the subscriber is alive");
-                assert_eq!(
-                    line.trim(),
-                    r#"ERROR admin connection panicked panic="render boom""#
-                );
+                let reply = read_until(&stream, |_| false).await;
+                assert!(reply.is_empty(), "a panicking connection sends nothing");
 
+                // The panicked connection ended before its client read the
+                // close, and `run` reaps it before it serves the next
+                // connection on this one thread, so the line is written by
+                // the time this probe is answered.
                 let (status, _) = get(addr, "/healthz").await;
                 assert_eq!(
                     status, 200,
                     "the server serves on after a connection panics"
                 );
+                let line = lines_rx.try_recv().expect("the panic is logged");
+                assert_eq!(
+                    line.trim(),
+                    r#"ERROR admin connection panicked panic="render boom""#
+                );
                 shutdown_tx.send(true).expect("signal shutdown");
-                running
-                    .await
-                    .expect("server task joins")
-                    .expect("clean shutdown");
+                running.await.expect("server task joins");
                 assert!(lines_rx.try_recv().is_err(), "one line only");
             });
         });
+    }
+
+    /// Serves one connection over an in-process pipe of `buffer` bytes, with
+    /// `render` as the exposition. Returns the client's end and the task
+    /// serving the server's end.
+    fn serve_in_process(
+        buffer: usize,
+        render: Option<RenderFn>,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+        let (client, server) = tokio::io::duplex(buffer);
+        let health = HealthState::new(0, HealthThresholds::default());
+        let task = tokio::spawn(serve(hyper_util::rt::TokioIo::new(server), render, health));
+        (client, task)
+    }
+
+    /// Everything the server writes before it closes the pipe.
+    async fn read_to_close(client: &mut tokio::io::DuplexStream) -> String {
+        use tokio::io::AsyncReadExt as _;
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).await.expect("read");
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// A client that never finishes its request head is closed at the
+    /// deadline, and not before.
+    #[tokio::test(start_paused = true)]
+    async fn an_unfinished_head_is_closed_at_the_deadline() {
+        use tokio::io::AsyncWriteExt as _;
+        let start = tokio::time::Instant::now();
+        let (mut client, task) = serve_in_process(64 * 1024, None);
+        client
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: admin\r\n")
+            .await
+            .expect("write");
+        tokio::time::sleep(CONNECTION_DEADLINE - Duration::from_millis(1)).await;
+        assert!(!task.is_finished(), "closed before the deadline");
+        // The paused clock runs on to the next timer while the test waits, so
+        // the instant the connection ends is the deadline it was given.
+        task.await.expect("the connection ends");
+        assert_eq!(
+            start.elapsed(),
+            CONNECTION_DEADLINE,
+            "closed at the deadline"
+        );
+        assert_eq!(read_to_close(&mut client).await, "");
+    }
+
+    /// A client that sends a whole request for a large exposition and never
+    /// reads the reply is closed at the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_never_reads_is_closed_at_the_deadline() {
+        use tokio::io::AsyncWriteExt as _;
+        let render: RenderFn = Arc::new(|| "x".repeat(1024 * 1024));
+        let start = tokio::time::Instant::now();
+        let (mut client, task) = serve_in_process(1024, Some(render));
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: admin\r\n\r\n")
+            .await
+            .expect("write");
+        tokio::time::sleep(CONNECTION_DEADLINE - Duration::from_millis(1)).await;
+        assert!(!task.is_finished(), "closed before the deadline");
+        task.await.expect("the connection ends");
+        assert_eq!(
+            start.elapsed(),
+            CONNECTION_DEADLINE,
+            "closed at the deadline"
+        );
+    }
+
+    /// A connection carries one request: a second one sent on it gets no
+    /// response, and the server closes the connection after the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_answers_one_request() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, task) = serve_in_process(64 * 1024, None);
+        client
+            .write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n\
+                  GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n",
+            )
+            .await
+            .expect("write");
+        let text = read_to_close(&mut client).await;
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+        assert_eq!(text.matches("HTTP/1.1 ").count(), 1, "{text}");
+        task.await.expect("the connection ends");
+    }
+
+    /// A request head larger than the read buffer is refused, not buffered.
+    #[tokio::test(start_paused = true)]
+    async fn a_head_past_the_read_buffer_is_refused() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, task) = serve_in_process(64 * 1024, None);
+        let mut head = b"GET /healthz HTTP/1.1\r\nHost: admin\r\nX-Pad: ".to_vec();
+        head.resize(READ_BUFFER + 1024, b'a');
+        head.extend_from_slice(b"\r\n\r\n");
+        client.write_all(&head).await.expect("write");
+        let text = read_to_close(&mut client).await;
+        assert!(!text.contains(" 200 "), "{text}");
+        task.await.expect("the connection ends");
+    }
+
+    /// An exposition far larger than the read buffer is served whole.
+    #[tokio::test(start_paused = true)]
+    async fn an_exposition_past_the_read_buffer_is_served_whole() {
+        use tokio::io::AsyncWriteExt as _;
+        let body = "y".repeat(16 * READ_BUFFER);
+        let expected = body.clone();
+        let render: RenderFn = Arc::new(move || body.clone());
+        let (mut client, task) = serve_in_process(4096, Some(render));
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: admin\r\n\r\n")
+            .await
+            .expect("write");
+        let text = read_to_close(&mut client).await;
+        let (head, got) = text.split_once("\r\n\r\n").expect("a response");
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert_eq!(got.len(), expected.len());
+        task.await.expect("the connection ends");
+    }
+
+    /// A failure that belongs to the pending connection moves on to the next
+    /// one; any other failure backs off.
+    #[test]
+    fn accept_errors_are_classed_by_kind() {
+        for kind in [
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+        ] {
+            assert_eq!(
+                accept_error(&io::Error::from(kind)),
+                AcceptError::Connection,
+                "{kind:?}"
+            );
+        }
+        // EMFILE: the process is out of descriptors.
+        assert_eq!(
+            accept_error(&io::Error::from_raw_os_error(24)),
+            AcceptError::Backoff
+        );
+        assert_eq!(
+            accept_error(&io::Error::from(io::ErrorKind::OutOfMemory)),
+            AcceptError::Backoff
+        );
+    }
+
+    /// `n` handles to tasks that never end, in spawn order.
+    fn pending_handles(set: &mut JoinSet<()>, n: usize) -> Vec<AbortHandle> {
+        (0..n)
+            .map(|_| set.spawn(std::future::pending::<()>()))
+            .collect()
+    }
+
+    /// At the cap, a new connection displaces the oldest still open, and the
+    /// count never passes the cap.
+    #[tokio::test]
+    async fn the_oldest_connection_makes_room_at_the_cap() {
+        let mut set = JoinSet::new();
+        let handles = pending_handles(&mut set, 5);
+        let mut live = Live::new(3);
+        for h in &handles[..3] {
+            assert!(live.admit(h.clone()).is_none(), "room below the cap");
+        }
+        let first = live.admit(handles[3].clone()).expect("the cap is reached");
+        assert_eq!(first.id(), handles[0].id());
+        let second = live.admit(handles[4].clone()).expect("still at the cap");
+        assert_eq!(second.id(), handles[1].id());
+        assert_eq!(live.len(), 3);
+        set.shutdown().await;
+    }
+
+    /// A connection whose task ended frees its place: after as many endings
+    /// as admissions, the next admission closes nothing.
+    #[tokio::test]
+    async fn an_ended_connection_frees_its_place() {
+        let mut set = JoinSet::new();
+        let handles = pending_handles(&mut set, 4);
+        let mut live = Live::new(3);
+        for h in &handles[..3] {
+            assert!(live.admit(h.clone()).is_none());
+        }
+        for h in &handles[..3] {
+            live.finished(h.id());
+        }
+        assert_eq!(live.len(), 0);
+        assert!(
+            live.admit(handles[3].clone()).is_none(),
+            "room after endings"
+        );
+        set.shutdown().await;
     }
 
     #[tokio::test]
@@ -629,10 +957,7 @@ mod tests {
         assert_eq!(status, 404);
 
         shutdown_tx.send(true).expect("signal shutdown");
-        running
-            .await
-            .expect("server task joins")
-            .expect("clean shutdown");
+        running.await.expect("server task joins");
     }
 
     /// With no exporter there is no exposition, and `/metrics` says so. A 200
@@ -657,9 +982,6 @@ mod tests {
         assert_eq!(status, 503, "readiness does not depend on the exporter");
 
         shutdown_tx.send(true).expect("signal shutdown");
-        running
-            .await
-            .expect("server task joins")
-            .expect("clean shutdown");
+        running.await.expect("server task joins");
     }
 }

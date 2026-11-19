@@ -54,15 +54,20 @@ use std::marker::PhantomData;
 /// Decoded values are identical to running the two-pass path
 /// (the `Value` decode plus `from_value`) for every well-formed payload both
 /// accept; the differential suite in `tests/datum_parity.rs` pins this.
-/// The deliberate differences are a per-datum budget of `max(payload length, 65 536)` claimed collection items (a
-/// hostile block count over zero-width items errors instead of walking),
+/// The deliberate differences are the depth limit (128 levels of nesting
+/// here, 32 on the two-pass path, whose decode takes more stack per level),
 /// skipped-field contents (structurally validated only, not UTF-8-checked,
 /// and a skipped size-prefixed block is trusted at its declared byte
 /// size, so a corrupt block whose size field lies can skip differently
 /// than it decodes), and schemas using the `duration` or `big-decimal`
 /// logical types, which are rejected up front (build error for fixed
 /// schemas, per-record `SchemaUnavailable` for registry ids) instead of
-/// failing on every record's type.
+/// failing on every record's type. Both paths refuse a datum whose
+/// collections claim more than `max(payload length, 65 536)` items, as a
+/// malformed record, except that this path skips a size-prefixed block in
+/// a skipped field by its byte size without counting its items. The
+/// two-pass path also refuses a datum whose `Value` tree would pass a size
+/// budget; this path builds no such tree.
 pub struct AvroDatumDeserializer<F: RecFamily> {
     core: DecoderCore,
     _f: PhantomData<fn() -> F>,

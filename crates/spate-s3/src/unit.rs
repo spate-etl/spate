@@ -342,14 +342,36 @@ fn packed_unit(members: &[ObjectEntry]) -> Result<Minted, SplitError> {
     })
 }
 
-/// Where the objects a notification names must be for the source to read
-/// them.
+/// Where the objects a unit names must be for the source to read them.
 #[derive(Clone, Debug)]
 pub(crate) struct Scope {
-    /// The source's bucket. `None` matches no record.
+    /// The source's bucket, which a notification names. `None` matches no
+    /// record.
     pub(crate) bucket: Option<String>,
     /// The source's prefix within the bucket; empty for the whole bucket.
     pub(crate) prefix: Path,
+}
+
+impl Scope {
+    /// `Ok` for a `key` under the prefix, taken with the `/` a listing
+    /// appends, and otherwise why its unit fails. Every key is under an
+    /// empty prefix.
+    ///
+    /// The key is compared as written, so one [`addressable`] refuses can
+    /// pass, as the keys a lister publishes for such objects do.
+    fn holds(&self, key: &str) -> Result<(), String> {
+        let prefix = self.prefix.as_ref();
+        if prefix.is_empty()
+            || key
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "the key \"{key}\" is outside the source's prefix \"{prefix}/\""
+        ))
+    }
 }
 
 /// What the reader does with one delivery.
@@ -364,6 +386,9 @@ pub(crate) enum Decoded {
 
 /// Read a delivery's `body`: a [`SplitDescriptor`] a lister published, or a
 /// storage notification.
+///
+/// A descriptor is every body with a top-level `v`, whoever published it,
+/// and fails its unit when a member's key is outside `scope`'s prefix.
 ///
 /// A notification is an S3 `Records[]` message, the same records inside the
 /// `{"EventName","Key","Records"}` envelope, an S3 event EventBridge
@@ -412,7 +437,7 @@ pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
         );
     };
     if value.get("v").is_some() {
-        return match descriptor_parts(body, packing) {
+        return match descriptor_parts(body, scope, packing) {
             Ok(cursor) => Decoded::Read(vec![cursor]),
             Err(reason) => Decoded::Fail(reason),
         };
@@ -668,16 +693,7 @@ fn announced_part(
             "the object is in the bucket \"{bucket}\", which this source does not read"
         ));
     }
-    let prefix = scope.prefix.as_ref();
-    if !prefix.is_empty()
-        && !key
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
-    {
-        return Err(format!(
-            "the key \"{key}\" is outside the source's prefix \"{prefix}/\""
-        ));
-    }
+    scope.holds(&key)?;
     let Some(size) = size else {
         return Err(format!("the object \"{key}\" has no size"));
     };
@@ -829,11 +845,11 @@ fn form_decoded(key: &str) -> Result<String, String> {
 ///
 /// One member is read as [`parts_of`] cuts it, or as the byte range the
 /// descriptor names. Two or more are one whole part, read member by member
-/// on one lane. A unit naming no member, more than [`MAX_UNIT_MEMBERS`], or a
-/// member whose ETag cannot be sent in `If-Match` is refused, and so is a
-/// ranged unit whose delimiter is not the framer's or whose object is
-/// compressed.
-fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
+/// on one lane. A unit naming no member, more than [`MAX_UNIT_MEMBERS`], a
+/// member whose key is outside `scope`'s prefix, or a member whose ETag
+/// cannot be sent in `If-Match` is refused, and so is a ranged unit whose
+/// delimiter is not the framer's or whose object is compressed.
+fn descriptor_parts(body: &[u8], scope: &Scope, packing: Packing) -> Result<Cursor, String> {
     let descriptor = SplitDescriptor::decode(body)
         .map_err(|e| format!("the unit's body is not a descriptor: {}", e.reason))?;
     let entries = descriptor.to_entries();
@@ -842,6 +858,9 @@ fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
             "the unit names {} objects; this source reads 1 to {MAX_UNIT_MEMBERS} per unit",
             entries.len()
         ));
+    }
+    for object in &entries {
+        scope.holds(&object.key)?;
     }
     if let Some(object) = entries
         .iter()
@@ -1955,6 +1974,110 @@ mod tests {
             .encode()
             .unwrap();
         assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
+    /// The refusal of a key outside the prefix of [`scope`].
+    fn outside(key: &str) -> String {
+        format!("the key \"{key}\" is outside the source's prefix \"data/\"")
+    }
+
+    /// A descriptor of one whole member, `key`.
+    fn descriptor_of(key: &str) -> Vec<u8> {
+        SplitDescriptor::new(vec![member(key, 10, "\"e\"")])
+            .encode()
+            .unwrap()
+    }
+
+    /// Pins the scope check on a descriptor: a key outside `prefix/`, one
+    /// that only shares the prefix's characters included, fails the unit,
+    /// and a whole-bucket source reads any key.
+    #[test]
+    fn a_descriptor_for_a_key_outside_the_prefix_fails() {
+        for key in [
+            "secret/a.ndjson",
+            "database/a.ndjson",
+            "data",
+            "DATA/a.ndjson",
+            "data%2Fa.ndjson",
+            "/data/a.ndjson",
+        ] {
+            let reason = failed(decode(&descriptor_of(key), &scope(), packing()));
+            assert_eq!(reason, outside(key));
+        }
+        assert_eq!(
+            keys(decode(&descriptor_of("data/a.ndjson"), &scope(), packing())),
+            ["data/a.ndjson"]
+        );
+        assert_eq!(
+            keys(decode(
+                &descriptor_of("secret/a.ndjson"),
+                &whole_bucket(),
+                packing()
+            )),
+            ["secret/a.ndjson"]
+        );
+    }
+
+    /// Pins that the scope check covers every member of a descriptor,
+    /// wherever the member sits.
+    #[test]
+    fn a_descriptor_with_one_member_outside_the_prefix_fails() {
+        for at in 0..3 {
+            let mut members: Vec<DescriptorObject> = (0..3)
+                .map(|i| member(&format!("data/{i}.ndjson"), 10, "\"e\""))
+                .collect();
+            members[at].key = "secret/a.ndjson".into();
+            let body = SplitDescriptor::new(members).encode().unwrap();
+            let reason = failed(decode(&body, &scope(), packing()));
+            assert_eq!(reason, outside("secret/a.ndjson"), "member {at}");
+        }
+    }
+
+    /// Pins that the scope check covers a descriptor naming a byte range.
+    #[test]
+    fn a_ranged_descriptor_outside_the_prefix_fails() {
+        let object = member("secret/a.ndjson", 300, "\"e\"");
+        let body = SplitDescriptor::with_range(object, SplitRange::new(0, 100, b'\n'))
+            .encode()
+            .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert_eq!(reason, outside("secret/a.ndjson"));
+    }
+
+    /// Pins the order of a descriptor's checks: the member count, which
+    /// bounds the scope check, then the scope, then the ETags.
+    #[test]
+    fn a_descriptor_is_checked_for_count_then_scope_then_etag() {
+        let n = MAX_UNIT_MEMBERS + 1;
+        let body = SplitDescriptor::new(
+            (0..n)
+                .map(|i| member(&format!("secret/{i}.ndjson"), 10, "\"e\""))
+                .collect(),
+        )
+        .encode()
+        .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert!(reason.contains(&format!("names {n} objects")), "{reason}");
+
+        let body = SplitDescriptor::new(vec![member("secret/a.ndjson", 10, "\"abc\u{1}\"")])
+            .encode()
+            .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert_eq!(reason, outside("secret/a.ndjson"));
+    }
+
+    /// Pins that the scope check reads a descriptor's key as written: a key
+    /// under the prefix that `object_store` cannot address stays one part,
+    /// which the read then poisons.
+    #[test]
+    fn a_descriptor_for_an_unaddressable_key_under_the_prefix_is_read() {
+        for key in ["data/../secret/a.ndjson", "data//a.ndjson"] {
+            assert!(!addressable(key), "{key}");
+            assert_eq!(
+                keys(decode(&descriptor_of(key), &scope(), packing())),
+                [key]
+            );
+        }
     }
 
     /// Pins that a record with no `eventName`, or one that is not a string,

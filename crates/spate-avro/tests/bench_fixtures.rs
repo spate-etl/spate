@@ -595,6 +595,31 @@ fn the_recursive_fixture_is_a_chain_not_a_pair() {
     assert_eq!(nodes, corpora::LIST_NODES);
 }
 
+/// The deserializer resolves a decoded value itself. Each evolution reader
+/// gives the value apache-avro's own reader gives when it holds the reader
+/// schema.
+#[test]
+fn the_evolution_readers_resolve_as_apache_avro_resolves_them() {
+    let writer = apache_avro::Schema::parse_str(corpora::EVENT_WRITER).unwrap();
+    for reader in [
+        corpora::EVENT_REORDERED,
+        corpora::EVENT_PROMOTED,
+        corpora::EVENT_DEFAULTED,
+    ] {
+        let schema = apache_avro::Schema::parse_str(reader).unwrap();
+        let upstream = apache_avro::reader::datum::GenericDatumReader::builder(&writer)
+            .reader_schema(&schema)
+            .build()
+            .unwrap();
+        for datum in &corpora::event_datums()[..50] {
+            assert_eq!(
+                decode_one_value(corpora::EVENT_WRITER, Some(reader), datum),
+                upstream.read_value(&mut &datum[..]).unwrap(),
+            );
+        }
+    }
+}
+
 /// Each reader schema has to apply its rule. An alias that silently
 /// stopped resolving, or a default that stopped being filled, would leave the
 /// case measuring plain identity resolution under an evolution name.

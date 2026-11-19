@@ -17,6 +17,7 @@ pub struct CheckpointMetrics {
     commits_ok: Counter,
     commits_err: Counter,
     commit_duration: Histogram,
+    ceiling_pauses: Counter,
     watermark_age: OwnedGauge,
     partition_pending: Option<PartitionGauges>,
     _claim: Option<SeriesClaim>,
@@ -66,6 +67,7 @@ impl CheckpointMetrics {
                 "error",
             ),
             commit_duration: labels.histogram(names::CHECKPOINT_COMMIT_DURATION_SECONDS),
+            ceiling_pauses: labels.counter(names::CHECKPOINT_CEILING_PAUSES_TOTAL),
             watermark_age: OwnedGauge::new(
                 labels.gauge(names::CHECKPOINT_WATERMARK_AGE_SECONDS),
                 owned,
@@ -78,6 +80,11 @@ impl CheckpointMetrics {
             }),
             _claim: claim,
         }
+    }
+
+    /// Count one pause of a partition held at the pending-batch ceiling.
+    pub fn ceiling_pause(&self) {
+        self.ceiling_pauses.increment(1);
     }
 
     /// Set the max pending-batch count across partitions.

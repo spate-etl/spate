@@ -90,6 +90,23 @@ The admin server binds `admin.listen` (default `0.0.0.0:9090`) and serves:
 Both probes answer regardless of `metrics.exporter`. Setting `admin.listen` to
 `none` removes them, along with the port.
 
+The admin server has no authentication. Put the port on a network that only
+the kubelet and your metrics scraper can reach, for example one a Kubernetes
+`NetworkPolicy` restricts.
+
+Each connection carries one request. The server closes it after 30 seconds at
+the latest, whether or not the client has finished sending the request or
+reading the response, so a scrape that takes longer to read is cut off.
+
+The server serves at most 256 connections at once, across all clients. A new
+connection past that closes the oldest one, so a probe is still answered while
+slow clients hold the rest.
+
+When `accept` fails, for example because the process is out of file
+descriptors, the server logs a warning and tries again a second later. A
+failure that concerns one connection, such as a client resetting it before the
+server accepts it, is skipped without a pause or a warning.
+
 ```yaml
 readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
 livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }

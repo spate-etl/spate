@@ -286,23 +286,31 @@ fn decode_unknown_ids(
     deser: &mut AvroValueDeserializer,
     ids: std::ops::Range<u32>,
 ) {
-    let mut out = EmitCollector::new();
     for id in ids {
-        let payload = confluent_payload(id, 1);
-        // The fetcher runs on `rt`, so each replay first drives it.
-        let result = spate_test::deserialize_until_ready(
-            spate_test::HANG,
-            deser,
-            &raw_payload(&payload),
-            &spate_test::test_ack(),
-            &mut out,
-            || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await }),
-        );
+        let result = decode_on(rt, deser, id);
         assert!(
             matches!(result, Err(DeserError::SchemaUnavailable { .. })),
             "id {id}: {result:?}"
         );
     }
+}
+
+/// Replays a record naming `id` until its fetch settles, driving the fetcher
+/// on `rt` between replays.
+fn decode_on(
+    rt: &tokio::runtime::Runtime,
+    deser: &mut AvroValueDeserializer,
+    id: u32,
+) -> Result<(), DeserError> {
+    let payload = confluent_payload(id, 1);
+    spate_test::deserialize_until_ready(
+        spate_test::HANG,
+        deser,
+        &raw_payload(&payload),
+        &spate_test::test_ack(),
+        &mut EmitCollector::new(),
+        || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await }),
+    )
 }
 
 /// The 404 warnings in `lines`, as the text after the level and target.
@@ -1373,4 +1381,305 @@ async fn reader_projection_does_not_hide_truncated_writer_string() {
         );
         assert!(out.records.is_empty());
     }
+}
+
+/// The count bound as a schema id.
+fn cap() -> u32 {
+    u32::try_from(spate_avro::MAX_READY_ENTRIES).unwrap()
+}
+
+fn by_id(id: u32) -> String {
+    format!("/schemas/ids/{id}")
+}
+
+/// A stub that resolves each of `ids` to [`SCHEMA_V1`].
+fn resolving(ids: std::ops::RangeInclusive<u32>) -> RegistryStub {
+    let stub = RegistryStub::start();
+    for id in ids {
+        stub.script(&by_id(id), 200, schema_body(SCHEMA_V1), 0);
+    }
+    stub
+}
+
+/// Decodes one record for each of `ids`, in order.
+fn decode_each(deser: &mut AvroValueDeserializer, ids: impl IntoIterator<Item = u32>) {
+    let mut out = EmitCollector::new();
+    for id in ids {
+        drive_until_ready(deser, &confluent_payload(id, 1), &mut out)
+            .unwrap_or_else(|e| panic!("id {id}: {e}"));
+    }
+}
+
+fn value_deserializer(stub: &RegistryStub) -> AvroValueDeserializer {
+    AvroDeserializerBuilder::from_settings(
+        &settings(stub.addr(), Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap()
+    .build_value()
+    .expect("apache builder")
+}
+
+/// One distinct id past the count bound evicts the first, and a later record
+/// naming the first decodes after a second fetch. An id still held is not
+/// fetched again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_schema_is_refetched_on_its_next_record() {
+    let stub = resolving(1..=cap() + 1);
+    let mut deser = value_deserializer(&stub);
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        decode_each(&mut deser, 1..=cap() + 1);
+        assert_eq!(hits.path_hits(&by_id(1)), 1);
+        decode_each(&mut deser, [1, cap() + 1]);
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stub.path_hits(&by_id(1)),
+        2,
+        "the evicted id is fetched again"
+    );
+    assert_eq!(stub.path_hits(&by_id(cap() + 1)), 1, "a held id is not");
+}
+
+/// An evicted id is fetched and decodes while another id's fetch is stuck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_id_refetches_while_another_fetch_is_held() {
+    let stuck = cap() + 2;
+    let stub = resolving(1..=stuck);
+    let mut deser = value_deserializer(&stub);
+    let hits = stub.clone();
+    let mut deser = tokio::task::spawn_blocking(move || {
+        decode_each(&mut deser, 1..=cap() + 1);
+        hits.hold(&by_id(stuck));
+        let (ack, _rx) = AckRef::test_pair();
+        let blocked = deser.deserialize(
+            &raw_payload(&confluent_payload(stuck, 1)),
+            &ack,
+            &mut EmitCollector::new(),
+        );
+        assert!(matches!(blocked, Err(DeserError::NotReady { .. })));
+        decode_each(&mut deser, [1]);
+        deser
+    })
+    .await
+    .unwrap();
+    assert_eq!(stub.path_hits(&by_id(1)), 2);
+    assert_eq!(stub.path_hits(&by_id(stuck)), 0, "still held");
+
+    stub.release();
+    tokio::task::spawn_blocking(move || decode_each(&mut deser, [stuck]))
+        .await
+        .unwrap();
+}
+
+/// [`SCHEMA_V1`] with a `doc` long enough that `count` copies pass the
+/// cache's byte bound and `count - 1` do not.
+fn heavy_schema(count: usize) -> String {
+    let with_doc = |len: usize| {
+        format!(
+            r#"{{"type":"record","name":"Event","doc":"{}","fields":[{{"name":"id","type":"long"}}]}}"#,
+            "d".repeat(len)
+        )
+    };
+    let weight = |json: &str| spate_avro::schema_weight(json).expect("the schema parses");
+    let per_byte = weight(&with_doc(1)) - weight(&with_doc(0));
+    let each = spate_avro::MAX_READY_BYTES / (count - 1);
+    let schema = with_doc((each - weight(&with_doc(0))) / per_byte);
+    assert!(weight(&schema) * (count - 1) <= spate_avro::MAX_READY_BYTES);
+    assert!(weight(&schema) * count > spate_avro::MAX_READY_BYTES);
+    schema
+}
+
+/// Schemas fetched by id count toward the byte bound: the fetch that passes
+/// it evicts the first, well below the count bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fetch_weighs_the_schema() {
+    const COUNT: u32 = 9;
+    let stub = RegistryStub::start();
+    let heavy = heavy_schema(COUNT as usize);
+    for id in 1..=COUNT {
+        stub.script(&by_id(id), 200, schema_body(&heavy), 0);
+    }
+    let mut deser = value_deserializer(&stub);
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        decode_each(&mut deser, 1..COUNT);
+        decode_each(&mut deser, [1]);
+        assert_eq!(hits.path_hits(&by_id(1)), 1, "one under the bound fits");
+        decode_each(&mut deser, [COUNT, 1]);
+    })
+    .await
+    .unwrap();
+    assert_eq!(stub.path_hits(&by_id(1)), 2, "the first id was evicted");
+}
+
+/// A pre-warm counts toward the byte bound: of more subjects than fit, the
+/// first is evicted and fetched by id on its first record, and the last is
+/// held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_weighs_the_schema() {
+    const COUNT: u32 = 9;
+    let stub = RegistryStub::start();
+    let heavy = heavy_schema(COUNT as usize);
+    let latest = |id: u32| format!("/subjects/s{id}-value/versions/latest");
+    for id in 1..=COUNT {
+        let body = serde_json::json!({ "schema": heavy, "id": id, "version": 1 });
+        stub.script(&latest(id), 200, body.to_string(), 0);
+        stub.script(&by_id(id), 200, schema_body(&heavy), 0);
+    }
+    // The pre-warm takes its subjects in order, so a request for the last
+    // subject means every schema before it is in the cache.
+    stub.script(&latest(0), 404, "{}", 0);
+
+    let mut cfg = settings(stub.addr(), Duration::from_secs(30));
+    cfg.prewarm_subjects = (1..=COUNT)
+        .chain([0])
+        .map(|id| format!("s{id}-value"))
+        .collect();
+    let mut deser =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+            .unwrap()
+            .build_value()
+            .expect("apache builder");
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(spate_test::HANG, "the pre-warm ends", || {
+            hits.path_hits(&latest(0)) > 0
+        });
+        decode_each(&mut deser, [COUNT]);
+        assert_eq!(hits.path_hits(&by_id(COUNT)), 0, "the last subject is held");
+        decode_each(&mut deser, [1]);
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stub.path_hits(&by_id(1)),
+        1,
+        "the first subject was evicted"
+    );
+}
+
+/// A pre-warm refuses a schema above the byte bound as a fetch does: the
+/// subject's id is not held, so its record fetches by id and is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_refuses_a_schema_above_the_byte_bound() {
+    let oversize = spate_avro::nested_schema(40, 200);
+    let stub = RegistryStub::start();
+    let latest = |subject: &str| format!("/subjects/{subject}/versions/latest");
+    let body = serde_json::json!({ "schema": oversize, "id": 5, "version": 1 });
+    stub.script(&latest("big-value"), 200, body.to_string(), 0);
+    stub.script(&by_id(5), 200, schema_body(&oversize), 0);
+    // The pre-warm takes its subjects in order: see `a_prewarm_weighs_the_schema`.
+    stub.script(&latest("end-value"), 404, "{}", 0);
+
+    let mut cfg = settings(stub.addr(), Duration::from_secs(30));
+    cfg.prewarm_subjects = vec!["big-value".into(), "end-value".into()];
+    let mut deser =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+            .unwrap()
+            .build_value()
+            .expect("apache builder");
+    let hits = stub.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(spate_test::HANG, "the pre-warm ends", || {
+            hits.path_hits(&latest("end-value")) > 0
+        });
+        let payload = confluent_payload(5, 1);
+        drive_until_ready(&mut deser, &payload, &mut EmitCollector::new()).unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(stub.path_hits(&by_id(5)), 1, "the pre-warm did not hold it");
+}
+
+/// A schema the cache would hold above its byte bound is refused: its
+/// records fail as schema-unavailable with the size in the reason, and the
+/// id is fetched once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schema_above_the_byte_bound_poisons_the_id() {
+    let oversize = spate_avro::nested_schema(40, 200);
+    let weight = spate_avro::schema_weight(&oversize).unwrap();
+    assert!(weight > spate_avro::MAX_READY_BYTES);
+    let stub = RegistryStub::start();
+    stub.script(&by_id(5), 200, schema_body(&oversize), 0);
+    let mut deser = value_deserializer(&stub);
+    let payload = confluent_payload(5, 1);
+
+    let errors = tokio::task::spawn_blocking(move || {
+        let mut out = EmitCollector::new();
+        [(); 2].map(|()| drive_until_ready(&mut deser, &payload, &mut out).unwrap_err())
+    })
+    .await
+    .unwrap();
+    for err in errors {
+        let DeserError::SchemaUnavailable { reason, .. } = &err else {
+            panic!("expected schema-unavailable, got {err}");
+        };
+        assert_eq!(
+            *reason,
+            format!(
+                "schema 5 is not usable: it would hold about {} MiB compiled, above the 64 MiB \
+                 the schema cache holds",
+                weight >> 20
+            )
+        );
+    }
+    assert_eq!(stub.path_hits(&by_id(5)), 1, "the refusal is cached");
+}
+
+/// The lines in `lines` holding `message`, as the text after it.
+fn fields_after<'a>(lines: &'a [String], message: &str) -> Vec<&'a str> {
+    lines
+        .iter()
+        .filter_map(|l| l.split_once(message))
+        .map(|(_, rest)| rest.trim())
+        .collect()
+}
+
+/// Records naming more distinct ids than the count bound log the fetch line
+/// a hundred times and the eviction warning five times per window of the
+/// deserializer's clock, and the next window's first lines carry the
+/// suppressed counts.
+#[test]
+fn fetch_and_eviction_logs_are_rate_limited() {
+    const FETCHED: &str = "schema fetched and compiled";
+    const FULL: &str =
+        "schema cache is full; an evicted schema is fetched again on its next record";
+    const EVICTING: u32 = 20;
+    let last = cap() + EVICTING;
+    let stub = resolving(1..=last + 1);
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        let rt = current_thread();
+        let clock = TestClock::frozen();
+        let mut deser = rt.block_on(async {
+            builder_on(stub.addr(), Duration::from_secs(3600), &clock)
+                .build_value()
+                .expect("apache builder")
+        });
+        for id in 1..=last {
+            decode_on(&rt, &mut deser, id).unwrap_or_else(|e| panic!("id {id}: {e}"));
+        }
+        clock.advance(Duration::from_secs(10));
+        decode_on(&rt, &mut deser, last + 1).expect("the next window's id");
+    });
+
+    let fetched = fields_after(&lines, FETCHED);
+    assert_eq!(fetched.len(), 101, "{fetched:#?}");
+    assert_eq!(fetched[99], "schema_id=100");
+    assert_eq!(
+        fetched[100],
+        format!("schema_id={} suppressed={}", last + 1, last - 100)
+    );
+
+    let full = fields_after(&lines, FULL);
+    let bounds = "max_schemas=1024 max_bytes=67108864";
+    assert_eq!(full.len(), 6, "{full:#?}");
+    assert_eq!(full[4], format!("evicted=1 {bounds}"));
+    assert_eq!(
+        full[5],
+        format!("suppressed={} evicted=1 {bounds}", EVICTING - 5)
+    );
 }

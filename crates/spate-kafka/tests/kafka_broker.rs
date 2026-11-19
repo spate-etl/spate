@@ -10,6 +10,7 @@ mod support;
 use support::Raw as _;
 
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::metrics::names;
 use spate_core::record::PartitionId;
@@ -345,6 +346,156 @@ fn transaction_broker() -> (SingleBroker, String) {
     let kafka = SingleBroker::start(transactional_broker()).expect("start kafka container");
     let brokers = kafka.bootstrap().to_owned();
     (kafka, brokers)
+}
+
+/// One round of the aborting producer: a transaction of one large record,
+/// aborted, then a transaction of one small record, committed.
+fn abort_and_commit(producer: &BaseProducer, rounds: std::ops::Range<usize>) {
+    /// Under the one-megabyte fetch size per partition, so a fetch response
+    /// holds one aborted record and the marker behind it.
+    const ABORTED: usize = 900_000;
+    let aborted = vec![7u8; ABORTED];
+    let deadline = Instant::now() + HANG;
+    let send = |payload: &[u8]| {
+        let record = BaseRecord::<(), _>::to(TOPIC).partition(0).payload(payload);
+        spate_test_support::send(producer, record, deadline).expect("enqueue");
+        producer.flush(support::TRANSACTION_TIMEOUT).expect("flush");
+    };
+    for round in rounds {
+        producer.begin_transaction().expect("begin");
+        send(&aborted);
+        producer
+            .abort_transaction(support::TRANSACTION_TIMEOUT)
+            .expect("abort");
+        producer.begin_transaction().expect("begin");
+        send(format!("round-{round}").as_bytes());
+        producer
+            .commit_transaction(support::TRANSACTION_TIMEOUT)
+            .expect("commit");
+    }
+}
+
+/// A partition held at the pending-batch ceiling is paused at the source, so
+/// what a producer writes behind it stays on the broker: aborted transactions
+/// arriving while the sink holds the head leave resident memory flat, and
+/// every committed record is delivered once the sink answers.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
+    /// The default `queued.max.messages.kbytes`.
+    const PREFETCH_KIB: u64 = 65_536;
+    const ONE_X: usize = 40;
+    let (_kafka, brokers) = transaction_broker();
+    let producer = support::transactional_producer(&brokers, TOPIC, "ceiling");
+    let commit_one = |payload: &[u8]| {
+        producer.begin_transaction().expect("begin");
+        let record = BaseRecord::<(), _>::to(TOPIC).partition(0).payload(payload);
+        spate_test_support::send(&producer, record, Instant::now() + HANG).expect("enqueue");
+        producer.flush(support::TRANSACTION_TIMEOUT).expect("flush");
+        producer
+            .commit_transaction(support::TRANSACTION_TIMEOUT)
+            .expect("commit");
+    };
+    commit_one(b"head");
+
+    let name = spate_test::unique_name("ceiling");
+    let yaml = format!(
+        "pipeline: {{ name: {name}, threads: 1 }}\nadmin: {{ listen: none }}\n\
+         checkpoint: {{ interval: 100ms, max_pending_batches: 2 }}\n\
+         metrics: {{ exporter: prometheus }}\n\
+         source: {{ memory: {{}} }}\nsink: {{ capture: {{ chunk: {{ target_bytes: 1 }} }} }}\n"
+    );
+    let pipeline_config = spate_core::config::PipelineConfig::from_str(&yaml).expect("config");
+    let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
+        per_partition_detail: false,
+        e2e_basis: spate_core::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+    let group = spate_test::unique_name("ceiling");
+    let (sink, script) = spate_test::capture_sink(1, 1);
+    script.enqueue_global(spate_test::WriteOutcome::ok().held());
+    // A write per record, well inside the default `min_pause`, so the
+    // partition does not return to the ceiling for that long once the sink
+    // answers.
+    let mut pool = spate_core::sink::SinkPoolConfig::default();
+    pool.batch.linger = Duration::from_millis(10);
+    let runtime = spate_core::pipeline::Pipeline::from_config(pipeline_config)
+        .expect("pipeline")
+        .sink(sink.with_pool_config(pool))
+        .expect("sink")
+        .chains(|ctx| {
+            let chunk = ctx.chunk();
+            spate_core::ops::chain_owned::<Vec<u8>, _>(spate_test::BytesPassthrough)
+                .sink(
+                    spate_test::TestEncoder,
+                    spate_core::sink::KeyHashRouter,
+                    chunk,
+                    ctx.queues,
+                    ctx.budget,
+                )
+                .build()
+        })
+        .runtime_options(spate_core::pipeline::RuntimeOptions {
+            handle_signals: false,
+            ..spate_core::pipeline::RuntimeOptions::default()
+        })
+        .into_runtime(KafkaSource::new(config(&brokers, &group)))
+        .expect("runtime");
+    let shutdown = runtime.shutdown_handle();
+    let run = spate_test::PipelineRun::spawn(move || runtime.run());
+    let metric = |metric: &str| {
+        spate_test::metric_value(&handle.render(), metric, &[("pipeline", name.as_str())])
+            .unwrap_or(0.0)
+    };
+
+    spate_test::wait_until(HANG, "the head's write is held", || {
+        script.held_writes() == 1
+    });
+    commit_one(b"next");
+    spate_test::wait_until(HANG, "records close the gate", || {
+        metric(names::CHECKPOINT_PENDING_BATCHES) == 2.0
+    });
+
+    // The first rounds land before the pause, so the purge it makes runs over
+    // queued records and markers.
+    abort_and_commit(&producer, 0..ONE_X);
+    spate_test::wait_until(HANG, "the partition is paused at the source", || {
+        metric(names::CHECKPOINT_CEILING_PAUSES_TOTAL) >= 1.0
+    });
+    let one = spate_test_support::resident_kib();
+    abort_and_commit(&producer, ONE_X..ONE_X * 10);
+    let ten = spate_test_support::resident_kib();
+    assert!(
+        ten.saturating_sub(one) < PREFETCH_KIB,
+        "resident memory grew {} KiB over {} aborted transactions behind a paused partition",
+        ten.saturating_sub(one),
+        ONE_X * 9,
+    );
+
+    let end = settled_end(&brokers, TOPIC, 0);
+    script.release_held();
+    let delivered = || -> Vec<Vec<u8>> {
+        script
+            .writes()
+            .iter()
+            .flat_map(|write| spate_test::decode_rows(&write.payload))
+            .collect()
+    };
+    let last = format!("round-{}", ONE_X * 10 - 1).into_bytes();
+    spate_test::wait_until(HANG, "the last record reaches the sink", || {
+        delivered().last() == Some(&last)
+    });
+    spate_test::wait_until(HANG, "the group commits the log's end", || {
+        support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)]
+    });
+    shutdown.trigger();
+    let exit = run.wait_exit(HANG).expect("the pipeline exits");
+    assert!(exit.is_ok(), "{exit:?}");
+
+    let mut want = vec![b"head".to_vec(), b"next".to_vec()];
+    want.extend((0..ONE_X * 10).map(|round| format!("round-{round}").into_bytes()));
+    assert_eq!(delivered(), want, "every committed record, once, in order");
 }
 
 /// [`config`] on `topic`.
@@ -888,7 +1039,7 @@ mod latest_start {
     use super::*;
     use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
     use rdkafka::client::DefaultClientContext;
-    use rdkafka::producer::{BaseRecord, Producer as _};
+    use rdkafka::producer::BaseRecord;
     use spate_test::HANG;
     use support::latest;
 

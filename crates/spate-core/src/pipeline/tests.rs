@@ -1033,12 +1033,14 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
         3,
         "pending exceeded max_pending_batches"
     );
-    // The bound is the driver's, not a controller pause. The source was
-    // never asked to pause for checkpoint pressure.
-    assert!(
-        h.shared.lock().unwrap().pauses.is_empty(),
-        "the ceiling must not be enforced via source pauses"
-    );
+    // Those ticks outlast `min_pause`, so the source was asked once to pause
+    // the lane. The fake's pause stops nothing: the driver's skip is what
+    // held the count.
+    wait_until(Duration::from_secs(5), "the ceiling pause", || {
+        !h.shared.lock().unwrap().pauses.is_empty()
+    });
+    assert_eq!(h.shared.lock().unwrap().pauses, [vec![LaneId(0)]]);
+    assert!(h.shared.lock().unwrap().resumes.is_empty());
     // Releasing the acks retires the held batches; the gate reopens and
     // the remainder flows to completion.
     release.store(true, Ordering::Relaxed);
@@ -1053,10 +1055,17 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
             .get(&PartitionId(0))
             .is_some_and(|&w| w >= 60)
     });
+    // The gate can close again while the remainder waits on a harvest, so
+    // the count of pauses from here on is not fixed. The first is lifted.
+    wait_until(Duration::from_secs(5), "the pause is lifted", || {
+        !h.shared.lock().unwrap().resumes.is_empty()
+    });
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
-    h.shared.lock().unwrap().committed[&PartitionId(0)]
+    let shared = h.shared.lock().unwrap();
+    assert!(shared.resumes.iter().all(|lanes| lanes == &[LaneId(0)]));
+    shared.committed[&PartitionId(0)]
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the
@@ -1100,24 +1109,32 @@ fn a_stalled_partition_plateaus_at_the_ceiling() {
 
 /// The ceiling is per partition. A lane added while a sibling partition
 /// sits at its ceiling runs immediately, gated only by its own count, as
-/// `checkpoint.max_pending_batches` documents.
+/// `checkpoint.max_pending_batches` documents. Once the gated partition has
+/// stayed there for `min_pause`, its lane alone is paused at the source.
 #[test]
 fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
     let release_c = Arc::clone(&release);
+    let clock = crate::clock::TestClock::frozen();
     let mut cfg = test_config(1);
     cfg.checkpoint.max_pending_batches = 3;
-    let h = start_with_config(cfg, move |shared, log| FakeChain {
-        shared,
-        log,
-        mode: ChainMode::HoldAcks {
-            held: Arc::clone(&held_c),
-            release: Arc::clone(&release_c),
+    let interval = cfg.checkpoint.interval;
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held_c),
+                release: Arc::clone(&release_c),
+            },
+            batches_seen: 0,
         },
-        batches_seen: 0,
-    });
+    );
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
     wait_until(
         Duration::from_secs(5),
@@ -1141,15 +1158,27 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
         "the added partition's batch is delivered beside the gated sibling",
         || held.lock().unwrap().len() == 4,
     );
-    assert!(
-        h.shared.lock().unwrap().pauses.is_empty(),
-        "no source pause is involved in gating"
+    // The clock has not moved, so partition 0 has spent no time at the
+    // ceiling yet.
+    assert!(h.shared.lock().unwrap().pauses.is_empty());
+
+    for _ in 0..3 {
+        tick(&h, &clock, interval);
+    }
+    wait_until(Duration::from_secs(5), "the ceiling pause", || {
+        !h.shared.lock().unwrap().pauses.is_empty()
+    });
+    assert_eq!(
+        h.shared.lock().unwrap().pauses,
+        [vec![LaneId(0)]],
+        "only the gated partition's lane is paused"
     );
 
     // Releasing drains both partitions to completion.
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
     wait_until(Duration::from_secs(5), "both partitions commit", || {
+        clock.advance(interval);
         let shared = h.shared.lock().unwrap();
         shared
             .committed
@@ -1160,9 +1189,125 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
                 .get(&PartitionId(1))
                 .is_some_and(|&w| w >= 110)
     });
+    wait_until(Duration::from_secs(5), "the pause is lifted", || {
+        !h.shared.lock().unwrap().resumes.is_empty()
+    });
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
+    let shared = h.shared.lock().unwrap();
+    assert!(shared.pauses.iter().all(|lanes| lanes == &[LaneId(0)]));
+    assert!(shared.resumes.iter().all(|lanes| lanes == &[LaneId(0)]));
+}
+
+/// A pipeline whose one lane was paused at a ceiling of one, and whose source
+/// refuses every resume, with both batches committed. The controller makes
+/// the refused resume again on each commit tick.
+fn a_lane_with_a_resume_owed(clock: &Arc<crate::clock::TestClock>) -> (Harness, Duration) {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 1;
+    let interval = cfg.checkpoint.interval;
+    let h = start_prepared(
+        cfg,
+        test_options(),
+        |log| {
+            log.resume_errors
+                .extend((0..10_000).map(|_| SourceError::retryable("scripted resume refusal")));
+        },
+        |runtime, _| {
+            runtime
+                .with_clock(Arc::clone(clock) as _)
+                .with_stop_clock(Arc::clone(clock) as _)
+        },
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held_c),
+                release: Arc::clone(&release_c),
+            },
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_until(Duration::from_secs(5), "the ceiling pause", || {
+        clock.advance(interval);
+        !h.shared.lock().unwrap().pauses.is_empty()
+    });
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    let resumes = || h.shared.lock().unwrap().resumes.len();
+    wait_until(Duration::from_secs(5), "the resume is retried", || {
+        clock.advance(interval);
+        resumes() >= 2
+    });
+    (h, interval)
+}
+
+/// A revoked lane's owed resume is dropped with the lane: the source gets no
+/// call for a lane it has taken back.
+#[test]
+fn a_revoked_lane_gets_no_further_resume() {
+    let clock = crate::clock::TestClock::frozen();
+    let (h, interval) = a_lane_with_a_resume_owed(&clock);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    wait_until(Duration::from_secs(5), "the revoke", || {
+        logged(&h, "revoke-delivered")
+    });
+    passes(&h, 3);
+    let before = h.shared.lock().unwrap().resumes.len();
+    assert!(before >= 2, "the fixture left a resume owed and retried");
+    for _ in 0..3 {
+        tick(&h, &clock, interval);
+    }
+    assert_eq!(h.shared.lock().unwrap().resumes.len(), before);
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// A retired lane's owed resume is dropped with the lane.
+#[test]
+fn a_retired_lane_gets_no_further_resume() {
+    let clock = crate::clock::TestClock::frozen();
+    let (h, interval) = a_lane_with_a_resume_owed(&clock);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(0)]));
+    wait_until(Duration::from_secs(5), "the retirement", || {
+        logged(&h, "retire-delivered")
+    });
+    passes(&h, 3);
+    let before = h.shared.lock().unwrap().resumes.len();
+    assert!(before >= 2, "the fixture left a resume owed and retried");
+    for _ in 0..3 {
+        tick(&h, &clock, interval);
+    }
+    assert_eq!(h.shared.lock().unwrap().resumes.len(), before);
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// The driver tells a lane each of its batches is finished, once per batch
+/// and never after a poll that returned none.
+#[test]
+fn a_lane_is_told_when_each_batch_is_finished() {
+    let h = ok_harness();
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_committed(&h, 0, 20);
+    wait_until(Duration::from_secs(5), "empty polls follow", || {
+        polls_of(&h, 0) >= 5
+    });
+    assert_eq!(h.shared.lock().unwrap().releases, [LaneId(0), LaneId(0)]);
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
 }
 
 /// Lane 0 on partition 0 and lane 1 on partition 1, one batch each, both

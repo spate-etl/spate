@@ -318,7 +318,9 @@ impl SinkShardMetrics {
     /// terminal stage; `oldest_event_ms` is its source event time. The
     /// configured basis picks which one lands in the histogram (event
     /// basis falls back to ingest when `oldest_event_ms` is
-    /// [`NO_EVENT_TIME_MS`]).
+    /// [`NO_EVENT_TIME_MS`]). On the event basis an event time in the
+    /// future records zero, and an age above `i64::MAX` milliseconds records
+    /// `i64::MAX` milliseconds.
     #[inline]
     pub fn e2e_observed(&self, ingest_age: Duration, oldest_event_ms: i64) {
         let latency = match self.e2e_basis {
@@ -327,7 +329,8 @@ impl SinkShardMetrics {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
                     .unwrap_or(0);
-                Duration::from_millis(u64::try_from(now_ms - oldest_event_ms).unwrap_or(0))
+                let age_ms = now_ms.saturating_sub(oldest_event_ms);
+                Duration::from_millis(u64::try_from(age_ms).unwrap_or(0))
             }
             _ => ingest_age,
         };

@@ -431,20 +431,21 @@ async fn no_refetch_while_the_backoff_holds() {
         let ack = spate_test::test_ack();
         let mut out = EmitCollector::new();
         let reads = || clock.reads.load(Ordering::SeqCst);
-        assert!(matches!(
-            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
-            Err(DeserError::NotReady { .. })
-        ));
-        spate_test::wait_until(spate_test::HANG, "the 503 is stamped", || reads() >= 1);
-        // Each replay requests the id once, and the backoff gate reads the
-        // clock once to refuse it.
-        for replay in 1..=10 {
+        let mut replay = || {
             assert!(matches!(
                 deser.deserialize(&raw_payload(&payload), &ack, &mut out),
                 Err(DeserError::NotReady { .. })
             ));
-            spate_test::wait_until(spate_test::HANG, "the backoff refuses the replay", || {
-                reads() > replay
+        };
+        replay();
+        spate_test::wait_until(spate_test::HANG, "the 503 is stamped", || reads() >= 1);
+        // The fetcher reads the clock before it lets the id be requested
+        // again, so a replay in between adds no request. Each step replays
+        // until the backoff gate reads the clock to refuse one.
+        for refusals in 1..=10 {
+            spate_test::wait_until(spate_test::HANG, "the backoff refuses a replay", || {
+                replay();
+                reads() > refusals
             });
         }
         let frozen_hits = probe.path_hits("/schemas/ids/13");
@@ -514,13 +515,15 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
             reads() >= 1
         });
         test_clock.advance(Duration::from_millis(200));
-        // One request: the gate's read admits it, the second 503's stamp is
-        // the next read.
-        assert!(matches!(
-            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
-            Err(DeserError::NotReady { .. })
-        ));
+        // The gate's read admits a request and the second 503's stamp is the
+        // next read. The fetcher stamps the first 503 before it lets the id
+        // be requested again, so a replay in between adds no request: replay
+        // until the second stamp.
         spate_test::wait_until(spate_test::HANG, "the second 503 is stamped", || {
+            assert!(matches!(
+                deser.deserialize(&raw_payload(&payload), &ack, &mut out),
+                Err(DeserError::NotReady { .. })
+            ));
             reads() >= 3
         });
         test_clock.advance(Duration::from_millis(400));

@@ -112,11 +112,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 The jemalloc allocator, through `tikv-jemallocator`, gave a gain in the same
 range on the measured pipeline. Each allocator also slowed some encoder
-benchmark cases: jemalloc slowed two cases by 6–10% on x86_64, and `mimalloc`
-slowed one case by 4–9%.
+benchmark cases. On x86_64, jemalloc slowed two cases by 6–10%. It also slowed
+one case on each host by 1% or less. The `mimalloc` allocator slowed the Native
+`metrics` case by 4–9%.
 
 At four pipeline threads, the allocator was measured only together with fat
-LTO. That build, with jemalloc, was 6–21% faster than Cargo's defaults.
+LTO. That build, with jemalloc, was 6–20% faster than Cargo's defaults.
 
 ### Leave the target CPU at its default
 

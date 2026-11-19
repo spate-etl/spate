@@ -193,7 +193,7 @@ Fat LTO with one codegen unit cut the CPU time of each case in
 [`spate-clickhouse/benches/encode_wall.rs`](repo:crates/spate-clickhouse/benches/encode_wall.rs)
 by 5–68% against Cargo's default profile. The Native `events` and `metrics`
 cases gained least, 5–13%. The RowBinary `events` and `metrics` cases and the
-Native `exotic` case gained most, 36–68%. Thin LTO changed each case by less
+Native `exotic` case gained most, 37–68%. Thin LTO changed each case by less
 than 7%, some faster and some slower. Each figure compares two builds over 20
 interleaved runs, on one x86_64 and one aarch64 host, built with `bytes`
 1.12.2.

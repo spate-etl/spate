@@ -4,7 +4,6 @@ description: "librdkafka's auto.offset.reset picks a new partition's start and m
 slug: auto-offset-reset-latest
 authors: [marcus]
 tags: [engineering]
-draft: true
 ---
 
 In 0.1.0 and in 0.4.0, Spate's Kafka source could commit a partition past

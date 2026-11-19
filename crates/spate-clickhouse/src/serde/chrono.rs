@@ -399,11 +399,15 @@ mod tests {
             "value out of range for Time"
         );
         assert_eq!(
-            custom(&Time64MicrosRow(Duration::MAX)),
+            custom(&Time64MicrosRow(
+                Duration::try_milliseconds(i64::MAX).unwrap()
+            )),
             "value has too many microseconds for Time64(6)"
         );
         assert_eq!(
-            custom(&Time64NanosRow(Duration::MAX)),
+            custom(&Time64NanosRow(
+                Duration::try_milliseconds(i64::MAX).unwrap()
+            )),
             "value has too many nanoseconds for Time64(9)"
         );
     }

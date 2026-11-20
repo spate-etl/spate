@@ -135,7 +135,7 @@ payload needs it. A `403` on that fetch stops the pipeline. Any other TLS or
 transport failure, such as an `InternalError` alert or a connection closed
 during the handshake, is transient: the batch is held and replayed while it
 lasts, logging `registry fetch failed transiently` and counting
-`spate_deser_not_ready_total`. See
+`spate_deser_not_ready_replays_total`. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
@@ -341,8 +341,8 @@ This limit never refuses such a datum.
 This deserializer registers no families of its own. Decode outcomes surface in
 the framework's stage families: `spate_deser_records_total{outcome}`,
 `spate_deser_records_dropped_total{reason="skip_policy"}`, and
-`spate_deser_not_ready_total` for payloads held waiting on a registry fetch,
-which is neither an error nor backpressure. On a chain built with
+`spate_deser_not_ready_replays_total` for payloads held waiting on a registry
+fetch, which is neither an error nor backpressure. On a chain built with
 `with_metrics`, these series carry `component_type="avro"`. See
 [Metrics](../../../../METRICS.md).
 

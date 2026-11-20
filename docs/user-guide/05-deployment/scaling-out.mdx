@@ -76,7 +76,7 @@ run and its end marker.
 ## Observability
 
 Which worker holds how much of the job shows in `spate_feed_held_units` and
-`spate_source_lanes_active`, and how fast it settles units in the other
+`spate_source_active_lanes`, and how fast it settles units in the other
 `spate_feed_*` families (see [Metrics](../../METRICS.md)).
 `spate_source_rebalances_total{event="revoke"}` counts the drains a worker runs
 when it lets go of a unit it had started reading, such as one that failed or

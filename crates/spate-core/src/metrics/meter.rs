@@ -265,7 +265,7 @@ impl Meter {
     /// labels, then `extra`. Pass `&[]` for the standard labels alone.
     /// Build-time only.
     ///
-    /// Follow the taxonomy rules: `_total` suffix on counters, and push
+    /// Name it by [the naming rules](https://spate.kainth.dev/docs/user-guide/extending/instrumenting-connectors#contracts), and push
     /// per-instance identity (a topic, a shard) into `extra` labels rather
     /// than the name, keeping the name low-cardinality.
     ///
@@ -281,7 +281,7 @@ impl Meter {
     }
 
     /// Resolve a gauge under this scope (local name, auto-prefixed).
-    /// Build-time only.
+    /// Build-time only. Name it by [the naming rules](https://spate.kainth.dev/docs/user-guide/extending/instrumenting-connectors#contracts).
     ///
     /// # Panics
     ///
@@ -295,8 +295,7 @@ impl Meter {
     }
 
     /// Resolve a histogram under this scope (local name, auto-prefixed).
-    /// Build-time only. Give it a unit suffix (`_seconds` / `_bytes` /
-    /// `_rows`).
+    /// Build-time only. Name it by [the naming rules](https://spate.kainth.dev/docs/user-guide/extending/instrumenting-connectors#contracts).
     ///
     /// # Panics
     ///

@@ -37,8 +37,11 @@ a metric you deliberately want *outside* the `spate_` namespace. See
 
 - All framework metrics are prefixed `spate_`. Process metrics
   (`process_*`) follow their own standard and are unprefixed.
-- Prometheus naming rules: `_total` suffix on counters, unit suffixes
-  (`_seconds`, `_bytes`, `_rows`) on everything measured in a unit.
+- A name ending in `_total` is a counter. The one exception is
+  `spate_backpressure_paused_seconds_total`, a gauge that only rises. A unit
+  suffix (`_seconds`, `_bytes`, `_rows`) names the unit of the value.
+  [Instrumenting connectors § Contracts](user-guide/06-extending/instrumenting-connectors.mdx#contracts)
+  states how a name is chosen.
 - **Standard labels on every framework metric:** `pipeline` (pipeline name),
   `component` (instance id from config/builder, e.g. `orders_kafka`),
   `component_type` (implementation, e.g. `kafka`, `clickhouse`, `map`).
@@ -86,7 +89,7 @@ framework families below, labeled with its `component_type`.
 | `spate_source_poll_duration_seconds` | histogram | | Time spent inside `poll` per call. |
 | `spate_source_lag_records` | gauge | `partition` | Consumer lag (the end of what the source can read − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
 | `spate_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Lane-set events the source reported. `assign` counts each new set of lanes that replaces the previous one, an empty set included. `revoke` counts each drain of live lanes the source asks for, whether a rebalance or the source itself started it. One event counts once, however many lanes it carries. Lanes added to or retired from the current set count nothing, and neither does the drain the runtime runs when an assignment arrives over live lanes. |
-| `spate_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
+| `spate_source_active_lanes` | gauge | | Currently assigned lanes (partitions). |
 
 ### Alerting on consumer lag
 
@@ -104,10 +107,10 @@ max by (pipeline) (spate_source_lag_records)
 absent(spate_source_lag_records{pipeline="orders"})
 
 # Only *some* partitions have reported. The sum above silently omits the
-# rest, so it under-reports with no other signal. `lanes_active` is the
+# rest, so it under-reports with no other signal. `active_lanes` is the
 # assignment size, so a shortfall here means the total is partial.
 count by (pipeline) (spate_source_lag_records)
-  < sum by (pipeline) (spate_source_lanes_active)
+  < sum by (pipeline) (spate_source_active_lanes)
 ```
 
 Alert on the total, on absence, **and** on the partial-measurement check.
@@ -206,7 +209,7 @@ type the deserializer declares, or `deserializer` when it declares none.
 |---|---|---|---|
 | `spate_deser_records_total` | counter | `outcome` (`ok`\|`error`) | Deserialization attempts by outcome. One input payload may yield 0..N records; this counts outputs, plus one `error` per failed payload. |
 | `spate_deser_records_dropped_total` | counter | `reason` (`skip_policy`) | Payloads dropped by the Skip error policy. |
-| `spate_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
+| `spate_deser_not_ready_replays_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch), one per `NotReady` answer. Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
 | `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch, including a batch with no payloads, which a source returns to retire offsets that hold no record. |
 
 ## Operators (`spate_operator_*`)
@@ -249,7 +252,7 @@ series carry its name as the `component` label (a single sink uses
 |---|---|---|---|
 | `spate_sink_records_total` | counter | `shard` | Records durably written (acknowledged flushes only). |
 | `spate_sink_bytes_total` | counter | `shard` | Bytes durably written, counted before the sink's frame codec. |
-| `spate_sink_batch_rows` | histogram | | Rows per sealed batch. |
+| `spate_sink_batch_rows` | histogram | | Rows per sealed batch. Counted in rows, as `batch.max_rows` is, so a reading compares directly with that limit and the `rows` flush reason. |
 | `spate_sink_batch_bytes` | histogram | | Bytes per sealed batch, counted before the sink's frame codec. |
 | `spate_sink_flushes_total` | counter | `shard`, `reason` (`rows`\|`bytes`\|`linger`\|`drain`) | Flushes by trigger. |
 | `spate_sink_flush_duration_seconds` | histogram | `shard` | **Seal→settle** per durably written batch: the wait for an `inflight.max_per_shard` slot, every attempt, every retry-backoff sleep and quarantine probe wait, and the write that finally succeeded. The right input for a commit-lag budget and the **wrong** first reach for "is the sink slow" — see [What a flush contains](#what-a-flush-contains). Only settled batches are observed; an abandoned one is counted by `spate_sink_abandoned_batches_total` instead. |
@@ -264,7 +267,7 @@ series carry its name as the `component` label (a single sink uses
 | `spate_sink_replica_errors_total` | counter | `shard`, `replica` | Failed write attempts attributed to a replica — which endpoint is erroring (`spate_sink_errors_total` gives the class breakdown per shard). |
 | `spate_sink_shard_healthy` | gauge | `shard` | 1 = the shard has ≥1 circuit-closed replica; 0 = no replica is circuit-closed (every one quarantined or half-open probing) — intake stalls and the shard back-pressures the source while recovery probes keep firing. The probe cadence is `open_for` **plus** the probe's own duration — the re-open deadline is stamped when a failure is reported, not when the attempt began. Concurrency while half-open is budgeted by `breaker.half_open_probes` (default 1) per probe episode, not globally: a failure reported by an earlier attempt re-opens the replica and ends the episode, so a probe still in flight from it can overlap the next one. Size a replica's capacity for that, not for exactly one. |
 | `spate_sink_abandoned_batches_total` | counter | `shard` | Batches whose acknowledgments failed, so the data replays after restart — a fatal error class, exhausted `retry.max_attempts`, a panicking write task, or a drain deadline expiring at shutdown. Only the last is a shutdown event; see [What a flush contains](#what-a-flush-contains). |
-| `spate_sink_drain_overrun_total` | counter | `shard` | Shard workers force-aborted for failing to return by the drain deadline. **Non-zero is a framework bug, not an operating condition** — a worker is supposed to abandon at the deadline under its own power. Shutdown still terminated and the data still replays (the acknowledgments fail with the worker), but that shard's batches are missing from `abandoned` above and from the `ExitReport`'s drain counts, so the two disagree by an unknown amount. Alert on `> 0`. |
+| `spate_sink_drain_overruns_total` | counter | `shard` | Shard workers force-aborted for failing to return by the drain deadline. **Non-zero is a framework bug, not an operating condition** — a worker is supposed to abandon at the deadline under its own power. Shutdown still terminated and the data still replays (the acknowledgments fail with the worker), but that shard's batches are missing from `abandoned` above and from the `ExitReport`'s drain counts, so the two disagree by an unknown amount. Alert on `> 0`. |
 
 ### What a flush contains
 

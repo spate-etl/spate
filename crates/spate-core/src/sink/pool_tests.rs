@@ -12,7 +12,7 @@ use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::clock::tokio::{Clock as _, SystemClock, TestClock};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
-use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
+use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics, names};
 use crate::record::NO_EVENT_TIME_MS;
 use bytes::Bytes;
 use spate_test::wait_until;
@@ -1276,7 +1276,7 @@ fn one_blocked_write(clock: &Arc<TestClock>) -> BlockedWrite {
 /// The pool's backstop under the cooperative deadline. The restructured intake
 /// loop puts this out of a real worker's reach, so the wedge is injected
 /// directly. `drain` must still return, and must say so on
-/// `spate_sink_drain_overrun_total` rather than only in a log.
+/// `spate_sink_drain_overruns_total` rather than only in a log.
 #[test]
 fn a_worker_that_ignores_the_deadline_is_force_aborted() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1312,7 +1312,7 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
             let overruns = || {
                 spate_test::metric_value(
                     &handle.render(),
-                    "spate_sink_drain_overrun_total",
+                    names::SINK_DRAIN_OVERRUNS_TOTAL,
                     &[("shard", "0")],
                 )
                 .unwrap_or(0.0)

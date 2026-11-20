@@ -56,6 +56,7 @@ A change that would add a second copy moves the first one to `spate-core` or `te
   `cargo xtask adr new <slug>` starts a record from `docs/adr/_template.md`, which states when a decision needs one.
 - [Architecture](../user-guide/02-concepts/01-architecture.mdx) in the user guide describes how the engine is put together today.
 - [`docs/METRICS.md`](../METRICS.md) lists every metric family and its labels.
+- [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts) states how a metric family is named, in the framework and in every connector.
 
 ## Where the rest of the repository lives
 

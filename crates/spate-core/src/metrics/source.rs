@@ -26,7 +26,7 @@ pub struct SourceMetrics {
     poll_duration: Histogram,
     rebalance_assign: Counter,
     rebalance_revoke: Counter,
-    lanes_active: OwnedGauge,
+    active_lanes: OwnedGauge,
     partition_lag: PartitionGauges,
     _claim: Option<SeriesClaim>,
 }
@@ -72,7 +72,7 @@ impl SourceMetrics {
     /// gauge writes are dropped.
     ///
     /// A pipeline thread counts its own polls this way without competing for
-    /// `spate_source_lag_records` and `spate_source_lanes_active`,
+    /// `spate_source_lag_records` and `spate_source_active_lanes`,
     /// which only the controller can populate correctly. Use it when a second
     /// instance on the same labels is intended; anything else should use
     /// [`new`](Self::new) or [`try_new`](Self::try_new) and hear about the
@@ -102,7 +102,7 @@ impl SourceMetrics {
                 names::L_EVENT,
                 "revoke",
             ),
-            lanes_active: OwnedGauge::new(labels.gauge(names::SOURCE_LANES_ACTIVE), owned),
+            active_lanes: OwnedGauge::new(labels.gauge(names::SOURCE_ACTIVE_LANES), owned),
             partition_lag: PartitionGauges {
                 name: names::SOURCE_LAG_RECORDS,
                 labels: labels.clone(),
@@ -165,7 +165,7 @@ impl SourceMetrics {
     }
 
     /// Set the number of currently assigned lanes.
-    pub fn set_lanes_active(&self, lanes: usize) {
-        self.lanes_active.set(lanes as f64);
+    pub fn set_active_lanes(&self, lanes: usize) {
+        self.active_lanes.set(lanes as f64);
     }
 }

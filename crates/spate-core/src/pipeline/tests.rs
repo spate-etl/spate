@@ -2026,7 +2026,7 @@ fn rebalances_count_assigned_and_revoked_events() {
     // The gauge reads 1 only after the last assignment, and the controller
     // counts each event before it sets the gauge.
     wait_until(spate_test::HANG, "the last assignment is live", || {
-        spate_test::metric_value(&handle.render(), names::SOURCE_LANES_ACTIVE, &pipeline)
+        spate_test::metric_value(&handle.render(), names::SOURCE_ACTIVE_LANES, &pipeline)
             == Some(1.0)
     });
     h.shutdown.trigger();

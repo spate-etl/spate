@@ -23,7 +23,7 @@ tuning.
 
 ```toml
 [dependencies]
-spate = { version = "0.4", features = ["kafka", "clickhouse", "avro"] }
+spate = { version = "0.5", features = ["kafka", "clickhouse", "avro"] }
 ```
 
 An application depends on this one crate. It re-exports the engine

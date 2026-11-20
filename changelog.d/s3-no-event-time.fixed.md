@@ -1,3 +1,0 @@
-**The S3 source reports no event time for an object without one** (`spate-s3`)
-
-A notification whose event time (`eventTime`, or an EventBridge event's `time`) is absent, does not parse or is the epoch, a re-enqueued unit whose HEAD carried no `Last-Modified`, and a split descriptor object whose `last_modified_ms` is 0, give their records `NO_EVENT_TIME_MS` as `RecordMeta::event_time_ms`. Under `metrics.e2e_basis: event`, a batch in which no record has an event time is aged from ingest. In previous versions these records carried event time 0, and their batch's end-to-end latency counted from 1970. An operator that reads `RecordMeta::event_time_ms` sees `NO_EVENT_TIME_MS` for these records.

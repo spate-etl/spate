@@ -1,5 +1,0 @@
-**Breaking:** **The S3 source reads a descriptor unit's keys only under its prefix** (`spate-s3`)
-
-The S3 source fails a unit back to its feed when the unit's `SplitDescriptor` names a key outside the prefix of the source's `url`. A key is inside the prefix when it starts with the prefix followed by `/`, which is the rule a storage notification's key already met, and the reason given to the feed names the key. In previous versions the source read any key a descriptor named, so anyone who could publish to the SQS queue or the Kafka work topic could make the source read any object in its bucket with its own credentials and deliver the records to the sink.
-
-A source whose `url` names the whole bucket (`s3://bucket/`) still reads every key. Units a lister run publishes are under its own `url`, so a job whose lister and workers name the same `url` needs no change. If you publish descriptors yourself, or run workers under a narrower `url` than the lister, name only keys under each worker's prefix. A unit that names any other key is redelivered up to the feed's delivery cap and then moves to its dead-letter destination.

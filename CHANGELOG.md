@@ -15,6 +15,922 @@ upgrading, and the second is what belongs here.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-20
+
+### Added
+
+- **Cleartext registry password warning** (`spate-avro`)
+
+  A non-empty `registry.password` with an `http://` registry URL now logs one warning when the deserializer is built, naming `deserializer.avro.registry.password`. The pipeline keeps running.
+  ([#2201])
+- **Cleartext password warning** (`spate-clickhouse`)
+
+  A non-empty `password` with an `http://` replica or `distributed_check.endpoint` now logs one warning when the sink is built, and so does a non-empty `password` under `settings` with an `http://` replica. Each warning names its key. The pipeline keeps running.
+  ([#2217])
+- **ClickHouse startup timeout** (`spate-clickhouse`)
+
+  The ClickHouse sink has a new setting, `timeouts.startup`, with a default of `30s`. It bounds each request the sink sends a replica while it is built: the schema read, the settings check and the `distributed_check` queries. A replica that accepts the connection and gives no answer within the bound fails startup with an error naming the replica and the setting. In previous versions the schema read had no bound, so such a replica left the pipeline waiting in startup with no log line. Raise the value if a replica takes longer than 30 seconds to answer `system.columns`.
+  ([#2014])
+- **`spate_core::clock::tokio::before` races a future against a deadline on an injected clock** (`spate-core`)
+
+  `before(clock, at, fut)` returns `Some` with the future's output, or `None` once `clock` reaches `at`. The future is polled first, so an output that is ready as the deadline passes is returned. The deadline still fires when the future spends tokio's cooperative scheduling budget on every poll.
+  ([#1958])
+- **`spate_core::config::Denylist` refuses a passthrough key the connector owns** (`spate-core`)
+
+  A `Denylist` holds the keys a connector owns in one passthrough map, each with the reason it is owned. `Denylist::new` compares keys by exact spelling. `normalized_by` adds the library's mapping of a key to one spelling per setting, applied to both the written key and the owned one, so every spelling the library accepts is refused. `Denylist::check` takes the passthrough's path and its keys and returns a `ReservedKeyError` for the first key that names an owned one. Its message reads `<path>."<key>" cannot be overridden: <why>`, adds which owned key it sets when the key was written another way, and never holds the value. A connector puts its section in front of that message. The items are also available as `spate::config::Denylist` and `spate::config::ReservedKeyError`.
+  ([#1915])
+- **`spate_core::config::SectionPath` builds a config error from a component's section path** (`spate-core`)
+
+  `SectionPath` builds a config error that starts where a component section sits in the file. `SectionPath::source`, `SectionPath::sink` and `SectionPath::feed` give the path for a config built in code, and `ComponentConfig::path` gives the path of a loaded section. `SectionPath::invalid(field, message)` returns `ConfigError::Component` with context `<path>.<field>`, such as `source.kafka.brokers: must not be empty`. `SectionPath::error(message)` returns one with context `<path>`, for an error about the whole section. The type is also available as `spate::config::SectionPath`.
+
+  An error decoding a `sinks:` entry's body with `ComponentConfig::deserialize_into` now starts at the entry's name, such as `sinks.eu.clickhouse.table`. Errors a connector's own validation writes keep their current form. Config load and the pipeline builder report a `chunk:` mistake in the same form, `sinks.eu.clickhouse.chunk.target_bytes: must be greater than zero`, as `ConfigError::Component`. The single `sink:` form reads `sink.clickhouse.chunk.target_bytes: …`. The builder's own sink errors start with `sink` or `sinks.<name>`, such as `sinks.eu: batch.max_rows must be at least 1`.
+
+  In previous versions an error from `ComponentConfig::deserialize_into` on an entry started at `sink.<type>`, with no name. A `chunk.target_bytes` error was a `ConfigError::Validation` that read `sinks.eu: chunk.target_bytes …` at load and `sink "eu": chunk.target_bytes …` at the builder. On the single `sink:` form it named no section. Code that matches these errors by variant or by text needs updating.
+  ([#1930])
+- **`spate_core::config::UrlRule` checks a URL key at load** (`spate-core`)
+
+  A `UrlRule` holds the schemes a URL key accepts and where credentials go instead of the URL. `UrlRule::new` accepts any scheme, and `schemes` limits the rule to a list, compared without regard to ASCII case. `UrlRule::check` returns the parsed `url::Url`, or a `UrlRuleError` for a value that is not a URL, one with no `//` after its scheme, a scheme off the list, or a URL that names a user or a password, checked in that order. A value such as `user:pass@host` parses with the user name as its scheme, so it is refused for having no `//` before the scheme is named. The error message states the problem without the key or the value, such as `must be a URL with scheme http or https; found ftp` or `carries userinfo; set them in user and password`, and a connector puts its key in front of it. The items are also available as `spate::config::UrlRule` and `spate::config::UrlRuleError`.
+  ([#1984])
+- **Cleartext credential warning** (`spate-core`)
+
+  `SectionPath::warn_cleartext_credential` logs one warning when a configured credential is sent without TLS. The line names the credential's key and the setting that leaves the connection unencrypted. Both arguments are `'static` strings, so no value read from the config reaches the line. `SectionPath::deserializer` gives the path of a `deserializer:` section, beside `source`, `sink` and `feed`.
+  ([#2189])
+- **`spate_core::error::chain`, `RateLimit::hot_path` and `spate_core::rng::SplitMix64` for connectors** (`spate-core`)
+
+  `chain(err)` renders an error and each error in its source chain, joined by `": "`. `RateLimit::hot_path()` is the limiter for a warning on the record path, five events per ten seconds, and is `const` so it can initialize a `static`. `SplitMix64::new(seed)` is a seeded generator whose `next_u64` yields the same stream for the same seed on every platform. It is not cryptographic. All three are also available under `spate::`.
+  ([#1985])
+- **Shared TLS trust roots for connectors** (`spate-core`, `spate`)
+
+  A new `tls-roots` feature adds `spate::tls`, which loads the roots a connector's TLS client verifies servers against. It keeps the system certificates that rustls accepts and adds the certificates in a `root_ca` file. It never falls back to a bundled root set: a connector with an `https://` endpoint calls `TrustRoots::require_any`, which fails at load when no usable root remains and names the fixes. `spate::tls::TlsSection` is the `tls:` section with its `root_ca` key. The new `spate::tls_reason!` macro gives the reason text for a rustls error and, for a certificate from an unknown issuer, says where to install its CA. The ClickHouse sink, the Avro registry client, the SQS feed and the S3 source load their roots through it.
+  ([#2181])
+- **The CPU features line at start** (`spate-core`)
+
+  The first pipeline to start in a process logs one `INFO` line under the message `cpu features`. It names the CPU architecture, the SIMD features the build compiles in, and the SIMD features the process can use on the host. In a default x86_64 build, the parsing and decompression libraries a pipeline uses choose their SIMD code from those features at run time. On aarch64, NEON is part of the target's baseline, so the build compiles the NEON code in. A virtual machine can hide features that its CPU has. A feature the build compiles in is always reported as usable, without asking the CPU.
+  ([#2074])
+- **`spate_core::config::check_duration` refuses a duration outside a range** (`spate-core`)
+
+  `check_duration` takes a `Duration` and a `DurationBounds`, which hold a floor, an optional ceiling, and whether `0s` is allowed. Both ends are inclusive. It returns a `DurationBoundsError` whose message states the bounds and the value found, without the key, such as `must be from 20s to 1day; found 5s`. A connector puts its key and the reason for the bound around that message. The items are also available as `spate::config::check_duration`.
+
+  The `checkpoint.interval` refusal uses it. Its message reads `checkpoint.interval must be at least 100ms; found 50ms: …`, and the value is written in configuration form, such as `99ms 500us`. In previous versions it read `checkpoint.interval must be at least 100ms (got 50ms): …`, and a value such as 99.5 milliseconds was written as `99.5ms` in place of `99ms 500us`. The bounds of `checkpoint.interval` and `feed.settling_window` are unchanged, and so is the `feed.settling_window` message.
+  ([#1668])
+- **`spate_core::feed::ConnectError` for a feed backend that cannot connect** (`spate-core`)
+
+  A feed backend's `connect` can return `ConnectError`. `Config` carries a `feed:` section the backend cannot read. `Refused` means starting again fails the same way, and `Unavailable` means a later start may succeed. `Refused` and `Unavailable` name the backend in their text, such as `the Kafka feed cannot start: …` or `Kafka is unavailable: …`. A backend builds one with `ConnectError::refused`, `ConnectError::unavailable`, or `ConnectError::from_class`, which maps `ErrorClass::Retryable` to `Unavailable` and `Fatal` or `RecordLevel` to `Refused`.
+  ([#1904])
+- **Shared helpers for a feed backend's `feed:` section** (`spate-core`)
+
+  A feed backend outside spate-core can read its section with the same rules as the in-process feed. `FeedSection::backend_body` decodes the backend's body and refuses a section that names another backend, with context `feed`. `FeedSection::attempt_cap_or_default` returns the section's `attempt_cap`, or `spate_core::feed::DEFAULT_ATTEMPT_CAP`, which is 10. `FeedError::gone` builds the Gone error for a receipt the feed no longer holds, and `spate_core::feed::memory::BACKEND` is the in-process feed's key, `memory`.
+
+  `MemoryFeed::from_section` refuses `location` and `settling_window` with `ConfigError::Validation`, using the same message as loading a file. In previous versions it returned `ConfigError::Component` with context `feed` and a different message.
+  ([#1866])
+- **Cleartext SASL password warning** (`spate-kafka`)
+
+  A Kafka source, sink, feed or feed publisher whose `rdkafka` passthrough sends a non-empty `sasl.password` with `security.protocol` set to `sasl_plaintext`, in any case, now logs one warning naming `rdkafka."sasl.password"` when its client is built. The pipeline keeps running.
+  ([#2239])
+- **Opt-in `simd-json` encoding for the Kafka sink** (`spate-kafka`)
+
+  With feature `kafka-json-simd` on the `spate` facade, `KafkaJsonEncoder::with_simd_json` serializes a sink's records with `simd-json`, which checks string bytes 16 or 32 at a time. It spends fewer instructions than `serde_json` on records that carry long text, and more on records of short strings and numbers. Only a sink whose encoder calls it changes; every other sink keeps `serde_json`.
+
+  The output is valid JSON that decodes to the same value, with these differences: an `f32` is written as the `f64` it widens to, an exponent carries no `+`, a map with `bool`, `f32`, `f64` or `Option` keys fails the record, and an error carries `simd-json`'s message. A record type that holds `serde_json::value::RawValue`, or a `serde_json::Value` while `serde_json`'s `arbitrary_precision` feature is on, is written wrong with no error, so such a type stays on the default encoder.
+  ([#1927])
+- **Kafka source fails on a partition left off its leader** (`spate-kafka`)
+
+  The Kafka source has a new setting, `misplaced_partition_timeout`, with a default of `60s`. A partition leader move can leave librdkafka fetching an owned partition from a broker that no longer leads it, and the client never moves it back, so the partition stops being consumed with no error. The source now reads each partition's broker and leader from the statistics snapshots. When they differ for longer than the timeout, across at least three snapshots, the source reports a fatal error naming the partition and both brokers, and a restart resumes the partition from its committed offset. The check is off when `statistics_interval` is `0s` or the `rdkafka` map sets a non-empty `client.rack`. Set it to `0s` to turn it off.
+  ([#2250])
+- **The Kafka source can run several consumers per process** (`spate-kafka`)
+
+  `source.kafka.consumers` sets how many consumers the source runs, default `1`. Each consumer is a separate member of the consumer group with its own share of the partitions, and each adds one fetch in flight per broker it reads from. Previously the source always ran one consumer, so every partition was fetched through one connection per broker. Raise the count when the source is bound by fetching, as the Kafka source tuning page describes; on one measured setup with the sink's storage removed, two consumers raised steady-state throughput by 38%, and four and eight by 27–28% at the process's CPU limit. With more than one consumer, consumer `k` sends `client.id` with a `-k` suffix, so a broker quota keyed on the unsuffixed id does not apply to it, and the `spate_kafka_source_*` series carry a `client="consumer-k"` label. Consumer `k`'s lines under the `librdkafka` target carry a `consumer=k` field. `group.instance.id` requires `consumers: 1`. With the default of `1`, the client id, every metric series and every line under the `librdkafka` target are unchanged. At every consumer count, the source sets librdkafka's `fetch.queue.backoff.ms` to 10 ms unless the `rdkafka` map sets it. At librdkafka's 1000 ms, a partition whose queue filled was not fetched again for a second, which left pipeline threads idle once several consumers kept the queues full; at one consumer the change measured no difference in throughput or CPU.
+  ([#1653])
+- **A named value for a record with no event time** (`spate-core`)
+
+  `NO_EVENT_TIME_MS` is `i64::MAX`, and a source reports it as `RecordMeta::event_time_ms` or `RawPayload::timestamp_ms` for a record that has no event time. The event basis of `metrics.e2e_basis` ages a batch from ingest when no record in it has an event time, and a record carrying this value does not change the minimum of the others. A custom source that reports 0 for a record with no event time is still read as an event at the epoch, so it should report `NO_EVENT_TIME_MS` instead.
+  ([#2179])
+- **`rate_limited_warn!` takes the event's instant** (`spate-core`)
+
+  `rate_limited_warn!(limit, at: now, ...)` decides whether to log on the `Instant` it is given, the way `RateLimit::check_at` does. A connector that reads time through an injected clock passes that clock's reading, so a test clock decides when the window rolls. In previous versions the macro always read the system clock. The form without `at:` is unchanged.
+  ([#2183])
+- **`spate_core::feed::ReaderSignal` holds a feed's reader-side state** (`spate-core`)
+
+  A feed implementation keeps `ReaderSignal` inside the state its own lock guards. `set_waker(waker, ready)` holds the reader's waker and wakes it at once when units are ready. `latch(reason)` records a fatal error, keeps the first one, wakes the reader and reports whether this call latched it. `fail_soon(reason)` holds a retryable error for the next `receive`. `check` is the guard at the top of `receive`: it returns the latched error on every call, otherwise the retryable error once. The holder takes no lock of its own, and each wake never blocks, so all of these are safe to call under the feed's lock.
+  ([#1848])
+- **S3 events through EventBridge** (`spate-s3`)
+
+  The S3 source reads the AWS S3 events an EventBridge rule sends to its feed, besides the notifications a bucket sends straight to the queue. An `Object Created` event is read at its key as written, since EventBridge sends the key unencoded, and its object meets the same bucket, prefix, size, key and ETag checks as a notification record's. An event is read only when its `detail.event-version` is `1.` followed by digits. The other types S3 sends to EventBridge, such as `Object Deleted`, are acknowledged with nothing read, and any other type, such as `AWS API Call via CloudTrail`, is failed back to the feed. In previous versions the source failed every EventBridge event back, and the feed dead-lettered it at its cap.
+
+  The reasons the source gives for failing a notification back are reworded. A record for another bucket reads `the object is in the bucket "<bucket>", which this source does not read`, where it read `the record names the bucket`. A record with no size, an ETag `If-Match` cannot carry, or a version the source refuses reads `the object "<key>"`, where it read `the record for "<key>"`, and names a `version id` where it named `versionId`. These reasons appear in the warning `failing an unreadable unit` and in the reason sent with the feed's fail. Update any log search or alert that matches the old text.
+  ([#2180])
+- **The S3 source reads a seeded in-process feed without listing, and ends the run once the feed settles** (`spate-s3`)
+
+  On a `MemoryFeed` passed with `Pipeline::seeded_feed` the source lists nothing. The run ends by itself once every unit is acknowledged or dead-lettered, with no settling window. A dead-lettered unit does not fail the run: the source logs the count at `WARN` and the run exits `ExitState::Completed`, so the code that seeded the feed reads `MemoryFeed::dead_letters` and `MemoryFeed::unsettled` to learn which units were not read. A unit whose batch the sink abandons is failed back to the feed, which delivers it again or dead-letters it at its cap. The source refuses a seeded feed on any other backend at startup. A feed passed with `Pipeline::feed` behaves as before.
+  ([#1959])
+- **The S3 source trusts a private CA through `tls.root_ca`** (`spate-s3`)
+
+  `source: { s3: { tls: { root_ca: <path> } } }` names a PEM bundle whose certificates the source trusts in addition to the system trust store, for its store and credential calls. A file that cannot be read, holds no certificate or holds one that does not parse fails opening the source at `source.s3.tls.root_ca`. The key is refused at load when `url` is not an S3 store, or when `store` sets an endpoint that is not `https://`. With `disable_system_certificates: "true"` under `store`, the source trusts the `tls.root_ca` certificates alone. A certificate from an unknown issuer now fails with a hint to add the issuing CA to the system trust store, or to `tls.root_ca` when the source accepts that key, naming `tls.root_ca` alone with `disable_system_certificates`.
+  ([#2233])
+- **A feed filled in code can be passed as seeded, and `MemoryFeed` names its unsettled units** (`spate-core`)
+
+  `Pipeline::seeded_feed` and `PipelineRuntime::with_seeded_feed` pass a feed that code filled before the run and does not publish into afterwards. The source receives it as the new `FeedOrigin::Seeded`, which tells it that the feed holds the run's whole input. A feed passed to `Pipeline::feed` still arrives as `FeedOrigin::Given`.
+
+  `MemoryFeed::unsettled` returns the units that are neither acknowledged nor dead-lettered. Together with `MemoryFeed::dead_letters`, it names every unit a run did not finish. A run stopped by a shutdown still exits `ExitState::Completed`, so a caller that reports each unit as done or not reads these two lists. An id can appear more than once, because a source may re-enqueue a unit under its own id.
+  ([#1950])
+- **`spate_core::backoff::Backoff` computes a capped exponential retry delay** (`spate-core`)
+
+  `Backoff::new(initial, max)` doubles from `initial` up to `max`. `with_multiplier` sets the growth factor, `with_jitter` the fraction of each delay randomized away, and `with_seed` the seed of that draw. `next_delay` returns the next wait, and `reset` starts the schedule again from `initial`. A delay never exceeds `max`, jitter only shortens it, and it is zero only when `initial` or `max` is. Every method accepts any input without panicking. The constructor and the `with_*` methods are `const`, so a schedule can be declared as a `const` item. The type is also available as `spate::backoff::Backoff`. A sink's `retry` settings behave as before.
+  ([#1693])
+- **`SourceError` and `SinkError` gain constructors and a `class()` accessor** (`spate-core`)
+
+  `new(class, reason)` builds an error of any class, and `fatal`, `retryable` and `record_level` build one of that class. `class()` returns the class of any variant, so a connector reads it without matching on the non-exhaustive enum, and `reason()` returns the cause. `with_class` and `map_reason` return the error with one field replaced. The methods are also available on `spate::error::SourceError` and `spate::error::SinkError`. Error messages are unchanged.
+  ([#1731])
+- **`Source::stalled` tells a source which partitions are stalled behind a failed batch** (`spate-core`)
+
+  The runtime calls `Source::stalled` on each commit tick while a partition's watermark is stalled behind a failed batch, such as one the sink abandoned, and names every stalled partition. A source can revoke the partition's lanes to end the stall and give its input back for another read. A source that does nothing keeps the existing behaviour: `checkpoint.stalled_fail_after` fails the run, and the input replays after a restart. The default implementation does nothing, so existing sources need no change.
+  ([#1974])
+- **A Confluent-framed payload for deserializer tests** (`spate-test`)
+
+  `spate_test::confluent_frame` writes a payload in the Confluent wire format: the magic byte `0x00`, the schema id big-endian, then the payload. It builds the input a schema-registry deserializer reads, such as one in the `avro` feature's `confluent` mode.
+  ([#2128])
+- **A helper that replays a payload until the deserializer is ready** (`spate-test`)
+
+  `deserialize_until_ready` replays a payload through a deserializer until it answers something other than `NotReady`, as the pipeline does, and returns that answer. A closure runs before each replay, so a test can move a test clock or drive the runtime a fetch runs on. Its timeout only catches a hang: past it, the panic says the test hung and carries the last `NotReady` reason.
+  ([#2175])
+- **A log capture for the whole process** (`spate-test`)
+
+  `LogCapture::install_global` installs a `tracing` subscriber at a chosen level as the process's global default and returns its capture. Lines from every thread without a subscriber of its own reach it, including threads a client library starts, which the thread-scoped `capture_logs` does not see. A process has one global subscriber, so a test that calls it needs a test binary of its own, and a second call panics. The lines it captures, and those `capture_logs` and `show_logs` write, carry no ANSI color codes. Before, they carried them when another crate in the build turned on `tracing-subscriber`'s `ansi` feature and `NO_COLOR` was unset or empty, so an assertion on a line's text could fail.
+  ([#2110])
+- **A thread-scoped log capture read during the call** (`spate-test`)
+
+  `LogCapture::during` runs a closure under the subscriber `capture_logs` uses, writing to a capture the test holds, and returns what the closure returns. The test can read that capture from another thread while the closure still runs, for example to wait for the line that names the admin server's address before it stops a pipeline. `capture_logs` returns its lines only once its closure ends. The subscriber is scoped to the calling thread, so the test needs no binary of its own.
+  ([#2113])
+- **`passthrough_runtime` assembles the usual test pipeline** (`spate-test`)
+
+  `spate_test::passthrough_runtime` builds a runtime from a pipeline, a source, a sink and an encoder, with one chain from the source through the encoder to the sink and signal handling off.
+  ([#1715])
+- **A wait that reports the last value it read** (`spate-test`)
+
+  `wait_for_value` polls a read until a predicate holds for its value, and returns that value. When it reaches its bound, the panic says the test hung, as `wait_until`'s does, and adds the last value read, so a hang shows the state the test was stuck on.
+  ([#1931])
+- **The SQS feed trusts a private CA through `tls.root_ca`** (`spate-sqs`)
+
+  `feed: { sqs: { tls: { root_ca: <path> } } }` names a PEM bundle whose certificates the feed trusts in addition to the system trust store, for its SQS, region and credential calls. A file that cannot be read, holds no certificate or holds one that does not parse fails connecting at `feed.sqs.tls.root_ca`, before any certificate reaches the AWS SDK. The key is refused when `endpoint` is set and is not `https://`.
+  ([#2227])
+- **`spate_core::task::ThreadBound` bounds a future on a thread of its own** (`spate-core`)
+
+  `ThreadBound::new(name, limit)` holds a future to a limit that fires on any runtime, including one whose timer nothing drives. `with_clock` times it on an injected clock, and `with_rejection` adds a check that ends the work early. `run` returns the output, or a `BoundError` saying why it ended.
+  ([#1819])
+- **`spate::tls::client_roots` gives a reqwest-based client its trust roots** (`spate-core`, `spate`)
+
+  `client_roots` returns `ClientRoots::Add` on Apple platforms, Windows and Android, where the client keeps reqwest's platform verifier and adds the certificates in a `root_ca` file. Elsewhere it returns `ClientRoots::Only`, the system certificates and the `root_ca` ones, for the client to verify against alone. On those other platforms, with its `needs_root` argument set, an empty set fails at load with `TrustError::NoRoots`. On Android a `root_ca` file fails with the new `TrustError::Unsupported`, because the platform verifier there takes no added roots. `PLATFORM_VERIFIER` says which case applies on the current platform, `is_https` says whether an endpoint string is an `https://` URL, and `SystemRoots::default()` is an empty store for a client whose operator turned the system store off.
+  ([#2245])
+
+### Changed
+
+- **On Android, `registry.tls.root_ca` is refused as a registry client error** (`spate-avro`)
+
+  On Android, a deserializer with `registry.tls.root_ca` set fails to build with `AvroConfigError::Registry` and the text `avro schema registry client: registry.tls.root_ca: is not supported on Android`. In previous versions it failed with `AvroConfigError::Invalid` and the text `avro configuration: registry.tls.root_ca is not supported on Android`. The setting is still refused, so only code that matches on the variant or the text needs updating. Other platforms are not affected.
+  ([#2251])
+- **The Avro deserializer's schema fetch backoff is jittered** (`spate-avro`)
+
+  After a transient registry failure, each later fetch of a schema id waits a random 80% to 100% of its step. The steps still start at 200 ms and double up to 5 s. In previous versions every id waited the exact step, so replicas whose fetches failed together fetched again at the same instants.
+  ([#2202])
+- **Breaking:** **The Avro registry client no longer falls back to the Mozilla root bundle** (`spate-avro`)
+
+  On Linux and other Unix systems other than macOS, an `https://` registry fails the deserializer at startup when the system trust store yields no usable certificate and `registry.tls.root_ca` is not set. The error is at `registry.tls.root_ca` and names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `registry.tls.root_ca` to the CA that signs the registry. In previous versions the client logged a warning and verified the registry against the Mozilla root bundle compiled into the binary. Errors reading the system trust store no longer log at warn: a read that still yields usable certificates logs them at debug, and on an `http://` registry a store that yields none logs nothing. An `http://` registry still starts with an empty store, and a redirect or proxy that takes it to `https://` now fails the handshake with a reason that names the system trust store. macOS, Windows and Android keep the operating system's verifier and are unaffected. `spate_avro::TlsSection` is now `spate::tls::TlsSection`, re-exported under the same path with the same field.
+  ([#2207])
+- **The Avro deserializer's `registry.url` refusals are reworded** (`spate-avro`)
+
+  A `registry.url` carrying a user or password reads `avro configuration: registry.url carries userinfo; set them in registry.username and registry.password`, and one with another scheme reads `registry.url must be a URL with scheme http or https; found ftp`. A value written without `//` after its scheme, such as `localhost:8081`, reads ``registry.url has no `//` after its scheme``. In previous versions they read `registry.url contains credentials; …` and `registry.url must be an http:// or https:// URL`. The set of values refused is unchanged.
+  ([#1991])
+- **The datum Avro deserializer validates long strings with SIMD** (`spate-avro`)
+
+  `AvroDatumDeserializer` checks that strings are valid UTF-8 with the `simdutf8` crate, which uses SIMD on x86_64 and aarch64. A string of 64 bytes or more now takes fewer instructions to validate, and the drop is largest on non-ASCII text. This also covers `bytes` and `fixed` fields decoded into a string. Previously every string was validated by the standard library, which has no SIMD path. A string shorter than 64 bytes goes through a length test and then the standard library's check, so records whose strings are all short take slightly more instructions to decode, under 1% in the crate's decode benchmarks. The value and serde deserializers are unchanged. The same input is accepted and rejected as before, with the same error messages.
+  ([#2246])
+- **The unknown-schema-id warning is limited per Avro deserializer builder** (`spate-avro`)
+
+  The `registry reports schema id unknown` warning is logged at most five times per ten seconds for each builder that `AvroDeserializerBuilder::from_settings` or `from_component` returns. Its clones and every deserializer built from them share that limit. In previous versions the limit covered the whole process, so a process that built two builders logged at most five of these warnings between them. Such a process can now log up to five for each.
+  ([#2184])
+- **Breaking:** **`WatermarkController::tick` takes the queue reading as a closure** (`spate-core`)
+
+  The second argument of `tick` is `impl FnOnce() -> bool`. The controller calls it only while paused, with no rejected send since the last tick and in-flight usage at or below the low watermark. In previous versions the argument was a `bool`, and a pipeline thread read every shard queue of its sinks on each poll to compute it, even while running unpaused. A caller that passed a `bool` now passes `|| value`. Pause and resume decisions are unchanged.
+  ([#2266])
+- **Spate requires `bytes` 1.12.2** (`spate-core`, `spate-clickhouse`)
+
+  Spate now requires `bytes` 1.12.2 or later, which marks `BytesMut::put_slice` as `#[inline]`. The ClickHouse encoders write most values through it, directly or through methods such as `put_u32_le`, so a build without link-time optimization (LTO) now inlines those writes. Previously a build could resolve `bytes` 1.11.1 or 1.12.1, where each of those writes made an out-of-line call unless the binary enabled LTO across crates. Code that uses `bytes` through the `spate_core::bytes` re-export now gets 1.12.2 as well.
+  ([#2276])
+- **ClickHouse configuration errors start at the path of the key they refuse** (`spate-clickhouse`)
+
+  An error from the ClickHouse sink's configuration starts with the path of the key it refuses, then a colon, such as `sink.clickhouse.table: …` or `sink.clickhouse.distributed_check.sharding_key: …`. A rule on one shard or replica names it by index, in the form decode errors already use, such as `sink.clickhouse.shards[0].replicas[1]: must be a URL with scheme http or https; found ftp` or `sink.clickhouse.shards[1].weight: must be at least 1`. A sink built from a `sinks:` entry with `spate_clickhouse::from_component_config` names the entry, such as `sinks.eu.clickhouse.table: …`. An error whose text already names its key starts at the section, such as `sinks.eu.clickhouse: settings."insert_deduplicate" cannot be overridden: …`. A sink built in code with `spate_clickhouse::config::build` reports at `sink.clickhouse`. A section built with `ComponentConfig::new` and never placed in a pipeline config reports at its tag alone, such as `clickhouse.table: …`, as its decode errors already did. These errors are now `ConfigError::Component`. A `SchemaError::Columns` from `with_row` reads ``sink.clickhouse: column `id` is listed more than once``.
+
+  In previous versions these errors were `ConfigError::Validation` and read `invalid configuration: sink.clickhouse: …`, and a sink built from a `sinks:` entry did not name the entry. A `SchemaError::Columns` carried the same `invalid configuration: ` prefix. Two messages also changed their words: `shard 0 has no replicas` now reads `sink.clickhouse.shards[0].replicas: must not be empty`, and `shard 0 weight must be at least 1` reads `sink.clickhouse.shards[0].weight: must be at least 1`. Code that matches these errors by variant or by text needs updating.
+  ([#1935])
+- **The ClickHouse sink's Native encoder no longer allocates for each new `LowCardinality` value** (`spate-clickhouse`)
+
+  A `LowCardinality(String)` or `LowCardinality(Nullable(String))` column looks up each value against the block's dictionary bytes. Previously each value new to a block was also copied into a heap allocation of its own, once per block it appeared in. The bytes sent to ClickHouse are unchanged.
+  ([#2083])
+- **The ClickHouse sink writes LowCardinality keys with fewer instructions** (`spate-clickhouse`)
+
+  The Native encoder writes all of a block's LowCardinality keys in one pass into space it sets aside once, and holds each key in four bytes while the block fills. In previous versions it wrote each key with a separate buffer call and held each key in eight bytes. Tables with LowCardinality columns take fewer instructions to encode, and the bytes sent to ClickHouse are unchanged. A block in which one LowCardinality column reaches 2^32 distinct values, which takes at least 24 GiB, now fails the pipeline with an error that names `chunk.target_bytes`. A smaller `chunk.target_bytes` avoids it.
+  ([#2082])
+- **The ClickHouse sink's lz4 codec reuses its hash tables** (`spate-clickhouse`)
+
+  An lz4 frame allocates no hash table once the codec has coded a chunk of its size: the codec keeps one table for chunks under 64 KiB and one for larger chunks. Compressed bytes are unchanged. Previously every frame allocated a new 8 or 16 KiB table.
+  ([#1816])
+- **Breaking:** **The ClickHouse sink no longer falls back to the Mozilla root bundle** (`spate-clickhouse`)
+
+  A sink with an `https://` replica or `distributed_check.endpoint` fails at startup when the system trust store yields no usable certificate and `tls.root_ca` is not set. The error is at `sink.clickhouse.tls.root_ca` and names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `tls.root_ca` to the CA that signs the replicas. In previous versions the sink logged a warning and verified replicas against the Mozilla root bundle compiled into the binary. A sink with only `http://` URLs reads no trust store and is unaffected. `spate_clickhouse::TlsSection` is now `spate::tls::TlsSection`, re-exported under the same path with the same field.
+  ([#2194])
+- **The ClickHouse sink names the reason a reserved setting is refused** (`spate-clickhouse`)
+
+  A reserved setting in the sink's `settings` map fails at load with the message every connector uses for an owned key, and the reason the sink owns it, such as ``sink.clickhouse: settings."wait_end_of_query" cannot be overridden: forced to `1`: the server answers once the insert and its materialized views are done, and the checkpoint commits behind that answer``. In previous versions it read ``sink.clickhouse: setting `insert_deduplicate` is managed by the sink and cannot be overridden``, with no reason. Only the exact names are refused, because ClickHouse has no alias of them and fails a request that spells one otherwise.
+  ([#1921])
+- **The ClickHouse sink names the batch key it refuses** (`spate-clickhouse`)
+
+  A `sink.clickhouse` section with `batch.max_rows: 0` fails at load with `sink.clickhouse: batch.max_rows must be at least 1`, and one with `batch.max_bytes: 0` fails with `sink.clickhouse: batch.max_bytes must be at least 1`. When both are `0`, the error names `batch.max_rows`. In previous versions both read `sink.clickhouse: batch thresholds must be non-zero`. The values the sink refuses are unchanged, and so are its messages for the `inflight`, `retry` and `breaker` sections. A configuration built in code with an out-of-range `Compression::Zstd` level and a refused `breaker` value reports the `breaker` key, where previous versions reported the zstd level.
+  ([#1725])
+- **The ClickHouse sink writes strings with fewer instructions** (`spate-clickhouse`)
+
+  The RowBinary and Native encoders reserve space once for a string shorter than 128 bytes and its one-byte length, and copy a string of up to 32 bytes without calling libc's `memcpy`. Previously each string made an out-of-line call to write its length and a `memcpy` call to copy its bytes. Rows with many short strings take fewer instructions to encode under either format. The bytes sent to ClickHouse are unchanged.
+  ([#2037])
+- **Datagen source configuration errors start at the path of the key they refuse** (`spate-datagen`)
+
+  An error from the datagen source's configuration starts with the path of the key it refuses, then a colon, such as `source.datagen.partitions: must be at least 1` or `source.datagen.count: (4) is below source.datagen.partitions (8): …`. These errors, from `DatagenSourceConfig::from_component_config` and `DatagenSourceConfig::validate`, are now `ConfigError::Component`. The same text reaches the fatal error `open` returns for a config built in code.
+
+  In previous versions they were `ConfigError::Validation` and read `invalid configuration: source.datagen.partitions must be at least 1`. Code that matches these errors by variant or by text needs updating.
+  ([#1945])
+- **A pipeline thread no longer allocates a list of its lanes on each poll** (`spate-core`)
+
+  A pipeline thread lists the IDs of its lanes only when it asks the source to pause or resume them. Previously it built that list before every poll, including polls that returned nothing, and a pause or resume then copied it again. The saving per poll grows with the number of lanes a thread holds. The lanes a pause or resume names are unchanged.
+  ([#2258])
+- **The JSON deserializer hashes a payload's key once** (`spate-json`)
+
+  A payload that decodes to several records under `ndjson` or `array` framing now computes its record metadata, including the hash of the source key, once and copies it into each record. Previously it hashed the key again for every record. The records are unchanged. Keyed payloads that carry many records take fewer instructions per record.
+  ([#2096])
+- **NDJSON line splitting uses a vectorised search** (`spate-json`)
+
+  `NdjsonFramer` and the deserializer's `ndjson` framing find each line end with the `memchr` crate, which uses SIMD on x86_64 and aarch64. Previously both checked one byte at a time. Records, blank-line handling and record indexes are unchanged, so a source that resumes by record index resumes at the same record. Framing an S3 object takes fewer instructions per byte, most on uncompressed objects.
+  ([#2034])
+- **Kafka configuration errors start at the path of the key they refuse** (`spate-kafka`)
+
+  An error from the Kafka source, sink or feed configuration starts with the path of the key it refuses, then a colon, such as `source.kafka.topic: must not be empty`, `sink.kafka.topic: must not be empty` or `feed.kafka.topic: must not be empty`. A sink built from a `sinks:` entry with `spate_kafka::sink::from_component_config` names the entry, such as `sinks.eu.kafka.topic: must not be empty`. An error that names no single key, or whose text already names its key, starts at the section, such as `sinks.eu.kafka: rdkafka."acks" cannot be overridden: …` or `sink.kafka: producer creation failed: …`. A sink built in code with `spate_kafka::sink::build` reports at `sink.kafka`. A section built with `ComponentConfig::new` and never placed in a pipeline config reports at its tag alone, such as `kafka.topic: must not be empty`, as its decode errors already did. The source's and the sink's errors are now `ConfigError::Component`.
+
+  In previous versions the source wrote `invalid configuration: source.kafka.topic must not be empty` and the sink wrote `invalid configuration: sink.kafka: topic must not be empty`, both as `ConfigError::Validation`, and a sink built from a `sinks:` entry did not name the entry. The feed wrote ``feed.kafka: `topic` must not be empty``. Code that matches these errors by variant or by text needs updating.
+  ([#1933])
+- **Breaking:** **The Kafka feed's `connect` returns `spate_core::feed::ConnectError`** (`spate-kafka`)
+
+  `KafkaFeed::connect` and `KafkaFeedPublisher::connect` return `spate_core::feed::ConnectError`, and `spate_kafka::feed::KafkaFeedError` is removed. The three variants keep their meaning and their text. A match on `KafkaFeedError::Refused(reason)` becomes `ConnectError::Refused { reason, .. }`, and the same for `Unavailable`.
+  ([#1908])
+- **The Kafka feed's write resend backoff is jittered** (`spate-kafka`)
+
+  An attempt, tombstone, retry or dead-letter write that fails transiently now waits a random 80% to 100% of each step before it is sent again. The steps still start at 200 ms and double up to 5 s, and the warn line's `retry_in` field carries the wait drawn. In previous versions every write waited the exact step, so feeds whose writes failed together sent them again at the same instants.
+  ([#2205])
+- **Kafka feed resend warning** (`spate-kafka`)
+
+  The Kafka feed's warning for a write that failed with a retryable error now reads `writing <what> failed; queued to send again after the backoff`. In previous versions it read `sending it again`. A write queued this way is not sent when its partition is revoked, the feed stops or a fatal error is recorded during the backoff, so the old text reported a resend that did not always happen. No unit is lost in those cases: its offset stays unfinished and the unit is read again. Update any log search or alert that matches the old text.
+  ([#2000])
+- **The Kafka sink names the batch key it refuses** (`spate-kafka`)
+
+  A `sink.kafka` section with `batch.max_rows: 0` fails at load with `sink.kafka: batch.max_rows must be at least 1`, and one with `batch.max_bytes: 0` fails with `sink.kafka: batch.max_bytes must be at least 1`. When both are `0`, the error names `batch.max_rows`. In previous versions both read `sink.kafka: batch thresholds must be non-zero`. The values the sink refuses are unchanged, and so are its messages for the `inflight`, `retry` and `breaker` sections.
+  ([#1719])
+- **The Kafka sink no longer allocates a header list per message** (`spate-kafka`)
+
+  The Kafka sink now reads each message's headers directly from the batch it is writing. In previous versions it allocated a list of a message's headers for every message that had any, read the list once and dropped it. Messages without headers are unaffected. What the sink produces is unchanged, and librdkafka still allocates its own copy of each message's headers.
+  ([#1876])
+- **`Pipeline::run` stops waiting for a source or feed to close 3 seconds past the drain deadline** (`spate-core`)
+
+  After the final commit, `run` waits for the source and the feed to close until 3 seconds past `checkpoint.drain_timeout`, or 3 seconds after the close starts when that is later, as after a final commit that ends late or a controller panic. A close still running then is logged at `WARN`, and `run` returns its `ExitReport` while the close goes on in the background with the I/O runtime. In previous versions `run` waited for the close with no limit, so a source or feed whose `Drop` never returned kept `run` from returning. A process that exits once `run` returns stops such a close part way, and a consumer group it was leaving waits out its session timeout. `spate_core::task::ThreadHandle` gains `join_by`, which waits for the thread until a deadline on a given clock, and `is_finished`.
+  ([#2196])
+- **The S3 source refuses the bucket option under `object_store`'s own spellings** (`spate-s3`)
+
+  A bucket key in the `store` passthrough is matched through `object_store`'s parser for S3 options, so every spelling and case it accepts for the bucket option is refused, including one a later `object_store` adds. When the key is written another way than `bucket`, the error also names `bucket`, such as ``source.s3: store."Bucket" cannot be overridden: owned by the typed `url` field (`Bucket` sets the same object_store option as `bucket`)``. In previous versions the error ended after the reason, and the refused spellings were a fixed list of `bucket`, `bucket_name`, `aws_bucket` and `aws_bucket_name`, in any case.
+  ([#1918])
+- **S3 source configuration errors start at the path of the key they refuse** (`spate-s3`)
+
+  An error from the S3 source's configuration starts with the path of the key it refuses, then a colon, such as `source.s3.url: must not be empty`, `source.s3.prefetch_bytes: (1.0 MiB) must be at least chunk_bytes (2.0 MiB)` or `source.s3.store."endpont": is not an object_store S3 option`. A refused bucket key, whose text already names it, starts at the section, such as `source.s3: store."Bucket" cannot be overridden: …`. These errors, from `S3SourceConfig::from_component_config` and `S3SourceConfig::validate`, are now `ConfigError::Component`.
+
+  In previous versions they were `ConfigError::Validation` and read `invalid configuration: source.s3.url must not be empty` or `invalid configuration: source.s3.store."Bucket" cannot be overridden: …`. Code that matches these errors by variant or by text needs updating.
+  ([#1940])
+- **The S3 source opens over `http://` with an empty trust store** (`spate-s3`)
+
+  On Linux and other Unix systems other than macOS, the source reads the system trust store through `spate::tls`. A store called over `http://` now opens when the system trust store yields no usable certificate. A store called over `https://` still fails to open, now at `source.s3.tls.root_ca` with an error that names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `tls.root_ca` to the issuing CA. In previous versions either one failed with "No CA certificates were loaded from the system". A store with `allow_invalid_certificates` set, or with a proxy CA, opens as it did before. macOS and Windows keep the operating system's verifier and are unaffected.
+  ([#2233])
+- **Gzip objects decode through zlib-rs** (`spate-s3`)
+
+  The S3 source now decompresses `.gz` objects with zlib-rs, through `flate2`. zlib-rs uses SIMD code on aarch64, and on x86_64 it chooses its SIMD code from the CPU at run time. In previous versions `flate2` used miniz_oxide. Decoding a gzip object now takes about half the instructions on aarch64 and about 17% fewer on x86_64. The records read from a valid object are unchanged, and a truncated object fails with the same error as before. A corrupt object can now fail sooner, as `corrupt deflate stream`, with fewer of its records read before the failure. If another crate in the build turns on one of `flate2`'s C zlib features, `flate2` uses that library instead.
+  ([#2077])
+- **A refused S3 job location names userinfo, a query and a fragment apart** (`spate-s3`)
+
+  The refusal of a `location` carrying a user or password ends ``carries userinfo; the store does not read it; set credentials under the source's `store` or the environment``. One carrying a query ends ``carries a query, which the store does not read; set credentials under the source's `store` or the environment``, and one carrying a fragment ends `carries a fragment, which names nothing in the location's store`. In previous versions all three read ``carries userinfo, a query or a fragment, which name nothing in the location's store; set credentials under the source's `store` ``. A location written as `user:pass@host/…`, with no `//` after its scheme, ends ``has no `//` after its scheme``, where it was refused for its scheme before.
+  ([#1993])
+- **The S3 source's read retry backoff is jittered** (`spate-s3`)
+
+  An object read or `HEAD` that fails transiently now waits a random 80% to 100% of each step before the next attempt. The steps still start at 200 ms and double up to 5 s over the eight attempts a read gets, so a read that keeps failing now poisons its unit after between 12.96 s and 16.2 s of waits, where before it took exactly 16.2 s. In previous versions every read waited the exact step, so workers whose reads failed together retried at the same instants. The lister's publish retries keep their exact schedule.
+  ([#2203])
+- **Breaking:** **`SinkPoolConfig::validate` checks a sink's `batch`, `inflight`, `retry` and `breaker` sections, and the pipeline builder runs it when it installs a sink** (`spate-core`)
+
+  `SinkPoolConfig::validate` returns a `SinkPoolConfigError` when `batch.max_rows`, `batch.max_bytes` or `inflight.max_per_shard` is `0`, each with a message that names the key, or when `RetryConfig::validate` or `BreakerConfig::validate` refuses its section. `BreakerConfig::validate` refuses `breaker.failure_threshold: 0` with `BreakerConfigError::ZeroFailureThreshold`. `Pipeline::sink`, `sink_with`, `add_sink` and `add_sink_with` return `BuildError::Config` naming the sink and the key when the bundle's pool fails the check. The Kafka and ClickHouse sinks already refused these values at load, so a YAML configuration that started before still starts. In previous versions a sink built in code started with any of them: a zero batch threshold wrote one batch per chunk, a zero failure threshold opened the breaker on the first failure, a zero retry delay retried without sleeping, and a zero `inflight.max_per_shard` panicked in `SinkPool::spawn` with `inflight.max_per_shard must be greater than zero`. A pool spawned directly with `SinkPool::spawn` is not validated, and its zero-inflight panic reads `inflight.max_per_shard must be at least 1`. The error type is also available as `spate::sink::SinkPoolConfigError`.
+  ([#1712])
+- **A stalled partition fails the pipeline no earlier than the second commit tick that finds it** (`spate-core`)
+
+  A partition stalled behind a failed batch now fails the pipeline under `checkpoint.stalled_fail_after` only on a commit tick after the one that first finds the stall. This gives the source a `poll_events` call in which to release the partition through `Source::stalled`. In previous versions, the first tick that found the stall past its limit failed the pipeline. A stall can now fail on a later commit tick than before: when `checkpoint.stalled_fail_after` is shorter than `checkpoint.interval`, when a tick runs late, or when the stall begins during a tick's own commit. A stall that no source releases still fails the pipeline, and no record is lost.
+  ([#1974])
+- **The split terminal checks for a fatal error without visiting every branch** (`spate-core`)
+
+  After each payload, a chain built with `ChainBuilder::split` visits its branches for a fatal error only when the split or one of its branches holds one. Previously it asked every branch after every payload, through one virtual call per branch. `SplitEmitter::emit` is also inlined into the `route` closure whatever the build's `codegen-units` setting. Previously a build with `codegen-units = 1` left it as a call per record. A pipeline that fans out through `split` takes fewer instructions per record, more so with more branches. The fatal error a split reports, and the branch it names, are unchanged.
+  ([#2067])
+- **The SQS feed's call retry backoff is jittered** (`spate-sqs`)
+
+  A receive, publish, delete, fail or hand-back call that fails transiently now waits a random 80% to 100% of each step before it is sent again. The steps still start at 200 ms and double up to 5 s. A delete, fail or hand-back batch is still given up once its next wait would reach the earliest deadline among its units, so a batch whose exact step would have reached that deadline can now be retried. In previous versions every call waited the exact step, so feeds whose calls failed together retried at the same instants.
+  ([#2204])
+- **SQS feed configuration errors start at the path of the key they refuse** (`spate-sqs`)
+
+  An error in the `sqs:` body of a `feed:` section starts with the path of the key it refuses, then a colon, such as `feed.sqs.visibility: must be whole seconds from 3s to 12h; got 2s` or `feed.sqs.queue_url: names a FIFO queue; the SQS feed reads standard queues only`. `SqsFeed::connect` reports a `queue_url` that is not a URL the same way. A refused `attempt_cap` or `settling_window`, which sit beside `sqs:`, still starts at `feed.sqs`, such as ``feed.sqs: `attempt_cap` does not apply to `sqs`: …``.
+
+  In previous versions every one of these errors started at `feed.sqs` and named the key in the message, such as ``feed.sqs: `visibility` must be whole seconds from 3s to 12h; got 2s``. Code that matches these errors by text needs updating. They are `ConfigError::Component` as before.
+  ([#1951])
+- **Breaking:** **The SQS feed's `connect` returns `spate_core::feed::ConnectError`** (`spate-sqs`)
+
+  `SqsFeed::connect` returns `spate_core::feed::ConnectError`, and `spate_sqs::SqsError` is removed. The three variants keep their meaning and their text. A match on `SqsError::Refused(reason)` becomes `ConnectError::Refused { reason, .. }`, and the same for `Unavailable`.
+  ([#1912])
+- **Breaking:** **The SQS feed no longer falls back to the Mozilla root bundle** (`spate-sqs`)
+
+  When the endpoint the feed calls is `https://` and the system trust store yields no usable certificate, connecting fails unless `tls.root_ca` is set. That endpoint is `endpoint`, then one the AWS configuration names, then the region's. The error is at `feed.sqs.tls.root_ca` and names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `tls.root_ca` to the issuing CA. In previous versions the feed logged a warning and verified SQS against the Mozilla root bundle compiled into the binary. A feed with an `http://` endpoint still connects with an empty store, and a credential call over TLS then fails the handshake. A rejected handshake for a certificate from an unknown issuer now says to add the issuing CA to the system trust store, or to `tls.root_ca` when the feed accepts that key.
+  ([#2227])
+- **Dependency requirements** (`spate-avro`, `spate-clickhouse`, `spate-core`, `spate-json`, `spate-kafka`, `spate-s3`, `spate-sqs`, `spate-test`)
+
+  The published manifests of these crates carry new requirements for the
+  dependencies listed below. Cargo resolves your lockfile against these
+  requirements, so a raised requirement can raise the version your project builds
+  with. Each line shows the requirement in this release first, then the
+  requirement in the previous release. A crate can enable more features than a
+  line shows.
+
+  - `aws-types` (`spate-sqs`): `1.7` without default features. New in this release.
+  - `bytes` (`spate-avro`, `spate-clickhouse`, `spate-core`, `spate-kafka`, `spate-s3`, `spate-test`): `1.12.2`. Previously `1.11.1`.
+  - `flate2` (`spate-s3`): `1.1.10` without default features, with features `runtime_detection`, `zlib-rs`. Previously `1.1`.
+  - `hashbrown` (`spate-clickhouse`): `0.17.1` without default features. New in this release.
+  - `memchr` (`spate-json`): `2.7.2`. New in this release.
+  - `rustls-pki-types` (`spate-core`): `1.15.0` without default features, with features `std`. New in this release.
+  - `rustls-webpki` (`spate-core`): `0.103.16` without default features, with features `std`. New in this release.
+  - `serde_path_to_error` (`spate-core`): `0.1.11`. Previously `0.1`.
+  - `simd-json` (`spate-json`): `0.19.0`. Previously `0.18.1`.
+  - `simdutf8` (`spate-avro`): `0.1.5`. New in this release.
+  - `webpki-root-certs` (`spate-sqs`): no longer a dependency. Previously `1.0.10`.
+  - `webpki-roots` (`spate-avro`, `spate-clickhouse`): no longer a dependency. Previously `1.0.10`.
+
+### Fixed
+
+- **Breaking:** **The Avro deserializer refuses a `negative_cache_ttl` under 100ms** (`spate-avro`)
+
+  Building an Avro deserializer with a `negative_cache_ttl` below `100ms`, such as `0s`, fails with an error that names the key, in every mode, `raw` and `single_object` included. In previous versions a `0s` TTL loaded, and a record whose schema id the registry answered with `404` never reached the deserializer's `ErrorPolicy`. Its batch stayed held, and each replay asked the registry again. Set `negative_cache_ttl` to `100ms` or more, or leave the `30s` default.
+  ([#1670])
+- **`DrainBarrier::wait` takes any timeout** (`spate-core`, `spate-test`)
+
+  `DrainBarrier::wait` and `spate_test::DrainBarrierProbe::wait` now wait with no deadline when the timeout is past what the clock can represent, such as `Duration::MAX`. In previous versions such a timeout panicked in the calling thread with an `Instant` overflow. The engine passes bounded timeouts, so this affected a custom `Source` or a test that called `wait` with a very large value.
+  ([#1998])
+- **Breaking:** **`checkpoint.interval` and `checkpoint.drain_timeout` have a one-day ceiling** (`spate-core`)
+
+  A pipeline config whose `checkpoint.interval` or `checkpoint.drain_timeout` is longer than `1day` fails pipeline load with an error that names the key. In previous versions such a value loaded, and one past about 292 billion years panicked the pipeline when the runtime added it to a clock reading. The runtime refuses a config built in code that is over either ceiling when the run starts.
+  ([#1820])
+- **The ClickHouse sink refuses a column type past what ClickHouse accepts** (`spate-clickhouse`)
+
+  Building the sink fails with a schema error naming the column when a declared column's type, as `system.columns` reports it, nests more than 256 levels deep or holds a `FixedString` wider than 16777215 bytes, ClickHouse's own `FixedString` limit. In previous versions a type nested deep enough overflowed the stack and aborted the process while the sink was built, and under `format: native` a very wide `FixedString` padded every value to its width and could exhaust memory. No real table nests a type that deep, and ClickHouse never creates a wider `FixedString`. The schema error shows each table column's type cut after 256 characters.
+  ([#1837])
+- **Breaking:** **The ClickHouse sink deduplicates a retried batch whatever `deduplicate_insert` is set to** (`spate-clickhouse`)
+
+  On ClickHouse 26.2 and later, the `deduplicate_insert` setting decides insert deduplication over `insert_deduplicate`. The sink sets it to `enable` on every insert, so a retried batch is dropped by its token even when the writer's user or profile, or the server default, holds `disable`. In previous versions, any of those or the sink's `settings` set to `disable` landed a retried batch twice.
+
+  `deduplicate_insert` is a reserved setting, so naming it in the sink's `settings` fails at load. The settings check that `with_row` sends each replica carries it too, so a replica that refuses it fails `with_row` with `SchemaError::Settings`, which names the replica and carries the server's reason. Two cases refuse it: a settings constraint that pins `deduplicate_insert` to another value, and a server older than 26.2, which does not know the setting. In previous versions both started, and the first case landed retried batches twice.
+  ([#1949])
+- **Breaking:** **The ClickHouse sink refuses `database` in `settings`** (`spate-clickhouse`)
+
+  A `sink.clickhouse` section whose `settings` map has a `database` key fails pipeline load with the error `sink.clickhouse: settings."database" cannot be overridden: …`. A sink built in code fails in `build`. In previous versions it loaded, and inserts could go to the table in the database named in `settings` while the startup schema check read the table in the typed `database`, or in the user's current database when `database` was unset. This happened on ClickHouse 26.3, 26.8 and 26.10 when the typed `database` was unset, and on 26.8 and 26.10 when it was set. So rows could reach a table that was never checked, and a table there with the same name and compatible columns took them without an error. Set the database with the typed `database` field.
+  ([#1946])
+- **The ClickHouse sink refuses a setting the server does not accept at startup** (`spate-clickhouse`)
+
+  Building the sink sends the `settings` passthrough to every replica, and a setting a replica refuses fails the build with a new `SchemaError::Settings` that carries the replica's URL and the server's message. This covers an unknown name and a value the server cannot parse. An insert answered with `UNKNOWN_SETTING` mid-run is now fatal. In previous versions a misspelled key loaded, and the first batch retried until the drain deadline while the pipeline made no progress.
+  ([#1947])
+- **The ClickHouse sink reads a replica URL's scheme in any case, and refuses one that does not parse** (`spate-clickhouse`)
+
+  A replica or `distributed_check.endpoint` URL is parsed at load, the way the ClickHouse client parses it. A URL whose scheme is written in capitals, such as `HTTPS://ch-1:8443`, loads and counts as `https://` for `tls.root_ca`. A URL that does not parse fails at load, such as `sink.clickhouse.shards[0].replicas[0]: is not a URL: invalid international domain name`. In previous versions a URL in capitals was refused, and one that did not parse loaded, even when it carried a password.
+
+  The refusals read `must be a URL with scheme http or https; found ftp` and `carries userinfo; set them in user and password` after the key. In previous versions they read `URL contains credentials; set them in user and password` and quoted the redacted URL in ``…is not an http(s) URL``. A value written without its scheme, such as `svc:secret@ch-1:8123`, reads ``has no `//` after its scheme``.
+  ([#1990])
+- **`NdjsonFramer` frames a CRLF record at the size cap** (`spate-json`)
+
+  `NdjsonFramer` no longer counts a line's trailing `\r` against `max_record_bytes`. In previous versions a record of exactly `max_record_bytes` failed the stream when its line ended in `\r\n`, and framed when it ended in `\n`. Streams that framed before frame the same records at the same indexes.
+  ([#2099])
+- **Breaking:** **A Kafka consumer assigned more than 10,000 partitions stops** (`spate-kafka`)
+
+  The Kafka source and the Kafka feed now stop with a fatal error, before the consumer is assigned, when their consumer group assigns one consumer more than 10,000 partitions or a partition numbered below zero. For the feed the count covers `topic` and `retry_topic` together. In previous versions an assignment of any size was accepted, and each partition took about 6 KiB, so a large enough assignment could exhaust the process's memory. The source read a negative partition number as partition 0, so an assignment of partitions -1 and 0 gave two lanes that both reported partition 0.
+
+  A pipeline that gives one consumer more than 10,000 partitions, such as a source with `consumers: 1` on a topic that large, now fails to start. A member's share grows when another leaves, and a member alone in the group is assigned every partition. Run enough members, through `consumers` or more processes, that none is assigned more than 10,000 partitions with one member gone.
+  ([#2059])
+- **Kafka broker counters across a broker leaving** (`spate-kafka`)
+
+  The Kafka statistics counters `tx_requests_total`, `tx_bytes_total`, `rx_responses_total`, `rx_bytes_total`, `broker_tx_retries_total`, `broker_req_timeouts_total`, `broker_connects_total`, `broker_disconnects_total` and the per-broker `broker_tx_errors_total`, on each source, sink and feed that reports them, now count every event through a broker leaving the client's statistics and returning. In previous versions each of these held at its highest value after a broker left, until the remaining brokers' totals passed that value, so retries, timeouts and requests in that window were not counted. A returning broker's `broker_tx_errors_total` had the same gap. Dashboards and alerts that use `rate()` or `increase()` on these series need no change.
+  ([#2009])
+- **Breaking:** **The Kafka source refuses a `commit_interval` outside 1ms to 24h** (`spate-kafka`)
+
+  A `source.kafka` section whose `commit_interval` is under `1ms`, `0s` included, or above `24h` fails pipeline load with an error that names `commit_interval`. A source built in code fails when it opens. In previous versions, a value under `1ms` loaded, librdkafka received an `auto.commit.interval.ms` of `0` and never started its commit timer. Offsets were then committed only on rebalance and shutdown, so a restart after a crash replayed every record since the last of those. A value above `24h` was not refused at load: librdkafka keeps only the low 32 bits of the value, so some values failed when the consumer was created and others loaded as a much shorter interval or as `0`. Set a value from `1ms` to `24h`. For a run shorter than a day, `24h` commits only on rebalance and shutdown.
+
+  A Kafka sink or feed `delivery_timeout` above `i32::MAX` milliseconds by less than a millisecond, such as `2147483647ms 1ns`, fails pipeline load with an error that names `delivery_timeout`. In previous versions it loaded, and librdkafka received a `message.timeout.ms` of `2147483647`.
+  ([#1672])
+- **A broker that leaves the Kafka client's statistics reads down** (`spate-kafka`)
+
+  Its `broker_up` and latency gauges on the Kafka source, sink and feed go to `0`. In previous versions they kept their last values for the life of the process, so a broker that was up when it left read as up.
+  ([#1831])
+- **Kafka feed and a transaction marker on the attempt topic** (`spate-kafka`)
+
+  The Kafka feed now admits units when the last offset of an attempt partition is a transaction marker. A marker takes an offset and is never delivered, so the feed's follower now passes it by its read position. In previous versions the follower never counted that offset as read, the gate waited for it for ever, every unit that hashed to that partition stayed unread, and a bounded job never ended. The feed's own clients write no transactions, so this takes another transactional producer writing to the attempt topic.
+  ([#2022])
+- **Kafka feed: `attempt_cap` with an open transaction on the attempt topic** (`spate-kafka`)
+
+  The Kafka feed now dead-letters a failing unit after `attempt_cap` reads while another writer's transaction is open on the attempt topic. In previous versions the feed's attempt follower read only committed records, so it could not see the feed's own attempt writes behind that transaction. Each read of the unit counted as its first, and on Apache Kafka one failing unit was read about 50 times a second until the transaction ended. The follower now reads past open transactions, so another writer's record on the attempt topic counts whether its transaction commits or aborts, and one that is not an attempt record stops the feed. The feed's own clients write no transactions, so this takes another transactional producer writing to the attempt topic.
+  ([#2063])
+- **Kafka feed and an attempt partition whose last record the broker removed** (`spate-kafka`)
+
+  The Kafka feed now admits units on an attempt partition whose last records the broker removed while keeping its high watermark. When the follower stays on the same offset below the watermark for one second, the gate writes a tombstone keyed `spate.fence` to the partition, and the follower reads past the end once it lands. In previous versions a worker that started after the removal read nothing from that partition, the gate waited for the watermark for ever, every unit that hashed to the partition stayed unread, and a bounded job never ended. Redpanda removes a tombstone at the end of a compacted partition once `delete.retention.ms` has passed and the broker leading it has restarted, so this affected attempt topics on Redpanda with the settings the feed's page recommends.
+  ([#2055])
+- **A Kafka feed connect closes its startup check clients before it returns** (`spate-kafka`)
+
+  `KafkaFeed::connect` and `KafkaFeedPublisher::connect` close the two clients their startup checks use before they return. This holds when a rejected credential or TLS handshake refuses the connect, and when the checks run out of time. In previous versions the metadata client kept running for up to 30 seconds after such a refusal and kept reconnecting to the broker. A caller that retried a refused connect more often than that held several of these clients at once. A refusal reported while a check waits on a request it sent to a slow broker returns once that wait ends, within the checks' 30-second bound.
+  ([#1834])
+- **A bounded job on the Kafka feed waits while the group's commit is above a partition's end** (`spate-kafka`)
+
+  A work or retry partition whose group commit is above its end offset counts from its log start in the feed's depth, so a bounded job waits until a worker reads that partition. An unclean leader election leaves such a commit when it truncates a partition. In previous versions the depth read such a partition as drained, and a worker that could not join the group within its settling window ended the job `Completed`, exit 0, over units written after the truncation.
+
+  The feed puts no bound on the wait. A worker that held the partition through the truncation, with nothing written to it since, commits nothing on it, and the job waits until the group rebalances. After 20 depth reads with the commits unchanged, the worker logs an `info` line naming the partition. Starting or stopping any worker in the group ends the wait.
+  ([#2103])
+- **Kafka feed: a held unit whose message retention deletes** (`spate-kafka`)
+
+  A bounded job on the Kafka feed stays open while a worker holds a unit whose message retention has deleted, and the worker reads the unit to its end. The feed's depth counts a partition's lag from the group's commit when the commit is below the log start. In previous versions it counted from the log start, so every peer read the partition as drained and ended. The rebalance a peer's exit caused then took the unit from its holder, and the job could end `Completed` with most of the unit's rows unwritten.
+
+  A rebalance while the unit is held still loses it. The worker that takes the partition next logs a `warn` line naming the offsets it could not read, and counts them in the new `spate_kafka_feed_offsets_skipped_total` counter. A bounded job's workers also commit past offsets below the log start, so a partition whose last messages retention deleted still lets the job end.
+  ([#2109])
+- **A Kafka feed's commit waits a bounded time for its group's answer** (`spate-kafka`)
+
+  A Kafka feed's commit waits up to a quarter of `max.poll.interval.ms`, at most 10 seconds, for the group's answer, and the last commit of a close waits no longer than the close's deadline. A commit with no answer in that time counts as failed, and the feed sends no other commit until the group answers it. A close whose last commit goes unanswered settles as failed, so the units that commit would have finished are read again, and the consumer leaves the group in the background. A periodic commit's wait ends when a close arrives, a revocation during a close waits no later than the close's deadline, and a feed that stops on a fatal error during a close it did not refuse at once waits for the consumer's close no later than that deadline either. In previous versions a commit waited for as long as the coordinator stayed silent or answered slower than `socket.timeout.ms`, so the feed's consumer thread stopped polling, a close never settled, and dropping the feed never returned.
+
+  A close's wait for its writes in flight now ends once half of what the close was given has passed since it began. It used to take half from when the feed's consumer thread took the close, so a close that arrived while the thread read an assignment's committed offsets waited longer.
+  ([#2033])
+- **A bounded job on the Kafka feed fails when a topic its depth reads need is deleted** (`spate-kafka`)
+
+  A bounded job whose dead-letter topic was deleted while it ran never ended: with its work done it read the missing topic again every 15 seconds. The feed's depth reads now fail the job on every error the crate's other consumer reads treat as permanent, which adds a topic the cluster no longer knows, a rejected credential, an invalid topic name and a protocol version the broker does not support. The failure names the topic.
+  ([#2023])
+- **Kafka feed: a rejection only the depth client meets** (`spate-kafka`)
+
+  A Kafka feed now stops with the broker's reason when its depth reader has its credential or TLS handshake rejected, as it does when its consumer, attempt follower or producer meets the same rejection. In previous versions that client only logged the rejection. Its reads then failed on a timeout or a transport error and were repeated, so a bounded job whose work was done neither ended nor failed, and a job with no end ran on with `spate_feed_dead_letter_units` holding its last reading. This could happen when the rejecting broker was one no other client of the feed talked to, such as the leader of the dead-letter partition after a certificate or password rotation.
+  ([#2038])
+- **Dropping a Kafka feed waits for its depth thread** (`spate-kafka`)
+
+  Dropping a `KafkaFeed` now returns once its depth thread has ended and that thread's client has closed. In previous versions the drop left the thread running, so a process could exit beside a live client. A depth read in flight at the drop sends no further request once the feed has stopped, so the drop waits for the request in flight, 5 seconds at most, and then for that client's close.
+  ([#2024])
+- **Kafka feed depth thread panic** (`spate-kafka`)
+
+  A panic on the Kafka feed's depth thread now stops the feed with a fatal error, and a depth read on a feed stopped this way reports that error. In previous versions the thread ended without a trace in the feed's state, every later depth read was retried, and a bounded job that had finished its work never ended. A broker metadata reply naming a topic in bytes that are not UTF-8 causes such a panic. The feed's consumer, gate and follower threads already stopped the feed this way.
+  ([#2007])
+- **Kafka feed: a drop with a revocation queued during its close** (`spate-kafka`)
+
+  Dropping the Kafka feed could hang when a revocation reached a member that held no partitions while the feed closed, and the group coordinator was then lost. The drop now answers a revocation already queued before the consumer closes, as the Kafka source's drop does, and the member then leaves the group. In previous versions the consumer's close answered it after the group had terminated, and the drop did not return. A revocation that queues while the drop runs is still left to the close.
+  ([#2064])
+- **The Kafka feed logs a resend only for a write it queues** (`spate-kafka`)
+
+  An attempt, tombstone, retry or dead-letter write that fails transiently once the feed has stopped or failed logs no line, and its unit is delivered again. The feed previously logged that it would send the write again, and then gave it up.
+  ([#1812])
+- **Dropping a Kafka source or feed returns after a fatal consumer error** (`spate-kafka`)
+
+  Dropping a `KafkaSource` or a `KafkaFeed` whose consumer took a fatal error now returns within 10 seconds, and the consumer's close goes on in the background after that. In previous versions the drop waited for that close, which after some fatal errors never returns, such as a broker answering a member with no `group.instance.id` with `FENCED_INSTANCE_ID`. A pipeline then never returned from `run`. librdkafka's main thread still holds one core until the process exits when the close never returns. No record was lost: nothing is committed after a fatal error, and the next owner reads on from the last commit.
+  ([#2047])
+- **Kafka feed: an assignment on another topic** (`spate-kafka`)
+
+  The Kafka feed now stops with a fatal error when its consumer group assigns it a partition of a topic other than `topic` or `retry_topic`, before the consumer is assigned. In previous versions the feed read the other topic with the pipeline's credentials and delivered its messages as units, or wrote them to the dead-letter topic. A topic name that is not UTF-8 panicked the feed's consumer thread, and a name longer than 512 bytes could crash the process or hang the consumer thread inside librdkafka. A group whose members all use a stock assignor never sends such an assignment.
+  ([#2040])
+- **Breaking:** **A bounded job on the Kafka feed waits for another writer's open transaction, and ends after a transaction marker** (`spate-kafka`)
+
+  The job waits while another writer's open transaction holds a unit on its work or retry topic, and ends `Stalled` when a unit is dead-lettered behind one. In previous versions the feed's depth reads stopped at the last stable offset under librdkafka's default `read_committed`, so such a job ended `Completed` and exited 0 over unread units. The depth reader lists ends at the high watermark, at `read_uncommitted`, and the group's consumer stays at `read_committed`.
+
+  The group commits past transaction markers and aborted records, so a bounded job ends after a marker on its work or retry topic, where it used to wait with every unit read.
+
+  `isolation.level` under `feed.kafka.rdkafka` fails at load for workers and the lister, so remove it. `spate_feed_dead_letter_units` counts offsets, so another writer's transaction on the dead-letter topic shows on it and fails a bounded job as stalled.
+
+  The feed puts no bound on the wait. An operator ends a job held by a hung transaction with the broker's tools or a stop. A stop exits `Completed`, exit 0, with the units unread, and a later worker on the group reads them.
+  ([#1766])
+- **Kafka feed and a message at offset `i64::MAX`** (`spate-kafka`)
+
+  The Kafka feed now stops with a fatal error when a broker returns a message at offset `i64::MAX`, the top of the offset range. The position that commits past a message is one above its offset, and none exists above this one. In previous versions the feed's thread panicked on such a message in a build with overflow checks on. In a release build the committable position wrapped to `i64::MIN`. No committed offset lies past this message, so the feed now stops again at the same message on each restart for as long as the broker returns it. A record at `i64::MAX` on the attempt topic now leaves the attempt follower's read position at that offset. In previous versions the follower's thread panicked there in a build with overflow checks on, which stopped the feed.
+  ([#2048])
+- **The Kafka feed and source read the units below a commit an unclean leader election left above them** (`spate-kafka`)
+
+  Each commit the Kafka feed and the Kafka source send carries the leader epoch of the record before the committed offset. A member assigned a partition whose commit carries an epoch seeks to the commit with it before reading, so librdkafka checks the commit against the partition's leader. When an unclean leader election truncated the log below the commit, the member starts at the point of truncation and reads the units written to the reused offsets below the commit. In previous versions a member started at the commit and never read them. A commit above the partition's end starts from the log start, under the feed and under the source's `latest` and `earliest`. When reading the partition's end fails, the commit is sought as well, and the member can start at the end and read only later writes. Under the source's `latest`, an assignment that also holds a partition with no commit retries the end read instead.
+
+  Under the source's `auto.offset.reset: error`, a detected truncation, or an epoch the leader does not know, fails the source with a fatal error. A leader change that truncated nothing, such as a broker restart, starts at the commit. So does a commit whose epoch has no records left, while the commit is at or above the log start. A partition whose seek librdkafka refuses stays paused until a seek is accepted, and a warning names it once the refusals have lasted a quarter of `max.poll.interval.ms`, at most 10 seconds. A commit with no epoch, such as one an earlier version wrote, still starts unchecked.
+  ([#2117])
+- **A negative committed offset leaves the Kafka source's lag unknown** (`spate-kafka`)
+
+  A partition whose committed offset, as the group coordinator returns it, is negative has no `spate_source_lag_records` series until librdkafka reports a lag. In previous versions the lag was computed from it, so `spate_source_lag_records` read high by the offset's size, and with a high watermark near the largest offset a build with overflow checks panicked.
+  ([#1823])
+- **The Kafka source reports no event time for a message without a timestamp** (`spate-kafka`)
+
+  A message whose timestamp is absent or -1 reports `NO_EVENT_TIME_MS` as its `RawPayload::timestamp_ms` and `RecordMeta::event_time_ms`. Under `metrics.e2e_basis: event`, a batch in which no record has an event time is aged from ingest. In previous versions such a message reported 0, and its batch's end-to-end latency counted from 1970. An operator that reads `RecordMeta::event_time_ms` sees `NO_EVENT_TIME_MS` for these records.
+  ([#2187])
+- **A Kafka source under `auto.offset.reset: error` fails on a missing or out-of-range offset** (`spate-kafka`)
+
+  Under `auto.offset.reset: error`, a partition with no committed offset, such as one added to the topic, fails the source with a fatal error. So does a partition whose fetch offset is out of range, such as a committed offset that retention deleted below or one past the log end. In previous versions the error was retryable. librdkafka stops fetching the partition once it reports the reset, so the pipeline logged one warning and stayed healthy while the partition delivered nothing. A run that met this stall on a new partition stops instead, and stops again on each restart until the group has a valid offset for it.
+  ([#1827])
+- **SASL handshake dropped mid-connect** (`spate-kafka`)
+
+  The Kafka source and the Kafka feed now treat a connection that drops or times out during the SASL mechanism handshake as retryable, so the client reconnects and the run continues. In previous versions the source ended the run and the feed stopped with a fatal error, because librdkafka reports this under the same `Authentication` code as a refused login. A broker restart could cause it for any client reconnecting during the restart. A login the broker refuses is still fatal.
+  ([#2001])
+- **Breaking:** **The Kafka sink refuses a `delivery_timeout` under 1ms** (`spate-kafka`)
+
+  A Kafka sink `delivery_timeout` below `1ms`, such as `500us`, fails at load with an error that names the key. The sink passes the value to librdkafka as `message.timeout.ms` in whole milliseconds. In previous versions such a value loaded and reached librdkafka as `0`, which librdkafka reads as no timeout. A write still failed at its own deadline, but librdkafka kept that write's messages queued with no expiry while the retry produced them again. Set `delivery_timeout` to `1ms` or more.
+  ([#1665])
+- **Kafka sink: four more producer errors are fatal** (`spate-kafka`)
+
+  A Kafka sink delivery report that carries `UnknownProducerId`, `Fenced`, `Inconsistent` or `GaplessGuarantee` now fails the run as fatal, as the Kafka feed's producer already treats them. In previous versions the sink classed each as retryable and sent the batch again, until librdkafka's own fatal error for the idempotent producer ended the run on a later produce. The Kafka feed's writes take the same class.
+  ([#2032])
+- **The Kafka sink refuses a topic name over 512 bytes at build** (`spate-kafka`)
+
+  A `sink.kafka` section whose `topic` is longer than 512 bytes fails pipeline load with an error that names `topic`. Previously the sink built, and its readiness probe panicked on every call and reported the failure as retryable. A name that long never worked, so no working pipeline is affected.
+  ([#1818])
+- **A Kafka source under `latest` resumes a commit below the log start at the log start** (`spate-kafka`)
+
+  Under `auto.offset.reset: latest`, the default, a committed offset below the log start resumes at the log start. In previous versions the fetch out of range moved the partition to its end, and the next commit passed every record the log still held in between, though no sink had written them. A group that was stopped or lagging while retention moved the log start past its commit reached this.
+
+  A committed offset past the log end, which a log truncation can leave, also resumes at the log start, where it moved to the end before. The partition's retained records are read again.
+
+  Records already skipped are not recovered. A partition with no committed offset still starts at its end under `latest`.
+  ([#1880])
+- **Dropping the Kafka source returns with an assignment queued** (`spate-kafka`)
+
+  Dropping the Kafka source returns when librdkafka has an assignment queued. The source also serves each consumer's queue before releasing it, so a revocation already queued is answered before the close. In previous versions, a queued assignment could leave a consumer's close waiting forever, so `run` never returned. This needed a consumer with no group leave pending: one the group had fenced, one with a `group.instance.id`, or one whose coordinator was unavailable. On such a consumer, a revocation that queues during the drop can still leave its close waiting, and the drop returns after 10 seconds while that close goes on in the background. Offsets were not at risk, because the final commit had already run.
+  ([#1695])
+- **A Kafka source's stop ends while its group coordinator is silent** (`spate-kafka`)
+
+  The synchronous commit a Kafka source makes at a revocation and at a stop waits up to 10 seconds for the group's answer. A commit with no answer in that time counts as failed. It can still land later, and if it does not, its partitions are read again from their last committed offset. When the source closes, it waits up to 10 seconds for its consumers' close, which goes on in the background if the coordinator has not answered. In previous versions both the commit and the close waited for as long as the coordinator stayed silent, so a stop never ended and `checkpoint.drain_timeout` did not bound it, and a revocation could hold the run past `assignment_timeout`.
+  ([#1994])
+- **Kafka source: an assignment on another topic** (`spate-kafka`)
+
+  The Kafka source now fails the run when its consumer group assigns it a partition of a topic other than `source.kafka.topic`, under every `auto.offset.reset` and before the consumer is assigned. In previous versions the source fetched the other topic with the pipeline's credentials and dropped its records, and a topic name longer than 512 bytes could crash the process inside librdkafka. A group whose members all use a stock assignor never sends such an assignment.
+  ([#2027])
+- **The Kafka source commits past transaction markers** (`spate-kafka`)
+
+  The Kafka source commits past a transaction marker, and past an aborted transaction under `read_committed`, once every record below it is acknowledged. `spate_source_lag_records` and the broker's group lag read 0 on a caught-up partition written by a transactional producer. In previous versions the committed offset stopped at the last delivered record, so lag stayed above zero on an idle partition and an alert on it fired on a healthy pipeline. No delivered record is skipped. A group switched to `read_uncommitted` afterwards does not deliver the aborted records it has already passed. A caller driving a `KafkaLane` by hand can get `Ok(Some(batch))` from `poll` with no payloads, where it got `Ok(None)` before.
+  ([#1727])
+- **Kafka source committed-offset read and a short poll interval** (`spate-kafka`)
+
+  The Kafka source now bounds the committed-offset reads it makes before an assignment by a quarter of `max.poll.interval.ms`, at most 10 seconds. In previous versions the bound was 10 seconds whatever the interval. With `max.poll.interval.ms` set under 10 seconds, a coordinator that answered slowly could hold the read past the interval, and librdkafka then left the group and the group rebalanced again. No record was lost. Under the shorter bound a read that does not finish in time holds the offered partitions and is tried again. The Kafka feed already bounded its read this way. With the default interval of 300 seconds the bound stays 10 seconds.
+  ([#2019])
+- **Kafka source and a record at offset `i64::MAX`** (`spate-kafka`)
+
+  The Kafka source now stops with a fatal error when a broker returns a record at offset `i64::MAX`, the top of the offset range. The position that commits past a record is one above its offset, and none exists above this one. In previous versions the pipeline's controller thread panicked on such a record in a build with overflow checks on. In a release build the committable position wrapped to `i64::MIN`, so the source committed nothing more for that partition. In both versions the partition was read again from its last commit after a restart, and no record was lost. No committed offset lies past this record, so the source now stops again at the same record on each restart for as long as the broker returns it.
+  ([#2020])
+- **The Kafka source refuses a subscription pattern as its topic** (`spate-kafka`)
+
+  A `source.kafka.topic` with a leading `^` fails pipeline load with an error that names the topic. Previously the pipeline opened and delivered no record, with no error. A pattern never read a record, so no working pipeline is affected.
+  ([#1813])
+- **Breaking:** **A Kafka partition with no committed offset keeps its first position under `latest`** (`spate-kafka`)
+
+  Under `auto.offset.reset: latest`, the default, the source commits a partition's end offset before it first reads the partition, and every later start resumes from a committed offset for as long as the group holds it. In previous versions the partition restarted at its end and the next commit moved past records no sink wrote: on a restart of a quiet partition, a restart with the sink down, a process joining the group, and a member the group removed.
+
+  Records already skipped are not recovered. Moving the group's committed offset back is the only route to them. On the first start after upgrading, a partition with no commit starts at its end once more.
+
+  A pipeline can stop where it ran before. A record the chain fails on, or a corrupt message, among a partition's first records stops the source again after a restart, until the committed offset is moved past it; in previous versions the partition started past it under `latest`. A committed-offset read or a start commit that keeps failing holds the assignment until `startup_timeout` or `assignment_timeout` ends the run, and a permanent refusal such as a failed group authorization stops the run at once.
+
+  A partition added to the topic still starts at its end under `latest`, and a group left empty past its offset retention starts at the end again. A partition with a commit, and `earliest` and `error`, start as before.
+  ([#1723])
+- **Breaking:** **The Kafka source, sink and feed refuse a `statistics_interval` outside 1ms to 24h** (`spate-kafka`)
+
+  A `source.kafka` or `sink.kafka` section whose `statistics_interval` is above zero and under `1ms`, such as `500us`, fails pipeline load with an error that names `statistics_interval`. So does a `source.kafka`, `sink.kafka` or `feed.kafka` section whose value is above `24h`. A source built in code fails when it opens, and a sink built in code fails in `build`. In previous versions, a value under `1ms` loaded, librdkafka received a `statistics.interval.ms` of `0` and sent no statistics. The source and sink still registered their `spate_kafka_source_*` and `spate_kafka_sink_*` families, which never updated, so `spate_kafka_source_group_healthy` stayed at `0`. The source's `spate_source_lag_records` series did not exist, and the source logged no warning about it. A value above `24h` failed when the client was created. librdkafka keeps only the low 32 bits of the value, so `2^32` milliseconds read as `0` and turned statistics off, and a value a little above `2^32` milliseconds loaded as a much shorter interval. Set `0s` to turn statistics off, or a value from `1ms` to `24h`.
+  ([#1662])
+- **A process using `kafka-tls` keeps its exit status when it exits beside a connecting client** (`spate-kafka`)
+
+  A process that exits while a Kafka client is in a TLS handshake ends with its own exit status. In previous versions, it could end with SIGSEGV or SIGABRT instead, because OpenSSL's exit handler freed state the client's threads were using. A refused `connect` on a feed or publisher reached this when the process exited straight after it, since the metadata client stays alive after the call returns. A job runner reads such a signal as a failed job, though records and commits were not affected. Spate leaves OpenSSL's exit handler unregistered when it builds a client. An application that reaches OpenSSL first keeps the handler and can still see the signal, as when it builds its own rdkafka TLS client before its first Spate client.
+  ([#1811])
+- **A Kafka batch that does not decompress stops the source or feed** (`spate-kafka`)
+
+  A fetched batch whose payload does not decompress fails the source, or stops the feed, with a fatal error before any record after it is delivered. librdkafka reports the batch on every fetch that reads it, and in previous versions the error was retried without end, so the partition delivered nothing and a bounded job on the feed over it never ended. The committed offset stays before the batch, so a restart on the same group stops on it again until the group's offset is moved past it. A zstd batch that decompresses to more than `receive.message.max.bytes` is reported the same way, and the error names that setting as a possible cause.
+  ([#1829])
+- **A source that fails to open is not asked to flush its commits** (`spate-core`)
+
+  A run whose source fails to open logs only the open failure. Previously it also logged `final commit flush failed; offsets will replay`, though nothing had been read. The Kafka source's flush reported `source used before open()` there.
+  ([#1826])
+- **`LogFormat::Pretty` keeps each event on one log line** (`spate-core`)
+
+  A control character or line separator in a message or field, such as a line break in a broker's refused login text or an escape sequence in an object key, is written as an escape like `\n` or `\u{1b}`. It could previously start a log line of its own, or move a terminal's cursor to look like one.
+  ([#1817])
+- **A refused S3 read classifies by the store's status whatever the key holds** (`spate-s3`)
+
+  A notification unit's read is treated as an overwrite on a `416` only when the store answered with that status. In previous versions a `403` or `404` read of a key holding the text `Server returned non-2xx status code: 416 `, or a `503` whose response body held it, was taken for a `416`. A `403` then went to the HEAD that checks for an overwrite: when the HEAD answered with the pinned ETag the unit was failed back to the feed instead of failing the pipeline, and when it answered another ETag the key was re-enqueued. A `404` could be reported as an overwrite.
+  ([#1825])
+- **S3 source and an oversized error answer** (`spate-s3`)
+
+  The S3 source now reads at most 64 KiB of the body of a store's failure answer. In previous versions the client read the whole body into a buffer sized from the answer's declared `Content-Length`. An answer declaring a very large length made the process panic or abort with no error naming the store, and an answer with a body of hundreds of megabytes could exhaust the process's memory. The error the source reports is unchanged: it carries the status and the first 512 characters of the body. A successful listing page is still read whole.
+  ([#2021])
+- **An S3 lane takes any poll timeout** (`spate-s3`)
+
+  `S3Lane::poll` caps its deadline at a year, so a poll waiting for a chunk gives up at a year when its timeout is longer. In previous versions a timeout past what the clock can represent, such as `Duration::MAX`, panicked the pipeline thread with an `Instant` overflow. The engine passes `RuntimeOptions::poll_timeout`, ten milliseconds by default, so this affected a runtime or a test that set it over a year.
+  ([#2069])
+- **S3 listing whose continuation token does not advance** (`spate-s3`)
+
+  An S3 lister run now fails with a fatal error when the store answers a listing page with the continuation token the request carried. In previous versions the client asked for the same page without end: the lister published and read the same objects again, held a CPU core and never finished. Only a defective store, a proxy in front of one, or a rewritten plaintext connection answers a listing this way. The supported stores start each page past the last key of the one before.
+  ([#2031])
+- **A listing over a missing bucket is non-retryable** (`spate-s3`)
+
+  A listing the store answers `404`, as AWS S3, Garage, RustFS and Ceph RGW do for a bucket that does not exist, fails with a `Fatal` error, as a read of the same bucket does. In previous versions its class was `Retryable`, so a caller of `list_once` that retried on that class retried a listing that could not succeed. A lister run fails on the error either way.
+  ([#1822])
+- **The S3 source reports no event time for an object without one** (`spate-s3`)
+
+  A notification whose event time (`eventTime`, or an EventBridge event's `time`) is absent, does not parse or is the epoch, a re-enqueued unit whose HEAD carried no `Last-Modified`, and a split descriptor object whose `last_modified_ms` is 0, give their records `NO_EVENT_TIME_MS` as `RecordMeta::event_time_ms`. Under `metrics.e2e_basis: event`, a batch in which no record has an event time is aged from ingest. In previous versions these records carried event time 0, and their batch's end-to-end latency counted from 1970. An operator that reads `RecordMeta::event_time_ms` sees `NO_EVENT_TIME_MS` for these records.
+  ([#2188])
+- **An S3 ranged read stops at the range it asked for** (`spate-s3`)
+
+  A ranged read whose response body runs past the requested range fails the object as undecodable once the body passes the range, and the error names the key, the offset and the requested length. In previous versions the fetcher buffered the whole body and handed the extra bytes on as object content, so a store that answered outside the protocol could break the read-ahead memory bound and corrupt the records framed from that window. A conforming store sends exactly the range and sees no change.
+  ([#1835])
+- **A stop before a bounded job ends says so in the log** (`spate-s3`)
+
+  A run that stops before the worker sees its bounded job end logs one `info` line naming the bounded job. A stop exits `Completed` with units unread, and this line tells that run from one whose job ended.
+  ([#1815])
+- **S3 URL on a host form the client does not read** (`spate-s3`)
+
+  An S3 source `url` on an `amazonaws.com` or `r2.cloudflarestorage.com` host the client does not parse now fails when the pipeline loads, with an error at `source.s3.url`. This covers `https://s3.amazonaws.com/<bucket>/`, the `s3-<region>` forms, the host of another AWS service and an R2 host with no account. In previous versions such a URL loaded, and the source failed at start with `URL did not match any known pattern for scheme`, which did not name the setting. The S3 source page's `url` row lists the host forms the source reads. Write one of those, or `s3://<bucket>/<prefix>` with the region or endpoint under `store`.
+  ([#1999])
+- **Breaking:** **The S3 source refuses credentials in its URL or store endpoint at pipeline load** (`spate-s3`)
+
+  A `source.s3.url` carrying userinfo or a query, or a `store` endpoint carrying userinfo, fails pipeline load with an error that names the field, keeps the password out, and says credentials go under `store` or the environment. A `store` endpoint that is not a URL, or has no `//` after its scheme, fails at load too, such as `source.s3.store."endpoint": is not a URL: relative URL without a base`. In previous versions such a password loaded, was never sent, and could appear in the error a failed run returned and in its log.
+  ([#1839])
+- **Breaking:** **The S3 source refuses a URL scheme it cannot read at pipeline load** (`spate-s3`)
+
+  A `source.s3.url` outside `s3://`, `s3a://`, `file://` and `https://` on an S3 host, such as `gs://`, `az://` or `https://` on another host, fails pipeline load with an error that names `source.s3.url` and says how to reach an S3-compatible store. In previous versions it loaded and failed when the source started, unless the binary enabled the `object_store` `gcp`, `azure` or `http` feature itself, in which case the source read that store.
+
+  A `source.s3.url` whose prefix has an empty segment, a control character or bytes that are not UTF-8 also fails pipeline load. In previous versions it loaded and failed when the source started.
+  ([#1814])
+- **`simd` decoding rejects input it used to misread** (`spate-json`)
+
+  Under the `simd` feature, the inputs below are now malformed decode errors. In previous versions each one decoded to a value the document does not hold, and the record reached the sink.
+
+  - A high surrogate escape with no low surrogate escape after it decoded as a NUL character, so `"\ud800"` became `"\0"`.
+  - A very large exponent wrapped around, so `1e4294967296` decoded as `1.0` and `1e4294967295` as `0.1`.
+  - An array longer than the tuple, tuple struct, fixed-size array, tuple variant or struct it decodes into lost its extra elements.
+  - An integer map key with a leading `+` or a leading zero, such as `"+1"`, `"01"` or `"-01"`, decoded as a number, and so did `"-0"`.
+
+  Two inputs that failed now decode: an `i128` or `u128` map key, and a number with an exponent of many digits whose value is or rounds to zero, such as `0e99999999999` or `1e-99999999999`.
+
+  Each case now matches the default `serde_json` backend, except an `i128` map key `"-0"`, which `serde_json` decodes as `0`. Under `on_error: skip` the record is dropped, or the whole payload with `array` framing, and under `on_error: fail` decoding fails.
+  ([#1920])
+- **Breaking:** **`batch.linger` and `inflight.max_per_shard` have ceilings** (`spate-core`)
+
+  A sink whose `batch.linger` is longer than a year, or whose `inflight.max_per_shard` is above tokio's `Semaphore::MAX_PERMITS`, fails pipeline load with an error that names the key. In previous versions such a value loaded. A `max_per_shard` over the limit panicked the shard worker as it started, and a `linger` past about 292 billion years panicked it on the first chunk. `SinkPool::spawn` panics on an out-of-range `max_per_shard` as it does on zero, and seals a `linger` over a year at a year. A year is the year a config file writes as `1y`, 365.25 days, so `breaker.open_for: 1y`, refused in previous versions, now loads. `RateLimit` takes a window of any length. The new `clock::deadline_after` adds a duration to a clock reading with the duration capped at `clock::LONGEST_DEADLINE`, one year.
+  ([#2050])
+- **`SinkPool::drain` returns for any deadline** (`spate-core`)
+
+  A `drain` deadline longer than a year counts as a year. Previously a deadline past the clock's range, such as `Duration::MAX`, panicked.
+  ([#1828])
+- **Sink replicas no longer retry a batch at the same instant** (`spate-core`)
+
+  Each sink pool now seeds its retry jitter from a value that differs between processes, combined with the shard and the batch's sequence number. Replicas whose writes fail together spread their retries across the `retry.jitter` window. In previous versions the seed was the sequence number alone, so batch _n_ of every replica, and of every shard in one pool, waited the same delay. The `retry` settings and the range of each delay are unchanged.
+
+  For connector authors, `spate_core::rng::fresh_seed` returns such a seed, `Backoff::with_fresh_seed` makes each copy of a `const` schedule seed itself on its first delay, and `spate_core::backoff::DEFAULT_JITTER` (0.2) is the jitter fraction `retry.jitter` defaults to.
+  ([#2190])
+- **The `spate-test` condition waits and memory source accept a timeout past the clock's range, and `wait_until` takes a hang bound** (`spate-test`)
+
+  `wait_until`, `LogCapture::wait_for`, `LogCapture::wait_for_line`, `SourceHandle::wait_committed`, and the `poll_events` and `poll` calls of `MemorySource` and `MemoryLane` treat a timeout too large for `Instant`, such as `Duration::MAX`, as no deadline. In previous versions they panicked with `overflow when adding duration to instant`.
+
+  The new constant `spate_test::HANG`, one minute, is the bound to pass a wait for a condition a working test always reaches. A wait's timeout is meant to catch a hang. A test of how long something takes belongs on a test clock or paused tokio time. When `wait_until` or `LogCapture::wait_for` reaches its bound, the panic message reads `hung after 60s waiting for: …`. In previous versions it read `timed out after 60s waiting for: …`. A test that matches the old text needs updating.
+  ([#1852])
+- **An SQS feed's close takes any bound** (`spate-sqs`)
+
+  `SqsFeed::close` gives up at most a year out, so a bound over a year gives up at a year. In previous versions a bound past what the clock can represent, such as `Duration::MAX`, panicked the feed's close and settle tasks with an `Instant` overflow, and the close never confirmed. The runtime closes the feed with what is left of `checkpoint.drain_timeout`, at most a day, so this affected a caller that closed the feed directly with a bound over a year.
+  ([#2070])
+- **`SqsFeed::connect` returns within 30 seconds on a current-thread runtime** (`spate-sqs`)
+
+  `SqsFeed::connect` ends with `ConnectError::Unavailable` once 30 seconds pass, on any runtime its handle comes from. In previous versions, given the handle of a current-thread runtime with no other thread running `Runtime::block_on`, it never returned. On such a runtime the call still cannot reach SQS, so it ends at the bound: give `connect` a multi-thread runtime's handle. Its `# Panics` section also names a runtime built without its timer or its I/O driver.
+  ([#1838])
+- **The SQS feed logs its stop once** (`spate-sqs`)
+
+  The SQS feed logs `the SQS feed stopped` once, for the first error it cannot recover from. In previous versions, a second such error from another of the feed's tasks logged the line again, with the second error's text.
+  ([#1856])
+- **Breaking:** **The SQS feed refuses a URL carrying a user or password, and an endpoint that is not http or https** (`spate-sqs`)
+
+  `queue_url` and `endpoint` must each be an `http` or `https` URL with no user or password, and a value that is not fails at load, such as `feed.sqs.endpoint: carries userinfo; credentials come from the AWS SDK's default provider chain`. In previous versions a `queue_url` or `endpoint` carrying a user or password loaded, and the SDK logged the endpoint at debug level and quoted it in its errors. An `endpoint` with any scheme also loaded.
+
+  A `queue_url` with another scheme reads `feed.sqs.queue_url: must be a URL with scheme http or https; found ftp`. In previous versions it read ``must be an http or https URL; got scheme `ftp` ``.
+  ([#1989])
+- **The watermark age gauge counts a batch that stays pending** (`spate-core`)
+
+  `spate_checkpoint_watermark_age_seconds` reports how long the longest-waiting partition watermark has waited on its head batch, whether that batch is pending or failed. In previous versions it counted only a batch that had failed, so it read 0 while a sink retried without limit under the default `retry.max_attempts: 0`. The documented alert can now fire during such an outage, and it needs no condition on the source record rate. A healthy pipeline at low volume reads up to `checkpoint.interval` plus the longest sink `batch.linger` plus the write, so keep an alert threshold above that. `/healthz` and `checkpoint.stalled_fail_after` are unchanged and still count only a failed batch.
+  ([#2105])
+- **Zero `max_records` is refused** (`spate-core`)
+
+  `PipelineRuntime::run` now returns `StartError::Config` when `RuntimeOptions::max_records` is `0`. In previous versions the run started, and what happened next depended on the source. A source whose lane returns nothing for a poll of zero, such as the in-memory test source or the datagen source, read no records and the run exited `Completed` on stop. The S3 source panicked on its first poll, and the Kafka source read one record per poll. No YAML key sets this value, and the default stays `512`, so only code that builds `RuntimeOptions` with a zero is affected. Set it to `1` or more.
+  ([#1997])
+
+### Security
+
+- **Breaking:** **The admin server bounds its connections** (`spate-core`)
+
+  The admin server serves at most 256 connections at once, across all clients (`spate_core::admin::MAX_CONNECTIONS`). A connection accepted past that closes the oldest one it serves, so `/healthz` and `/readyz` are still answered while slow clients hold the rest. Each connection carries one request and closes after 30 seconds at the latest (`CONNECTION_DEADLINE`), whether or not the client has finished sending the request or reading the response. When `accept` fails, for example because the process is out of file descriptors, the server logs a warning and tries again a second later. A failure that concerns one connection, such as a client resetting it before the server accepts it, is skipped without a pause. In previous versions any client that could reach the admin port could open connections without limit and hold each one open, which could exhaust the process's memory or file descriptors, and a failed `accept` stopped the admin server for the life of the process.
+
+  `AdminServer::run` returns `()`, and returns only on shutdown. In previous versions it returned `io::Result<()>`, so a caller that handled its error drops that handling. `run` needs a tokio runtime with its time driver enabled, through `enable_time` or `enable_all`. The pipeline's own runtime enables it.
+  ([#2286])
+- **Breaking:** **The Avro value and serde deserializers refuse a datum that recurses too deep through a recursive `reader_schema`** (`spate-avro`)
+
+  With a `reader_schema` that recurses through a union, `build_value` and `build_serde` weigh each datum before they resolve it. A value weighs one, plus one for each 64 bytes of content it holds, doubled for each time its path has already passed through the union it is under. A datum is refused when its doubling adds more than 1,024, and more than three times what it weighs with no doubling. Where the datum's encoded length in bytes is less than that undoubled weight, the length takes its place. A refused datum is a malformed record and follows the deserializer's Skip or Fail error policy. In previous versions the time to resolve such a datum doubled with each level, and one record of under 60 bytes held a pipeline thread for more than a minute. A list whose `next` field is `["null", "Node"]` now resolves up to 9 nodes when its nodes have one other field, and up to 5 nodes when they have 40. Deeper datums that 0.4.0 resolved are refused. A reader schema that does not recurse is not affected, and neither is a pipeline with no `reader_schema`.
+  ([#2286])
+- **Breaking:** **Compiled schemas no longer grow the schema cache without bound** (`spate-avro`)
+
+  The schema cache holds at most 1,024 compiled schemas and an estimated 64 MiB of them. At either bound it evicts the oldest schema that no record has used since the cache last considered it, and an evicted id is fetched again on its next record. In previous versions every compiled schema stayed for the life of the process, so a producer writing records with many distinct registered schema ids to a Confluent wire-format topic grew the pipeline's memory until the process was killed. A registry schema estimated to hold more than 64 MiB once compiled is now refused: its id is negatively cached and its records take the error policy, where in previous versions it decoded. The estimate is 20 bytes for each byte of the schema's JSON, and 20 more for each byte of a record, enum or fixed, once per name it has and again inside each record that holds it. A schema refused this way has to be registered with fewer aliases or less nesting, or split into named types referenced by name; no setting raises the bound. The `schema fetched and compiled` line is rate-limited, and a rate-limited warning reports evictions.
+  ([#2286])
+- **The Avro registry fetcher bounds its queue of requested schema ids** (`spate-avro`)
+
+  A schema id that is waiting for a fetch is queued once, and at most 1,024 ids wait at a time. In previous versions, every replay of a payload whose schema was not cached added a request to an unbounded queue, and the fetcher stopped reading that queue while four fetches were running. While a registry held its requests open, payloads naming several distinct unknown schema ids grew the queue until the process ran out of memory. No action is needed.
+  ([#2286])
+- **Breaking:** **The Avro value and serde deserializers refuse deeply nested and oversized datums** (`spate-avro`)
+
+  `build_value` and `build_serde` check each datum before decoding it, and refuse a datum nested more than 32 levels deep, one whose arrays and maps claim more items than the payload has bytes (or 65,536, if that is more), or one whose decoded values would take more than 1,024 bytes per payload byte (or 64 MiB, if that is more). With a `reader_schema`, the decoded size includes the fields and defaults that resolution into it fills in. A refused datum is a malformed record, so it follows the deserializer's Skip or Fail error policy. In previous versions a recursive schema let one datum of under a kilobyte overflow the pipeline thread's stack and abort the process, and a few bytes claiming millions of items of an empty record or `null` made the decode allocate hundreds of megabytes. A registry schema with long field names or many fields multiplied what each item cost, and a reader schema with defaulted fields filled them in for every item. A list whose `next` field is `["null", "Node"]` takes three levels per node, so these two deserializers accept 10 nodes of it at the top of a datum, and fewer where it sits deeper. Datums that decoded in 0.4.0 are now refused when they pass any of these bounds. `build_datum` keeps its limit of 128 levels.
+  ([#2286])
+- **A partition held at the pending-batch ceiling is paused at the source** (`spate-core`, `spate-kafka`)
+
+  A partition that stays at `checkpoint.max_pending_batches` for `backpressure.min_pause` has its lanes paused at the source, and they resume when acknowledgments retire batches. `spate_checkpoint_ceiling_pauses_total` counts these pauses. In previous versions the pipeline stopped polling such a partition and left the source fetching for it. The Kafka client kept every fetched response in memory until the pipeline polled it, and counted only the records it would deliver against `queued.max.messages.kbytes`. Anyone who could write to the topic could therefore exhaust the pipeline's memory while a sink was stalled, by writing transactions and aborting them.
+
+  A pause purges the Kafka prefetch for that partition, and the records are fetched again on resume. `backpressure.min_pause` set to `0s` pauses a partition as soon as it reaches the ceiling, and a longer value leaves the source fetching for that long.
+
+  `SourceLane` gains `release_batch`, which the pipeline thread calls once a batch is finished. The default does nothing. The Kafka lane frees the batch's messages there, where it previously kept them until its next poll. A custom source's `pause` and `resume` are also called for a partition at the ceiling, and a call that fails is made again on a later commit tick.
+  ([#2286])
+- **The Docker example links a patched zlib** (`spate`)
+
+  The Docker example in `examples/docker/Dockerfile` links zlib 1.4, bundled with `libz-sys` 1.1.33. In previous versions it linked zlib 1.3.2 from `libz-sys` 1.1.31, which has a heap buffer overflow in `gzprintf` and `gzvprintf` (RUSTSEC-2026-0544, CVE-2026-85091). librdkafka does not call those functions, so the example was not exposed. The image links the bundled zlib because its runtime base carries none.
+  ([#2264])
+- **The event basis of end-to-end latency accepts any event time** (`spate-core`)
+
+  Under `metrics.e2e_basis: event`, the sink worker records an age in `spate_e2e_latency_seconds` for every event time. A batch whose oldest event time is more than `i64::MAX` milliseconds before the current time records `i64::MAX` milliseconds. In previous versions the subtraction for such a batch overflowed. A binary built with overflow checks, which `cargo build` has without `--release`, panicked in the sink worker and the pipeline stopped. Its position stayed behind the record, so a restart read the record again and stopped the same way. A binary built without overflow checks recorded an age of zero. A producer to a Kafka topic the pipeline read could choose such an event time where the broker stored the timestamp as sent, and so could a publisher to an S3 source's work feed.
+  ([#2286])
+- **Error text for a refused record no longer quotes the record** (`spate-json`, `spate-avro`, `spate-clickhouse`)
+
+  The text Spate writes when it refuses a record quotes no field value, key or enum symbol from that record. An Avro refusal by a decode bound names the count, length or union index it read from the payload, so in a datum that does not match its schema that number can be a field's bytes read as a length. In previous versions the `WARN` line for a skipped record and the pipeline's failure reason could quote one field of it: a JSON value of the wrong type, an unknown variant or field, a duplicated key, an Avro value that did not fit the reader schema or the record type, or a date, time or decimal out of range for its ClickHouse column. The JSON skip line now carries the record's partition and offset. A deployment that matches on the old texts needs its patterns updated.
+  ([#2286])
+- **Breaking:** **The S3 source reads a descriptor unit's keys only under its prefix** (`spate-s3`)
+
+  The S3 source fails a unit back to its feed when the unit's `SplitDescriptor` names a key outside the prefix of the source's `url`. A key is inside the prefix when it starts with the prefix followed by `/`, which is the rule a storage notification's key already met, and the reason given to the feed names the key. In previous versions the source read any key a descriptor named, so anyone who could publish to the SQS queue or the Kafka work topic could make the source read any object in its bucket with its own credentials and deliver the records to the sink.
+
+  A source whose `url` names the whole bucket (`s3://bucket/`) still reads every key. Units a lister run publishes are under its own `url`, so a job whose lister and workers name the same `url` needs no change. If you publish descriptors yourself, or run workers under a narrower `url` than the lister, name only keys under each worker's prefix. A unit that names any other key is redelivered up to the feed's delivery cap and then moves to its dead-letter destination.
+  ([#2286])
+
+### Contributors
+
+- Marcus Kainth
+- Shivam Singh Chauhan
+
+[#1653]: https://github.com/spate-etl/spate/pull/1653
+[#1662]: https://github.com/spate-etl/spate/pull/1662
+[#1665]: https://github.com/spate-etl/spate/pull/1665
+[#1668]: https://github.com/spate-etl/spate/pull/1668
+[#1670]: https://github.com/spate-etl/spate/pull/1670
+[#1672]: https://github.com/spate-etl/spate/pull/1672
+[#1693]: https://github.com/spate-etl/spate/pull/1693
+[#1695]: https://github.com/spate-etl/spate/pull/1695
+[#1712]: https://github.com/spate-etl/spate/pull/1712
+[#1715]: https://github.com/spate-etl/spate/pull/1715
+[#1719]: https://github.com/spate-etl/spate/pull/1719
+[#1723]: https://github.com/spate-etl/spate/pull/1723
+[#1725]: https://github.com/spate-etl/spate/pull/1725
+[#1727]: https://github.com/spate-etl/spate/pull/1727
+[#1731]: https://github.com/spate-etl/spate/pull/1731
+[#1766]: https://github.com/spate-etl/spate/pull/1766
+[#1811]: https://github.com/spate-etl/spate/pull/1811
+[#1812]: https://github.com/spate-etl/spate/pull/1812
+[#1813]: https://github.com/spate-etl/spate/pull/1813
+[#1814]: https://github.com/spate-etl/spate/pull/1814
+[#1815]: https://github.com/spate-etl/spate/pull/1815
+[#1816]: https://github.com/spate-etl/spate/pull/1816
+[#1817]: https://github.com/spate-etl/spate/pull/1817
+[#1818]: https://github.com/spate-etl/spate/pull/1818
+[#1819]: https://github.com/spate-etl/spate/pull/1819
+[#1820]: https://github.com/spate-etl/spate/pull/1820
+[#1822]: https://github.com/spate-etl/spate/pull/1822
+[#1823]: https://github.com/spate-etl/spate/pull/1823
+[#1825]: https://github.com/spate-etl/spate/pull/1825
+[#1826]: https://github.com/spate-etl/spate/pull/1826
+[#1827]: https://github.com/spate-etl/spate/pull/1827
+[#1828]: https://github.com/spate-etl/spate/pull/1828
+[#1829]: https://github.com/spate-etl/spate/pull/1829
+[#1831]: https://github.com/spate-etl/spate/pull/1831
+[#1834]: https://github.com/spate-etl/spate/pull/1834
+[#1835]: https://github.com/spate-etl/spate/pull/1835
+[#1837]: https://github.com/spate-etl/spate/pull/1837
+[#1838]: https://github.com/spate-etl/spate/pull/1838
+[#1839]: https://github.com/spate-etl/spate/pull/1839
+[#1848]: https://github.com/spate-etl/spate/pull/1848
+[#1852]: https://github.com/spate-etl/spate/pull/1852
+[#1856]: https://github.com/spate-etl/spate/pull/1856
+[#1866]: https://github.com/spate-etl/spate/pull/1866
+[#1876]: https://github.com/spate-etl/spate/pull/1876
+[#1880]: https://github.com/spate-etl/spate/pull/1880
+[#1904]: https://github.com/spate-etl/spate/pull/1904
+[#1908]: https://github.com/spate-etl/spate/pull/1908
+[#1912]: https://github.com/spate-etl/spate/pull/1912
+[#1915]: https://github.com/spate-etl/spate/pull/1915
+[#1918]: https://github.com/spate-etl/spate/pull/1918
+[#1920]: https://github.com/spate-etl/spate/pull/1920
+[#1921]: https://github.com/spate-etl/spate/pull/1921
+[#1927]: https://github.com/spate-etl/spate/pull/1927
+[#1930]: https://github.com/spate-etl/spate/pull/1930
+[#1931]: https://github.com/spate-etl/spate/pull/1931
+[#1933]: https://github.com/spate-etl/spate/pull/1933
+[#1935]: https://github.com/spate-etl/spate/pull/1935
+[#1940]: https://github.com/spate-etl/spate/pull/1940
+[#1945]: https://github.com/spate-etl/spate/pull/1945
+[#1946]: https://github.com/spate-etl/spate/pull/1946
+[#1947]: https://github.com/spate-etl/spate/pull/1947
+[#1949]: https://github.com/spate-etl/spate/pull/1949
+[#1950]: https://github.com/spate-etl/spate/pull/1950
+[#1951]: https://github.com/spate-etl/spate/pull/1951
+[#1958]: https://github.com/spate-etl/spate/pull/1958
+[#1959]: https://github.com/spate-etl/spate/pull/1959
+[#1974]: https://github.com/spate-etl/spate/pull/1974
+[#1984]: https://github.com/spate-etl/spate/pull/1984
+[#1985]: https://github.com/spate-etl/spate/pull/1985
+[#1989]: https://github.com/spate-etl/spate/pull/1989
+[#1990]: https://github.com/spate-etl/spate/pull/1990
+[#1991]: https://github.com/spate-etl/spate/pull/1991
+[#1993]: https://github.com/spate-etl/spate/pull/1993
+[#1994]: https://github.com/spate-etl/spate/pull/1994
+[#1997]: https://github.com/spate-etl/spate/pull/1997
+[#1998]: https://github.com/spate-etl/spate/pull/1998
+[#1999]: https://github.com/spate-etl/spate/pull/1999
+[#2000]: https://github.com/spate-etl/spate/pull/2000
+[#2001]: https://github.com/spate-etl/spate/pull/2001
+[#2007]: https://github.com/spate-etl/spate/pull/2007
+[#2009]: https://github.com/spate-etl/spate/pull/2009
+[#2014]: https://github.com/spate-etl/spate/pull/2014
+[#2019]: https://github.com/spate-etl/spate/pull/2019
+[#2020]: https://github.com/spate-etl/spate/pull/2020
+[#2021]: https://github.com/spate-etl/spate/pull/2021
+[#2022]: https://github.com/spate-etl/spate/pull/2022
+[#2023]: https://github.com/spate-etl/spate/pull/2023
+[#2024]: https://github.com/spate-etl/spate/pull/2024
+[#2027]: https://github.com/spate-etl/spate/pull/2027
+[#2031]: https://github.com/spate-etl/spate/pull/2031
+[#2032]: https://github.com/spate-etl/spate/pull/2032
+[#2033]: https://github.com/spate-etl/spate/pull/2033
+[#2034]: https://github.com/spate-etl/spate/pull/2034
+[#2037]: https://github.com/spate-etl/spate/pull/2037
+[#2038]: https://github.com/spate-etl/spate/pull/2038
+[#2040]: https://github.com/spate-etl/spate/pull/2040
+[#2047]: https://github.com/spate-etl/spate/pull/2047
+[#2048]: https://github.com/spate-etl/spate/pull/2048
+[#2050]: https://github.com/spate-etl/spate/pull/2050
+[#2055]: https://github.com/spate-etl/spate/pull/2055
+[#2059]: https://github.com/spate-etl/spate/pull/2059
+[#2063]: https://github.com/spate-etl/spate/pull/2063
+[#2064]: https://github.com/spate-etl/spate/pull/2064
+[#2067]: https://github.com/spate-etl/spate/pull/2067
+[#2069]: https://github.com/spate-etl/spate/pull/2069
+[#2070]: https://github.com/spate-etl/spate/pull/2070
+[#2074]: https://github.com/spate-etl/spate/pull/2074
+[#2077]: https://github.com/spate-etl/spate/pull/2077
+[#2082]: https://github.com/spate-etl/spate/pull/2082
+[#2083]: https://github.com/spate-etl/spate/pull/2083
+[#2096]: https://github.com/spate-etl/spate/pull/2096
+[#2099]: https://github.com/spate-etl/spate/pull/2099
+[#2103]: https://github.com/spate-etl/spate/pull/2103
+[#2105]: https://github.com/spate-etl/spate/pull/2105
+[#2109]: https://github.com/spate-etl/spate/pull/2109
+[#2110]: https://github.com/spate-etl/spate/pull/2110
+[#2113]: https://github.com/spate-etl/spate/pull/2113
+[#2117]: https://github.com/spate-etl/spate/pull/2117
+[#2128]: https://github.com/spate-etl/spate/pull/2128
+[#2175]: https://github.com/spate-etl/spate/pull/2175
+[#2179]: https://github.com/spate-etl/spate/pull/2179
+[#2180]: https://github.com/spate-etl/spate/pull/2180
+[#2181]: https://github.com/spate-etl/spate/pull/2181
+[#2183]: https://github.com/spate-etl/spate/pull/2183
+[#2184]: https://github.com/spate-etl/spate/pull/2184
+[#2187]: https://github.com/spate-etl/spate/pull/2187
+[#2188]: https://github.com/spate-etl/spate/pull/2188
+[#2189]: https://github.com/spate-etl/spate/pull/2189
+[#2190]: https://github.com/spate-etl/spate/pull/2190
+[#2194]: https://github.com/spate-etl/spate/pull/2194
+[#2196]: https://github.com/spate-etl/spate/pull/2196
+[#2201]: https://github.com/spate-etl/spate/pull/2201
+[#2202]: https://github.com/spate-etl/spate/pull/2202
+[#2203]: https://github.com/spate-etl/spate/pull/2203
+[#2204]: https://github.com/spate-etl/spate/pull/2204
+[#2205]: https://github.com/spate-etl/spate/pull/2205
+[#2207]: https://github.com/spate-etl/spate/pull/2207
+[#2217]: https://github.com/spate-etl/spate/pull/2217
+[#2227]: https://github.com/spate-etl/spate/pull/2227
+[#2233]: https://github.com/spate-etl/spate/pull/2233
+[#2239]: https://github.com/spate-etl/spate/pull/2239
+[#2245]: https://github.com/spate-etl/spate/pull/2245
+[#2246]: https://github.com/spate-etl/spate/pull/2246
+[#2250]: https://github.com/spate-etl/spate/pull/2250
+[#2251]: https://github.com/spate-etl/spate/pull/2251
+[#2258]: https://github.com/spate-etl/spate/pull/2258
+[#2264]: https://github.com/spate-etl/spate/pull/2264
+[#2266]: https://github.com/spate-etl/spate/pull/2266
+[#2276]: https://github.com/spate-etl/spate/pull/2276
+[#2286]: https://github.com/spate-etl/spate/pull/2286
+
 ## [0.4.0] — 2026-11-01
 
 ### Added
@@ -2518,7 +3434,8 @@ boundaries, so rows can land twice. Design target tables to tolerate that.
 - Connector configuration structs are not yet `#[non_exhaustive]`, so adding a
   field is a breaking change until they are.
 
-[Unreleased]: https://github.com/spate-etl/spate/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/spate-etl/spate/releases/tag/v0.5.0
 [0.4.0]: https://github.com/spate-etl/spate/releases/tag/v0.4.0
 [0.3.0]: https://github.com/spate-etl/spate/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0

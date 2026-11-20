@@ -41,7 +41,7 @@ deserializer:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `framing` | string | `single` | How a payload is split into documents: `single`, `ndjson`, or `array`. |
-| `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop + count) or `fail` (surface a decode error). |
+| `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop, and count on a chain built with `with_metrics`) or `fail` (surface a decode error). |
 | `reject_duplicate_keys` | bool | `false` | Reject (rather than silently keep the last value of) any JSON object with a duplicate key, at any depth. Parses each document a second time for the check. |
 
 ## The three framings

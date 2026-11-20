@@ -368,7 +368,7 @@ mod tests {
     use spate_test::{EmitCollector, render_metrics};
 
     /// The namespace of the `Meter` these tests hand a deserializer in place of
-    /// a chain's. It ends in no role segment, so `Meter::with_namespace` takes it.
+    /// a chain's.
     const TEST_NS: &str = "json_probe";
 
     /// A `Meter` like the one a chain hands its deserializer, under [`TEST_NS`].

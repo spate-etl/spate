@@ -11,11 +11,12 @@
 //!   tombstone: zero records, no error.
 //! - **`ndjson`** — newline-delimited JSON (JSON Lines): one JSON value per
 //!   `\n`-separated line → one record per line. Blank lines are skipped.
-//!   This is the framing with **per-line** error isolation.
+//!   Under `on_error: skip` this is the framing with **per-line** error
+//!   isolation.
 //! - **`array`** — a top-level JSON array → one record per element, decoded in
 //!   a single pass. A malformed array is handled atomically by the configured
-//!   [error policy](JsonSettings); use `ndjson` when you need per-record
-//!   isolation.
+//!   [error policy](JsonSettings); use `ndjson` with `on_error: skip` when you
+//!   need per-record isolation.
 //!
 //! Those three frame a payload already resident in memory (a Kafka message).
 //! For a **streaming** source that delivers an object in chunks (an
@@ -31,8 +32,10 @@
 //! A document that does not parse (or does not match the target type) is a
 //! record-level error. Under `on_error: skip` (the default) it is dropped,
 //! counted in `spate_json_deser_records_dropped_total{reason="malformed"}` on a
-//! chain built with `with_metrics`, and the decode continues; under `on_error: fail` it surfaces a decode error on
-//! the first bad record, which the chain's deserializer error policy then
+//! chain built with `with_metrics`, and the decode continues. Under `array` one
+//! bad element drops the whole array. Under `on_error: fail` it surfaces a
+//! decode error on the first bad record, which the chain's deserializer error
+//! policy then
 //! either replays (stop the pipeline, at-least-once) or drops as a whole
 //! payload. The error text holds the kind of failure, and its position where the
 //! parser reports one, with no content from the record, and the `WARN` line for a skipped record carries

@@ -1,5 +1,5 @@
 ---
-description: "The JSON deserializer decodes single, NDJSON, and array framings into typed or dynamic records, with per-record error isolation only under NDJSON."
+description: "The JSON deserializer decodes single, NDJSON, and array framings into records. Only NDJSON with on_error skip keeps the good records around a bad one."
 ---
 
 # JSON format
@@ -51,11 +51,12 @@ deserializer:
   whitespace-only payload is a **tombstone**: zero records, no error.
 - **`ndjson`** — newline-delimited JSON ([JSON Lines](https://jsonlines.org/)):
   one JSON value per `\n`-separated line → one record per line. Blank lines are
-  skipped. This is the framing with **per-line error isolation** (a malformed
-  line is skipped or fails on its own; the rest still decode).
+  skipped. Under `on_error: skip` a malformed line is dropped and the other
+  lines still decode. Under `on_error: fail` the first malformed line fails the
+  whole payload; see [Error handling](#error-handling).
 - **`array`** — a top-level JSON array → one record per element, decoded in a
-  single pass. Error handling is **atomic**: a malformed array is dropped or
-  fails as one payload (`ndjson` is the framing with per-record isolation).
+  single pass. Error handling is **atomic**: one malformed element drops the
+  whole array, or fails it as one payload.
 
 A source that frames its own byte stream supplies this crate's `NdjsonFramer`
 instead, and then the granularity is derived rather than configured; see
@@ -78,8 +79,10 @@ record-level error, handled by `on_error`:
 - **`skip`** (default) — drop the record, count it in
   `spate_json_deser_records_dropped_total{reason}` on a chain built with
   `with_metrics` (see [Metrics](#metrics)), and continue. Under `ndjson`
-  the good lines around a bad one still flow.
-- **`fail`** — surface a decode error on the first bad record.
+  the good lines around a bad one still flow. Under `array` one bad element
+  drops the whole array.
+- **`fail`** — surface a decode error on the first bad record. Under every
+  framing, no record from that payload is emitted.
 
 :::note `on_error: fail` and the chain's policy
 `fail` makes the deserializer *return* a decode error; whether that **stops**
@@ -202,10 +205,11 @@ Registered through the `Meter` the chain hands the deserializer (component type
 families exist only on a chain built with `.with_metrics(pipeline, component)`.
 
 The family exists because the framework's payload-granular `spate_deser_*` stage
-metrics cannot see it: under `ndjson` (or `array`) with `on_error: skip`, an
-individual bad record is dropped while the good records around it are emitted,
-so the `deserialize` call returns `Ok` and no
-`spate_deser_records_total{outcome="error"}` is counted.
+metrics cannot see a drop under `on_error: skip`. Under every framing the
+`deserialize` call returns `Ok` after the drop, so no
+`spate_deser_records_total{outcome="error"}` is counted. Under `ndjson` the good
+lines around a bad one are still emitted. Under `array` the whole array is
+dropped.
 
 The family carries the standard labels with the values of the chain's
 `spate_deser_*` series: `pipeline` from that call,
@@ -214,7 +218,7 @@ join. Extras are noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_json_deser_records_dropped_total` | counter | `reason` (`malformed`\|`duplicate_key`) | Records dropped by `on_error: skip` because they did not parse / match the target type (`malformed`) or contained a duplicate object key under `reject_duplicate_keys` (`duplicate_key`). |
+| `spate_json_deser_records_dropped_total` | counter | `reason` (`malformed`\|`duplicate_key`) | Records dropped by `on_error: skip` because they did not parse / match the target type (`malformed`) or contained a duplicate object key under `reject_duplicate_keys` (`duplicate_key`). A dropped array counts once. |
 
 These sit alongside the framework's generic `spate_deser_*` stage metrics, which
 wrap every decoder. See [Metrics](../../../../METRICS.md).

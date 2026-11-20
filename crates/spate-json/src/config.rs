@@ -27,7 +27,8 @@ pub enum JsonFraming {
     #[default]
     Single,
     /// Newline-delimited JSON (JSON Lines): one JSON value per `\n`-separated
-    /// line → one record per line, with per-line error isolation.
+    /// line → one record per line, with per-line error isolation under
+    /// [`OnError::Skip`].
     Ndjson,
     /// A top-level JSON array → one record per element, decoded in one pass
     /// (a malformed array is handled atomically by [`OnError`]).
@@ -40,7 +41,8 @@ pub enum JsonFraming {
 pub enum OnError {
     /// Drop the record, count it in
     /// `spate_json_deser_records_dropped_total{reason}` on a chain built with
-    /// `with_metrics`, and continue. The default for deserializers.
+    /// `with_metrics`, and continue. Under [`JsonFraming::Array`] one bad
+    /// element drops the whole array. The default for deserializers.
     #[default]
     Skip,
     /// Surface a decode error on the first bad record. What that error then

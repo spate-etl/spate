@@ -1,11 +1,11 @@
 //! Connector-owned decode metrics → `spate_json_deser_*` families.
 //!
 //! The framework already wraps every deserializer in generic `spate_deser_*`
-//! stage metrics, but those count at **payload** granularity. When `ndjson`
-//! (or `array`) decoding skips an individual bad record under `on_error: skip`,
-//! the framework sees the `deserialize` call return `Ok` with the good records
-//! emitted, so the skipped record is invisible to it. [`JsonDeserMetrics`]
-//! surfaces those per-record drops, mirroring the connector-owned
+//! stage metrics, but those count at **payload** granularity. A drop under
+//! `on_error: skip` leaves the `deserialize` call returning `Ok` under every
+//! framing, so the framework never sees it. Under `ndjson` the good lines around
+//! a bad one are still emitted; under `array` the whole array is dropped.
+//! [`JsonDeserMetrics`] surfaces those drops, mirroring the connector-owned
 //! convention used by `spate_kafka_source_*` / `spate_kafka_sink_*`.
 //!
 //! Handles are resolved once, at build time, from the
@@ -45,13 +45,15 @@ impl JsonDeserMetrics {
     }
 
     /// Count one record dropped by `on_error: skip` because it did not parse
-    /// or did not match the target type.
+    /// or did not match the target type. Under `array` one count is the whole
+    /// array.
     pub(crate) fn dropped_malformed(&self) {
         self.malformed.increment(1);
     }
 
     /// Count one record dropped by `on_error: skip` because it contained a
-    /// duplicate object key (`reject_duplicate_keys`).
+    /// duplicate object key (`reject_duplicate_keys`). Under `array` one count
+    /// is the whole array.
     pub(crate) fn dropped_duplicate_key(&self) {
         self.duplicate_key.increment(1);
     }

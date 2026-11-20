@@ -244,8 +244,8 @@ impl AvroDeserializerConfig {
     /// A `confluent` section reading writer schemas from `registry`.
     #[must_use]
     pub fn confluent(registry: RegistrySection) -> Self {
+        // The default mode is `confluent`.
         AvroDeserializerConfig {
-            mode: AvroMode::Confluent,
             registry: Some(registry),
             ..AvroDeserializerConfig::default()
         }

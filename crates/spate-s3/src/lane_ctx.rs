@@ -27,7 +27,7 @@ const CLOSED: u32 = 1 << 31;
 ///
 /// `terminal` is one-shot (the end-of-input decision); `objects_done`
 /// counts fully framed member objects so the control plane can settle the
-/// `objects_remaining` gauge when a unit closes mid-way. After
+/// `remaining_objects` gauge when a unit closes mid-way. After
 /// [`close`](Self::close), the lane takes back the count of each object it
 /// framed before the close and the closer takes back the rest.
 #[derive(Debug)]
@@ -65,7 +65,7 @@ impl SplitTracker {
     }
 
     /// Count one member object as fully framed. Returns whether the lane
-    /// takes the object's count back from `objects_remaining`, which is
+    /// takes the object's count back from `remaining_objects`, which is
     /// `false` once the split is closed.
     pub(crate) fn object_done(&self) -> bool {
         self.objects_done.fetch_add(1, Ordering::Relaxed) & CLOSED == 0

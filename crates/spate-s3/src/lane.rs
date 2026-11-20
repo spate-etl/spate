@@ -322,7 +322,7 @@ impl S3Lane {
         if let Some(m) = &self.metrics {
             m.objects_completed.increment(1);
             if counted {
-                m.objects_remaining.decrement(1.0);
+                m.remaining_objects.decrement(1.0);
             }
         }
         self.report_decoded();

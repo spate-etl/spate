@@ -179,7 +179,7 @@ struct LaneState {
     /// The re-enqueue count of the lane's notification unit, 0 for a
     /// lister's.
     re_enqueues: u32,
-    /// The objects the lane reads, its count in `objects_remaining`.
+    /// The objects the lane reads, its count in `remaining_objects`.
     members: u64,
 }
 
@@ -852,12 +852,12 @@ impl UnitReader {
         }
     }
 
-    /// Take back the lane's count in `objects_remaining`, less the objects
+    /// Take back the lane's count in `remaining_objects`, less the objects
     /// it finished.
     fn settle_remaining(&self, lane: &LaneState) {
         if let Some(m) = &self.parts.metrics {
             let done = u64::from(lane.tracker.close());
-            m.objects_remaining
+            m.remaining_objects
                 .decrement(lane.members.saturating_sub(done) as f64);
         }
     }
@@ -991,7 +991,7 @@ impl UnitReader {
             &parts.handle,
         );
         if let Some(m) = &parts.metrics {
-            m.objects_remaining.increment(members as f64);
+            m.remaining_objects.increment(members as f64);
         }
         let s3_lane = S3Lane::new(
             lane,
@@ -2258,12 +2258,12 @@ mod tests {
         assert_eq!(script.acknowledged(), vec![receipt]);
     }
 
-    /// Reads `spate_s3_objects_remaining` for the pipeline `pipeline` from
+    /// Reads `spate_s3_remaining_objects` for the pipeline `pipeline` from
     /// `rendered`.
-    fn objects_remaining(rendered: &str, pipeline: &str) -> f64 {
+    fn remaining_objects(rendered: &str, pipeline: &str) -> f64 {
         metric_value(
             rendered,
-            "spate_s3_objects_remaining",
+            "spate_s3_remaining_objects",
             &[("pipeline", pipeline)],
         )
         .expect("the gauge is registered")
@@ -2271,7 +2271,7 @@ mod tests {
 
     /// Pins that a poisoned range fails its whole unit, stops the unit's
     /// other ranges through a drain barrier and opens none of its pending
-    /// ones, and that `objects_remaining` counts one per lane opened and
+    /// ones, and that `remaining_objects` counts one per lane opened and
     /// takes each lane's count back when it leaves.
     #[test]
     fn a_poisoned_range_fails_its_unit_and_stops_the_other_ranges() {
@@ -2307,14 +2307,14 @@ mod tests {
                     assert_idle(poll(&mut reader));
                 }
             });
-            objects_remaining(&rendered, &pipeline)
+            remaining_objects(&rendered, &pipeline)
         };
         assert_eq!(run(false), 2.0, "one count per lane opened");
         assert_eq!(run(true), 0.0, "each lane takes its count back");
     }
 
     /// Pins that a range lane released while it reads, on a poisoned
-    /// sibling or on `Gone`, takes its `objects_remaining` count back once
+    /// sibling or on `Gone`, takes its `remaining_objects` count back once
     /// when it finishes its range before its drain barrier trips.
     #[test]
     fn a_released_range_finishing_before_its_barrier_settles_the_gauge_once() {
@@ -2393,7 +2393,7 @@ mod tests {
                     },
                 );
             });
-            objects_remaining(&rendered, &pipeline)
+            remaining_objects(&rendered, &pipeline)
         };
         assert_eq!(run(true), 0.0, "a poisoned sibling");
         assert_eq!(run(false), 0.0, "a unit answered Gone");
@@ -2943,7 +2943,7 @@ mod tests {
 
     /// Pins that a unit handed back with its ranges in flight counts no
     /// object failure, is never acknowledged once its lanes end, and takes
-    /// its lanes' counts back from `objects_remaining`.
+    /// its lanes' counts back from `remaining_objects`.
     #[test]
     fn a_handed_back_unit_counts_no_object_failure() {
         let run = |hand_back: bool| {
@@ -2994,7 +2994,7 @@ mod tests {
                     );
                 }
             }
-            objects_remaining(&rendered, &pipeline)
+            remaining_objects(&rendered, &pipeline)
         };
         assert_eq!(run(true), 0.0, "each handed-back lane takes its count back");
         assert_eq!(run(false), 0.0, "each retired lane takes its count back");
@@ -3112,9 +3112,9 @@ mod tests {
     }
 
     /// Pins that a hand-back takes its lanes' counts out of
-    /// `objects_remaining` at once, and a kept unit's at its commit.
+    /// `remaining_objects` at once, and a kept unit's at its commit.
     #[test]
-    fn a_hand_back_settles_objects_remaining() {
+    fn a_hand_back_settles_remaining_objects() {
         let run = |commit: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
@@ -3134,7 +3134,7 @@ mod tests {
                     reader.commit(&[(lanes[0], 5)]).unwrap();
                 }
             });
-            objects_remaining(&rendered, &pipeline)
+            remaining_objects(&rendered, &pipeline)
         };
         assert_eq!(run(false), 1.0, "the kept unit's lane");
         assert_eq!(run(true), 0.0);
@@ -3171,18 +3171,18 @@ mod tests {
         assert_eq!(script.acknowledged(), vec![receipt]);
     }
 
-    /// Pins that `objects_remaining` counts every object of a lane's unit
+    /// Pins that `remaining_objects` counts every object of a lane's unit
     /// when the lane opens, and that a hand-back takes back all but the
     /// objects the lane finished, whose counts the lane takes back itself.
     #[test]
-    fn objects_remaining_counts_every_member_of_a_lane() {
+    fn remaining_objects_counts_every_member_of_a_lane() {
         // `done` objects framed, then a hand-back when `stop` is set.
         let run = |done: usize, stop: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
                 let metrics =
                     S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
-                let gauge = metrics.objects_remaining.clone();
+                let gauge = metrics.remaining_objects.clone();
                 let (feed, script) = scripted_feed();
                 script.hand_back_on_stop();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
@@ -3200,7 +3200,7 @@ mod tests {
                     assert_eq!(script.handed_back().len(), 1);
                 }
             });
-            objects_remaining(&rendered, &pipeline)
+            remaining_objects(&rendered, &pipeline)
         };
         assert_eq!(run(0, false), 3.0, "opened");
         assert_eq!(run(1, false), 2.0, "one object framed");
@@ -3380,7 +3380,7 @@ mod tests {
             assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
             assert_idle(poll(&mut reader));
         });
-        assert_eq!(objects_remaining(&rendered, &pipeline), 0.0);
+        assert_eq!(remaining_objects(&rendered, &pipeline), 0.0);
     }
 
     /// Pins that `reading_on_stop` reads on for a unit whose lane reported an
@@ -3804,7 +3804,7 @@ mod tests {
     }
 
     /// Pins that an overwrite reported by both ranges of one key is counted
-    /// once, never as an `etag_drift` failure, and that `objects_remaining`
+    /// once, never as an `etag_drift` failure, and that `remaining_objects`
     /// takes back both ranges once the unit is acknowledged, leaving only
     /// the lane of the re-enqueued unit the scripted feed delivers back.
     #[test]
@@ -3843,7 +3843,7 @@ mod tests {
             ),
             Some(0.0)
         );
-        assert_eq!(objects_remaining(&rendered, &pipeline), held as f64);
+        assert_eq!(remaining_objects(&rendered, &pipeline), held as f64);
     }
 
     /// Pins that an object overwritten to no bytes is acknowledged without a

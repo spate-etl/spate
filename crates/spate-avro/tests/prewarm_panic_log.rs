@@ -106,11 +106,9 @@ fn a_prewarm_panic_is_logged_with_its_name() {
                 let mut settings =
                     AvroDeserializerConfig::confluent(RegistrySection::new(stub.endpoint()));
                 settings.prewarm_subjects = vec!["e-value".into()];
-                let _builder = AvroDeserializerBuilder::new(
-                    settings,
-                    &tokio::runtime::Handle::current(),
-                )
-                .unwrap();
+                let _builder =
+                    AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current())
+                        .unwrap();
                 tokio::time::timeout(spate_test::HANG, seen.notified())
                     .await
                     .expect("the pre-warm panic is logged");

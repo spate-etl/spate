@@ -221,8 +221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
     let mut settings = AvroDeserializerConfig::raw(SchemaSource::inline(WRITER_V1));
     settings.reader_schema = Some(SchemaSource::inline(READER_V2));
-    let deserializer = AvroDeserializerBuilder::new(settings, &pipeline.io_handle())?
-        .build_serde::<Order>();
+    let deserializer =
+        AvroDeserializerBuilder::new(settings, &pipeline.io_handle())?.build_serde::<Order>();
 
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);

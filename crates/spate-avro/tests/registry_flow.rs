@@ -672,8 +672,7 @@ async fn prewarm_loads_subjects_at_startup() {
 
     let mut cfg = settings(addr, Duration::from_millis(100));
     cfg.prewarm_subjects = vec!["events-value".into()];
-    let builder =
-        AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
     let mut deser = builder.build_value();
 
     let payload = confluent_payload(42, 7);
@@ -830,8 +829,7 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     // Subjects are pre-warmed in order, so a request for the second subject
     // means the first has been handled. The second answers 404.
     cfg.prewarm_subjects = vec!["json-value".into(), "sentinel-value".into()];
-    let builder =
-        AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
     let mut deser = builder.build_value();
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
@@ -895,8 +893,7 @@ async fn a_prewarm_forbidden_is_not_a_rejection() {
     // Pre-warm is sequential and ends on a recorded rejection, so a request
     // for the second subject means the first was handled and not recorded.
     cfg.prewarm_subjects = vec!["events-value".into(), "sentinel-value".into()];
-    let builder =
-        AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
     let mut deser = builder.build_value();
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
@@ -1064,8 +1061,7 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
     let addr = stub.addr();
     let mut cfg = settings(addr, Duration::from_secs(30));
     cfg.prewarm_subjects = vec!["events-value".into()];
-    let builder =
-        AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
     let reason = fatal_reason(builder.build_value(), confluent_payload(42, 1)).await;
     assert!(reason.contains("401"), "{reason}");
     assert!(reason.contains("40101"), "{reason}");
@@ -1153,8 +1149,7 @@ async fn a_refused_client_certificate_is_fatal() {
         spate_test_support::serve_tls(registry.server_config(Some(&clients)), |_| async {}).await;
     let mut cfg = settings_at(format!("https://{addr}"), Duration::from_secs(30));
     cfg.registry.as_mut().unwrap().tls.root_ca = Some(registry.write(dir.path()));
-    let builder =
-        AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
     let reason = fatal_reason(builder.build_value(), confluent_payload(1, 1)).await;
     assert!(reason.contains("CertificateRequired"), "{reason}");
 }
@@ -1339,8 +1334,7 @@ async fn reader_projection_does_not_hide_truncated_writer_string() {
     settings.reader_schema = Some(spate_avro::SchemaSource::inline(
         r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"}]}"#,
     ));
-    let b =
-        AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current()).unwrap();
+    let b = AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current()).unwrap();
     let mut deser = b.build_value();
     let mut out = EmitCollector::new();
     deser

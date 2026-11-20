@@ -454,7 +454,7 @@ pub(crate) fn queued_events<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> u
 }
 
 /// How many times a drop's serve reads the length of a consumer's queue.
-pub(crate) const DROP_SERVE_PASSES: usize = 1;
+pub(crate) const DROP_SERVE_PASSES: usize = 4;
 
 /// Serves the events on `consumer`'s queue before a drop releases it, reading
 /// the queue's length up to [`DROP_SERVE_PASSES`] times.

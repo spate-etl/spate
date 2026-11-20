@@ -26,10 +26,11 @@ const CLOSING: &str = "Closing consumer";
 /// revocation.
 const ANSWERED: &str = "received op ASSIGN in state up (join-state wait-unassign-call)";
 
-/// librdkafka's line as the group answers the member's leave. A member that
-/// rejoins after the `unassign` holds its leave behind the join, and the leave
-/// times out instead.
-const LEFT: &str = "LeaveGroup response received";
+/// librdkafka's line as the drop's `unsubscribe` waits for the revocation's
+/// answer. Once the revocation is answered, librdkafka runs the waiting
+/// unsubscribe as a leave, and the member does not rejoin.
+const POSTPONED: &str =
+    "postponing subscribe until previous rebalance completes (join-state wait-unassign-call)";
 
 /// A log writer that keeps the lines the feed's consumer thread writes, and
 /// holds that thread at its first [`ACCEPTED`] line until the test releases
@@ -95,14 +96,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Hold {
     }
 }
 
-/// Pins that the feed's drop answers a revocation queued after the consumer
-/// thread's last poll before the consumer's close starts, that the member
-/// then leaves the group without rejoining, and that the drop returns. Left
-/// for the close, the revocation of a member that holds no partition can meet
-/// a terminated group, and its `unassign` then never returns. The test leads
-/// the group to give the feed's member nothing, and holds the consumer thread
-/// after its last poll while a new member starts a rebalance. Regression for
-/// #1698.
+/// Pins that the feed's drop unsubscribes and then answers a revocation
+/// queued after the consumer thread's last poll, before the consumer's close
+/// starts, and that the drop returns. Left for the close, the revocation of a
+/// member that holds no partition can meet a terminated group, and its
+/// `unassign` then never returns. The test leads the group to give the feed's
+/// member nothing, and holds the consumer thread after its last poll while a
+/// new member starts a rebalance. Regression for #1698.
+///
+/// The test reads only lines the drop serves itself. The close polls only
+/// until the group terminates, which can come before its first poll, and the
+/// lines it would have served are then never logged.
 #[test]
 fn the_drop_answers_a_revocation_queued_after_the_last_poll() {
     let hold = Hold::default();
@@ -185,15 +189,15 @@ fn the_drop_answers_a_revocation_queued_after_the_last_poll() {
         panic!("dropping the feed did not return");
     }
     dropping.join().unwrap();
-    let (answered, closing) = (hold.first(ANSWERED), hold.first(CLOSING));
+    let (postponed, answered) = (hold.first(POSTPONED), hold.first(ANSWERED));
     assert!(
-        answered.is_some_and(|a| closing.is_some_and(|c| a < c)),
-        "the revocation was not answered before the close: {:#?}",
+        answered.is_some_and(|a| postponed.is_some_and(|p| p < a)),
+        "the drop did not unsubscribe and then answer the revocation: {:#?}",
         hold.lines.lock().unwrap()
     );
     assert!(
-        hold.first(LEFT).is_some(),
-        "the group did not answer the member's leave: {:#?}",
+        hold.first(CLOSING).is_none_or(|c| answered.is_some_and(|a| a < c)),
+        "the close started before the revocation was answered: {:#?}",
         hold.lines.lock().unwrap()
     );
     drop(joiner);

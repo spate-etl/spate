@@ -56,7 +56,7 @@ use crate::framer::FramerFactory;
 use crate::job_end::JobEnd;
 use crate::lane::S3Lane;
 use crate::lane_ctx::{LANE_HANDOFF_CHUNKS, LaneLabel, PoisonReport, SplitTracker};
-use crate::metrics::S3Metrics;
+use crate::metrics::S3SourceMetrics;
 use crate::split::Packing;
 use crate::unit::{Cursor, Decoded, Origin, Part, Scope, decode, re_enqueue_body};
 use spate_core::checkpoint::AckIssuer;
@@ -100,7 +100,7 @@ pub(crate) struct LaneParts {
     pub(crate) chunk_bytes: usize,
     pub(crate) range_bytes: usize,
     pub(crate) retry_base: Duration,
-    pub(crate) metrics: Option<S3Metrics>,
+    pub(crate) metrics: Option<S3SourceMetrics>,
     /// The re-enqueue count at which an overwritten notification unit is
     /// acknowledged without a re-enqueue.
     pub(crate) re_enqueue_cap: u32,
@@ -703,7 +703,7 @@ impl UnitReader {
                 continue;
             }
             if let Some(m) = &self.parts.metrics {
-                m.objects_failed(report.kind).increment(1);
+                m.object_failed(report.kind);
             }
             let Some(held) = self.held_on(report.partition) else {
                 continue;
@@ -736,7 +736,7 @@ impl UnitReader {
         }
         held.pending.retain(|cursor| cursor.key() != overwrite.key);
         if let Some(m) = &self.parts.metrics {
-            m.objects_overwritten.increment(1);
+            m.object_overwritten();
         }
         let re_enqueue = if held.failing.is_some() {
             // The unit goes back to the feed and is read again from its
@@ -752,7 +752,7 @@ impl UnitReader {
             ReEnqueue::Done
         } else if re_enqueues >= self.parts.re_enqueue_cap {
             if let Some(m) = &self.parts.metrics {
-                m.overwrites_dropped.increment(1);
+                m.overwrite_dropped();
             }
             tracing::warn!(
                 unit = %held.unit,
@@ -857,8 +857,7 @@ impl UnitReader {
     fn settle_remaining(&self, lane: &LaneState) {
         if let Some(m) = &self.parts.metrics {
             let done = u64::from(lane.tracker.close());
-            m.remaining_objects
-                .decrement(lane.members.saturating_sub(done) as f64);
+            m.remaining_objects_settled(lane.members.saturating_sub(done));
         }
     }
 
@@ -983,15 +982,14 @@ impl UnitReader {
                 tx,
                 pause: Arc::clone(&pause),
                 retry_base: parts.retry_base,
-                retries: parts.metrics.as_ref().map(|m| m.get_retries.clone()),
+                counters: parts.metrics.as_ref().map(S3SourceMetrics::fetch_counters),
                 range: part.range,
-                bytes_read: parts.metrics.as_ref().map(|m| m.bytes_read.clone()),
                 origin: part.origin,
             }),
             &parts.handle,
         );
         if let Some(m) = &parts.metrics {
-            m.remaining_objects.increment(members as f64);
+            m.remaining_objects_added(members);
         }
         let s3_lane = S3Lane::new(
             lane,
@@ -1080,7 +1078,7 @@ mod tests {
     fn reader_over(
         feed: Arc<dyn Feed>,
         units_held: Option<usize>,
-        metrics: Option<S3Metrics>,
+        metrics: Option<S3SourceMetrics>,
     ) -> (UnitReader, tokio::runtime::Runtime) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1986,7 +1984,7 @@ mod tests {
                 .build()
                 .unwrap();
             let (mut reader, script, _idle_rt) = reader();
-            reader.parts.metrics = Some(S3Metrics::new(&Meter::with_namespace(
+            reader.parts.metrics = Some(S3SourceMetrics::new(&Meter::with_namespace(
                 "s3",
                 pipeline.clone(),
                 "src",
@@ -2278,8 +2276,12 @@ mod tests {
         let run = |poison: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
                 let (feed, script) = scripted_feed();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
                 let receipt = script.deliver(ranged_unit("a", 4));
@@ -2322,8 +2324,12 @@ mod tests {
         let run = |poison_sibling: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
                 // The lane's fetcher has to run while the test polls the lane.
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
@@ -2949,8 +2955,12 @@ mod tests {
         let run = |hand_back: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
                 let (feed, script) = scripted_feed();
                 script.hand_back_on_stop();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
@@ -3007,7 +3017,7 @@ mod tests {
         let pipeline = unique_name("reader");
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
             script.deliver(ranged_unit("a", 2));
@@ -3045,7 +3055,7 @@ mod tests {
         let pipeline = unique_name("reader");
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             let (mut reader, _rt) = reader_over(Arc::new(feed), Some(1), Some(metrics));
             script.deliver(ranged_unit("a", 1));
@@ -3081,7 +3091,7 @@ mod tests {
         let pipeline = unique_name("reader");
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
             let receipt = script.deliver(Unit::new(
@@ -3118,8 +3128,12 @@ mod tests {
         let run = |commit: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
                 let (feed, script) = scripted_feed();
                 script.hand_back_on_stop();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
@@ -3180,9 +3194,13 @@ mod tests {
         let run = |done: usize, stop: bool| {
             let pipeline = unique_name("reader");
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
-                let gauge = metrics.remaining_objects.clone();
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
+                let lane_metrics = metrics.clone();
                 let (feed, script) = scripted_feed();
                 script.hand_back_on_stop();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
@@ -3192,7 +3210,7 @@ mod tests {
                 for _ in 0..done {
                     // As the lane does for each object it frames.
                     if reader.lanes[&lanes[0]].tracker.object_done() {
-                        gauge.decrement(1.0);
+                        lane_metrics.remaining_objects_settled(1);
                     }
                 }
                 if stop {
@@ -3368,7 +3386,7 @@ mod tests {
         let pipeline = unique_name("reader");
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             script.hand_back_on_stop();
             let (mut reader, _rt) = reader_over(Arc::new(feed), Some(1), Some(metrics));
@@ -3774,8 +3792,12 @@ mod tests {
             let pipeline = unique_name("reader");
             let mut lines = Vec::new();
             let rendered = render_local(|| {
-                let metrics =
-                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let metrics = S3SourceMetrics::new(&Meter::with_namespace(
+                    "s3",
+                    pipeline.clone(),
+                    "src",
+                    "s3",
+                ));
                 let (feed, script) = scripted_feed();
                 let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
                 let (receipt, lanes) =
@@ -3813,7 +3835,7 @@ mod tests {
         let mut held = 0;
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
             let (receipt, lanes) =
@@ -3907,7 +3929,7 @@ mod tests {
         let pipeline = unique_name("reader");
         let rendered = render_local(|| {
             let metrics =
-                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                S3SourceMetrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
             let (feed, script) = scripted_feed();
             let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
             let (receipt, lanes) = open_notification(

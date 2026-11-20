@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The generator frames one event per payload, so `for_source_framing`
             // derives `single` from the source and rejects a `framing:` that
             // would frame the payload a second time.
-            let deser = JsonDeserializerBuilder::from_component(&deser_section)
+            let deser = JsonDeserializerBuilder::from_component_config(&deser_section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .build_serde::<StorefrontEvent>();

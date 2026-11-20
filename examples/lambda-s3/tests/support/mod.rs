@@ -88,7 +88,7 @@ pub(crate) fn assemble(
             .ok_or("deserializer")?;
         let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
             let chunk = ctx.chunk();
-            let deser = JsonDeserializerBuilder::from_component(&section)
+            let deser = JsonDeserializerBuilder::from_component_config(&section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer section")
                 .build_serde::<Rec>();

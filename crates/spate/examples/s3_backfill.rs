@@ -110,7 +110,7 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             // `for_source_framing` derives `single` from the source and would
             // reject a `framing:` that double-frames it.
             // ANCHOR: deserializer
-            let deser = JsonDeserializerBuilder::from_component(&deser_section)
+            let deser = JsonDeserializerBuilder::from_component_config(&deser_section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .build_serde::<PaymentCaptured>();

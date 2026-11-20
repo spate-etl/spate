@@ -31,7 +31,7 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, Owned, RecFamily};
 use spate_core::metrics::Meter;
 use spate_core::record::{Flow, RawPayload, Record};
-use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 use std::hint::black_box;
 
 /// A sink that counts records and keeps the key hash of the last one.
@@ -263,7 +263,7 @@ pub(crate) fn install_recorder() {
 /// in one process, and distinct label sets are what keep one rig's counters
 /// from being summed into another's.
 pub(crate) fn warm_rig<F, D>(
-    settings: JsonSettings,
+    settings: JsonDeserializerConfig,
     payload: Vec<u8>,
     expect: u64,
     labels: (&'static str, &'static str),
@@ -274,7 +274,7 @@ where
     D: Deserializer<F>,
 {
     install_recorder();
-    let builder = JsonDeserializerBuilder::from_settings(settings);
+    let builder = JsonDeserializerBuilder::new(settings);
     let mut deser = build(&builder);
     let component_type = deser.component_type().to_owned();
     let meter = Meter::with_namespace("json_bench", labels.0, labels.1, component_type);
@@ -306,28 +306,28 @@ pub(crate) fn full_settings(
     framing: JsonFraming,
     on_error: OnError,
     reject_duplicate_keys: bool,
-) -> JsonSettings {
-    JsonSettings {
-        framing,
-        on_error,
-        reject_duplicate_keys,
-    }
+) -> JsonDeserializerConfig {
+    let mut config = JsonDeserializerConfig::default();
+    config.framing = framing;
+    config.on_error = on_error;
+    config.reject_duplicate_keys = reject_duplicate_keys;
+    config
 }
 
-pub(crate) fn settings(framing: JsonFraming) -> JsonSettings {
-    JsonSettings {
-        framing,
-        // Skip is the shipped default, so this is the path production takes.
-        // It is not the cheaper of the two by construction: on valid input
-        // Skip's error bookkeeping never runs, while ndjson under Fail buffers
-        // every decoded payload before emitting any of them. Measuring the
-        // default is the point; a Fail case would be a second shape, not a
-        // stricter version of this one.
-        on_error: OnError::Skip,
-        // Off: the structural check parses each document a second time, which
-        // would measure the guard rather than the decode.
-        reject_duplicate_keys: false,
-    }
+pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerConfig {
+    let mut config = JsonDeserializerConfig::default();
+    config.framing = framing;
+    // Skip is the shipped default, so this is the path production takes.
+    // It is not the cheaper of the two by construction: on valid input
+    // Skip's error bookkeeping never runs, while ndjson under Fail buffers
+    // every decoded payload before emitting any of them. Measuring the
+    // default is the point; a Fail case would be a second shape, not a
+    // stricter version of this one.
+    config.on_error = OnError::Skip;
+    // Off: the structural check parses each document a second time, which
+    // would measure the guard rather than the decode.
+    config.reject_duplicate_keys = false;
+    config
 }
 
 /// An unwarmed rig with no metrics, for a case whose point is the decode
@@ -338,7 +338,7 @@ pub(crate) fn rig<D>(
     expect: u64,
     build: impl FnOnce(&JsonDeserializerBuilder) -> D,
 ) -> Rig<D> {
-    let builder = JsonDeserializerBuilder::from_settings(settings(framing));
+    let builder = JsonDeserializerBuilder::new(settings(framing));
     let deser = build(&builder);
     // The receiver is dropped here, so when the last `AckRef` goes with the rig
     // the batch resolves into a disconnected channel and the send is discarded.

@@ -1,0 +1,7 @@
+**Breaking:** **The JSON deserializer config follows the source and sink config shape** (`spate-json`)
+
+The `deserializer: { json: ... }` section deserializes into `JsonDeserializerConfig`, which `JsonDeserializerConfig::from_component_config` builds and `validate` checks. In previous versions the type was `JsonSettings`. `JsonDeserializerBuilder::from_component_config` and `JsonDeserializerBuilder::new` replace `from_component` and `from_settings`. The YAML keys and their defaults are unchanged.
+
+`JsonDeserializerConfig`, `JsonFraming` and `OnError` are `#[non_exhaustive]`. Code outside the crate can no longer build the config with a struct literal. Start from `JsonDeserializerConfig::default()` and set the fields instead. A `match` on `JsonFraming` or `OnError` needs a wildcard arm.
+
+`JsonConfigError` is removed, and every refusal is a `spate_core::config::ConfigError`. A `framing` other than `single` under a source that frames one record per payload reads ``deserializer.json.framing: is `ndjson`, but the source already frames one record per payload; remove `framing` or set it to `single`, or use a source format that leaves framing to the deserializer``. In previous versions it was `JsonConfigError::DoubleFraming`, and its text named the framing as `Ndjson`. The same configurations are refused.

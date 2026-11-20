@@ -10,8 +10,10 @@ dynamically-typed values. The framings map onto the framework's "one payload →
 0..N records" contract, and `serde_json` (stable 1.x) parses by default.
 
 Construct it from the pipeline's opaque section with
-`JsonDeserializerBuilder::from_component`, or from settings built in code with
-`from_settings`, which is what the runnable NDJSON example does:
+`JsonDeserializerBuilder::from_component_config`, or from a
+`JsonDeserializerConfig` built in code with `JsonDeserializerBuilder::new`. The
+runnable NDJSON example builds one in code, starting from the config's
+`Default`:
 
 ```rust file=crates/spate/examples/json_skip_bad_records.rs region=deserializer
 ```
@@ -21,12 +23,13 @@ That example is
 one payload of four lines, one of them malformed, over the in-memory
 connectors, so it needs nothing running:
 `cargo run -p spate --features json --example json_skip_bad_records`.
-`from_component` yields that same builder behind a `Result`, and the chain's
-`with_metrics` scopes the families under [Metrics](#metrics).
+`from_component_config` yields that same builder behind a `Result`, and the
+chain's `with_metrics` scopes the families under [Metrics](#metrics).
 
 ## Configuration
 
-The `deserializer: { json: ... }` section deserializes into `JsonSettings`
+The `deserializer: { json: ... }` section deserializes into
+`JsonDeserializerConfig`
 ([`spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs)); unknown
 fields are rejected with the offending key.
 

@@ -15,12 +15,13 @@
 use crate::deser::{DecoderCore, JsonSerdeDeserializer, JsonValueDeserializer};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use spate_core::config::ComponentConfig;
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath};
 use spate_core::framing::FramingContract;
 
 /// How one payload is split into JSON documents.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum JsonFraming {
     /// The whole payload is one JSON document → one record. An empty or
     /// whitespace-only payload is a tombstone (zero records).
@@ -35,9 +36,21 @@ pub enum JsonFraming {
     Array,
 }
 
+impl JsonFraming {
+    /// The value as the `framing` key spells it.
+    fn yaml_name(self) -> &'static str {
+        match self {
+            JsonFraming::Single => "single",
+            JsonFraming::Ndjson => "ndjson",
+            JsonFraming::Array => "array",
+        }
+    }
+}
+
 /// What to do with a record that does not parse or match the target type.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OnError {
     /// Drop the record, count it in
     /// `spate_json_deser_records_dropped_total{reason}` on a chain built with
@@ -54,10 +67,14 @@ pub enum OnError {
     Fail,
 }
 
-/// The `deserializer: { json: ... }` settings.
+/// The `deserializer: { json: ... }` section.
+///
+/// Every key has a default, so `json: {}` is a complete section. Build one in
+/// code from [`Default`] and set the fields you need.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct JsonSettings {
+#[non_exhaustive]
+pub struct JsonDeserializerConfig {
     /// Payload framing.
     pub framing: JsonFraming,
     /// Record-level error policy.
@@ -68,51 +85,59 @@ pub struct JsonSettings {
     pub reject_duplicate_keys: bool,
 }
 
-/// Construction errors.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum JsonConfigError {
-    /// The component section did not deserialize.
-    #[error(transparent)]
-    Config(#[from] spate_core::config::ConfigError),
-    /// The source already frames one record per payload, but the deserializer
-    /// is configured to frame the payload too (double-framing).
-    #[error(
-        "the source frames one record per payload, but the JSON deserializer is set \
-         to `framing: {framing:?}` — remove `framing` (or set it to `single`), or use \
-         a whole-object source format that lets the deserializer frame"
-    )]
-    DoubleFraming {
-        /// The offending deserializer framing.
-        framing: JsonFraming,
-    },
+impl JsonDeserializerConfig {
+    /// Deserialize and validate from the pipeline's opaque component section.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the section does not deserialize into
+    /// this type.
+    pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
+        let cfg: JsonDeserializerConfig = section.deserialize_into()?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Cross-field validation. It refuses nothing, because no key's values
+    /// depend on another's. The framing a source already applies is checked
+    /// by [`JsonDeserializerBuilder::for_source_framing`].
+    ///
+    /// # Errors
+    ///
+    /// None.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
 }
 
 /// The deserializer's component type, and the tag its section sits under.
 pub(crate) const TAG: &str = "json";
 
-/// Builder produced from the opaque config section; hands out either the
-/// typed or the dynamically-typed deserializer.
+/// Builder produced from the config section; hands out either the typed or
+/// the dynamically-typed deserializer.
 #[derive(Clone, Debug)]
 pub struct JsonDeserializerBuilder {
-    settings: JsonSettings,
+    config: JsonDeserializerConfig,
 }
 
 impl JsonDeserializerBuilder {
+    /// Build from a config.
+    #[must_use]
+    pub fn new(config: JsonDeserializerConfig) -> JsonDeserializerBuilder {
+        JsonDeserializerBuilder { config }
+    }
+
     /// Build from the pipeline's `deserializer` component section.
     ///
     /// # Errors
     ///
-    /// [`JsonConfigError::Config`] for a section that does not deserialize.
-    pub fn from_component(cfg: &ComponentConfig) -> Result<Self, JsonConfigError> {
-        let settings: JsonSettings = cfg.deserialize_into()?;
-        Ok(Self::from_settings(settings))
-    }
-
-    /// Build from already-parsed settings.
-    #[must_use]
-    pub fn from_settings(settings: JsonSettings) -> Self {
-        JsonDeserializerBuilder { settings }
+    /// As [`JsonDeserializerConfig::from_component_config`].
+    pub fn from_component_config(
+        section: &ComponentConfig,
+    ) -> Result<JsonDeserializerBuilder, ConfigError> {
+        Ok(Self::new(JsonDeserializerConfig::from_component_config(
+            section,
+        )?))
     }
 
     /// Derive and validate framing against the source's
@@ -122,23 +147,28 @@ impl JsonDeserializerBuilder {
     ///
     /// - [`PerRecord`](FramingContract::PerRecord): the source already frames
     ///   one record per payload, so the deserializer must decode a single
-    ///   document. `framing: single` (the default) is used; any other
-    ///   `framing` is a [`DoubleFraming`](JsonConfigError::DoubleFraming)
-    ///   error.
+    ///   document. `framing: single` (the default) is used, and any other
+    ///   `framing` is refused.
     /// - [`WholePayload`](FramingContract::WholePayload): the deserializer owns
     ///   framing, and the configured `framing` (`single` / `ndjson` / `array`)
     ///   is honored unchanged.
     ///
     /// # Errors
     ///
-    /// [`JsonConfigError::DoubleFraming`] for a `PerRecord` source with a
-    /// `framing` other than `single`.
-    pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, JsonConfigError> {
+    /// [`ConfigError::Component`] at `deserializer.json.framing` for a
+    /// `PerRecord` source with a `framing` other than `single`.
+    pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, ConfigError> {
         match contract {
-            FramingContract::PerRecord if self.settings.framing != JsonFraming::Single => {
-                Err(JsonConfigError::DoubleFraming {
-                    framing: self.settings.framing,
-                })
+            FramingContract::PerRecord if self.config.framing != JsonFraming::Single => {
+                Err(SectionPath::deserializer(TAG).invalid(
+                    "framing",
+                    format!(
+                        "is `{}`, but the source already frames one record per payload; \
+                         remove `framing` or set it to `single`, or use a source format \
+                         that leaves framing to the deserializer",
+                        self.config.framing.yaml_name()
+                    ),
+                ))
             }
             _ => Ok(self),
         }
@@ -161,9 +191,9 @@ impl JsonDeserializerBuilder {
 
     fn core(&self) -> DecoderCore {
         DecoderCore {
-            framing: self.settings.framing,
-            on_error: self.settings.on_error,
-            reject_duplicate_keys: self.settings.reject_duplicate_keys,
+            framing: self.config.framing,
+            on_error: self.config.on_error,
+            reject_duplicate_keys: self.config.reject_duplicate_keys,
             metrics: None,
         }
     }
@@ -178,72 +208,94 @@ mod tests {
         spate_test::component_config("json", yaml)
     }
 
+    fn config(yaml: &str) -> Result<JsonDeserializerConfig, ConfigError> {
+        JsonDeserializerConfig::from_component_config(&component(yaml))
+    }
+
+    fn builder(yaml: &str) -> JsonDeserializerBuilder {
+        JsonDeserializerBuilder::from_component_config(&component(yaml)).unwrap()
+    }
+
     #[test]
     fn defaults_are_single_skip_no_dedup() {
-        let s = JsonSettings::default();
-        assert_eq!(s.framing, JsonFraming::Single);
-        assert_eq!(s.on_error, OnError::Skip);
-        assert!(!s.reject_duplicate_keys);
+        let c = JsonDeserializerConfig::default();
+        assert_eq!(c.framing, JsonFraming::Single);
+        assert_eq!(c.on_error, OnError::Skip);
+        assert!(!c.reject_duplicate_keys);
     }
 
     #[test]
     fn parses_a_full_section() {
-        let cfg = component("framing: ndjson\non_error: fail\nreject_duplicate_keys: true\n");
-        let b = JsonDeserializerBuilder::from_component(&cfg).unwrap();
-        assert_eq!(b.settings.framing, JsonFraming::Ndjson);
-        assert_eq!(b.settings.on_error, OnError::Fail);
-        assert!(b.settings.reject_duplicate_keys);
+        let c = config("framing: ndjson\non_error: fail\nreject_duplicate_keys: true\n").unwrap();
+        assert_eq!(c.framing, JsonFraming::Ndjson);
+        assert_eq!(c.on_error, OnError::Fail);
+        assert!(c.reject_duplicate_keys);
+    }
+
+    #[test]
+    fn the_builder_takes_the_section_it_is_given() {
+        let b = builder("framing: array\non_error: fail\nreject_duplicate_keys: true\n");
+        assert_eq!(b.config.framing, JsonFraming::Array);
+        assert_eq!(b.config.on_error, OnError::Fail);
+        assert!(b.config.reject_duplicate_keys);
     }
 
     #[test]
     fn empty_section_uses_defaults() {
         // `json:` with no body → all defaults.
-        let cfg = ComponentConfig::new("json", YamlValue::Null);
-        let b = JsonDeserializerBuilder::from_component(&cfg).unwrap();
-        assert_eq!(b.settings.framing, JsonFraming::Single);
+        let c = JsonDeserializerConfig::from_component_config(&ComponentConfig::new(
+            "json",
+            YamlValue::Null,
+        ))
+        .unwrap();
+        assert_eq!(c.framing, JsonFraming::Single);
     }
 
     #[test]
     fn unknown_fields_are_rejected() {
-        let cfg = component("framing: single\nbogus: 1\n");
-        let err = JsonDeserializerBuilder::from_component(&cfg).unwrap_err();
-        assert!(err.to_string().contains("bogus"), "{err}");
+        const REFUSAL: &str = "json.bogus: unknown field `bogus`, expected one of `framing`, \
+                               `on_error`, `reject_duplicate_keys`";
+        let err = config("framing: single\nbogus: 1\n").unwrap_err();
+        assert_eq!(err.to_string(), REFUSAL);
+        let err =
+            JsonDeserializerBuilder::from_component_config(&component("bogus: 1\n")).unwrap_err();
+        assert_eq!(err.to_string(), REFUSAL);
     }
 
     #[test]
     fn unknown_framing_is_rejected() {
-        let cfg = component("framing: yaml\n");
-        let err = JsonDeserializerBuilder::from_component(&cfg).unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("framing"), "{err}");
+        let err = config("framing: yaml\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "json.framing: unknown variant, expected one of `single`, `ndjson`, `array`"
+        );
     }
 
     #[test]
     fn per_record_source_derives_single_and_rejects_double_framing() {
         // Omitted framing (defaults to single) under a per-record source is fine.
-        let b =
-            JsonDeserializerBuilder::from_component(&ComponentConfig::new("json", YamlValue::Null))
-                .unwrap()
-                .for_source_framing(FramingContract::PerRecord)
-                .unwrap();
-        assert_eq!(b.settings.framing, JsonFraming::Single);
+        let b = JsonDeserializerBuilder::new(JsonDeserializerConfig::default())
+            .for_source_framing(FramingContract::PerRecord)
+            .unwrap();
+        assert_eq!(b.config.framing, JsonFraming::Single);
 
         // Explicit single is fine too.
-        JsonDeserializerBuilder::from_component(&component("framing: single\n"))
-            .unwrap()
+        builder("framing: single\n")
             .for_source_framing(FramingContract::PerRecord)
             .unwrap();
 
         // ndjson / array double-frame an already-framed source.
         for framing in ["ndjson", "array"] {
-            let err = JsonDeserializerBuilder::from_component(&component(&format!(
-                "framing: {framing}\n"
-            )))
-            .unwrap()
-            .for_source_framing(FramingContract::PerRecord)
-            .unwrap_err();
-            assert!(
-                matches!(err, JsonConfigError::DoubleFraming { .. }),
-                "{framing}: {err}"
+            let err = builder(&format!("framing: {framing}\n"))
+                .for_source_framing(FramingContract::PerRecord)
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "deserializer.json.framing: is `{framing}`, but the source already frames \
+                     one record per payload; remove `framing` or set it to `single`, or use a \
+                     source format that leaves framing to the deserializer"
+                ),
             );
         }
     }
@@ -251,10 +303,10 @@ mod tests {
     #[test]
     fn whole_payload_source_honors_configured_framing() {
         for framing in ["single", "ndjson", "array"] {
-            JsonDeserializerBuilder::from_component(&component(&format!("framing: {framing}\n")))
-                .unwrap()
+            let b = builder(&format!("framing: {framing}\n"))
                 .for_source_framing(FramingContract::WholePayload)
                 .unwrap();
+            assert_eq!(b.config.framing.yaml_name(), framing);
         }
     }
 }

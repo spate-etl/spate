@@ -47,7 +47,7 @@ fn an_unknown_variant_fails_the_pipeline_without_quoting_it() {
     let (sink, _script) = capture_sink(1, 1);
     let pipeline =
         Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config")).expect("builder");
-    let deser = JsonDeserializerBuilder::from_component(
+    let deser = JsonDeserializerBuilder::from_component_config(
         pipeline
             .config()
             .deserializer

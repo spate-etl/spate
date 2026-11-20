@@ -22,7 +22,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
-use spate::json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use spate::json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{TestEncoder, capture_sink, memory_source};
@@ -69,12 +69,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chains(|ctx| {
             let chunk_cfg = ctx.chunk();
             // ANCHOR: deserializer
-            let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
-                framing: JsonFraming::Ndjson,
-                on_error: OnError::Skip,
-                reject_duplicate_keys: false,
-            })
-            .build_serde::<Event>();
+            let mut config = JsonDeserializerConfig::default();
+            config.framing = JsonFraming::Ndjson;
+            config.on_error = OnError::Skip;
+            let deser = JsonDeserializerBuilder::new(config).build_serde::<Event>();
             // ANCHOR_END: deserializer
             chain_owned::<Event, _>(deser)
                 .with_metrics(ctx.pipeline, "main")

@@ -23,8 +23,8 @@ parsers decode from the payload already in memory, and the crate never calls
 ## Configuration
 
 The deserializer reads the pipeline's `deserializer: { json: ... }` section into
-`JsonSettings`. Every key has a default, so `json: {}` is a complete section. An
-unknown key is rejected.
+`JsonDeserializerConfig`. Every key has a default, so `json: {}` is a complete
+section. An unknown key is rejected.
 
 ```yaml
 deserializer:
@@ -42,11 +42,12 @@ own, so under `build_serde` that document is a `malformed` record error even
 with the check off. With `true`, a repeated key at any depth makes the document
 an error for `on_error` to handle. The check parses each document a second time.
 
-`JsonDeserializerBuilder::from_component` reads the section.
-`build_serde::<T>()` decodes each document into your own `T: DeserializeOwned`,
-and `build_value()` into `serde_json::Value`.
+`JsonDeserializerBuilder::from_component_config` reads the section, and
+`JsonDeserializerBuilder::new` takes a `JsonDeserializerConfig` built in code
+from its `Default`. `build_serde::<T>()` decodes each document into your own
+`T: DeserializeOwned`, and `build_value()` into `serde_json::Value`.
 [`json_skip_bad_records.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/json_skip_bad_records.rs)
-builds one from settings in code, and
+builds one from a config in code, and
 [`s3_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_backfill.rs)
 builds one from the section.
 

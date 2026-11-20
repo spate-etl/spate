@@ -359,7 +359,7 @@ impl Deserializer<Owned<Value>> for JsonValueDeserializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{JsonDeserializerBuilder, JsonSettings};
+    use crate::config::{JsonDeserializerBuilder, JsonDeserializerConfig};
     use crate::framing::tests::arb_stream;
     use proptest::prelude::*;
     use serde::Deserialize;
@@ -393,7 +393,7 @@ mod tests {
     use spate_test::test_ack;
 
     fn builder(framing: JsonFraming, on_error: OnError, dup: bool) -> JsonDeserializerBuilder {
-        JsonDeserializerBuilder::from_settings(JsonSettings {
+        JsonDeserializerBuilder::new(JsonDeserializerConfig {
             framing,
             on_error,
             reject_duplicate_keys: dup,

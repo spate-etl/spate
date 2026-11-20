@@ -12,7 +12,7 @@ use spate_core::ops::{ChunkConfig, PushOutcome, chain_owned};
 use spate_core::record::PartitionId;
 use spate_core::sink::{KeyHashRouter, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
-use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 use spate_test::{TestEncoder, decode_rows, memory_source};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,12 +29,10 @@ fn ndjson_payload_explodes_and_skips_poison_through_the_chain() {
     const L0: LaneId = LaneId(0);
 
     // Build the deserializer through the public builder, NDJSON with the skip policy.
-    let deser = JsonDeserializerBuilder::from_settings(JsonSettings {
-        framing: JsonFraming::Ndjson,
-        on_error: OnError::Skip,
-        reject_duplicate_keys: false,
-    })
-    .build_serde::<Event>();
+    let mut config = JsonDeserializerConfig::default();
+    config.framing = JsonFraming::Ndjson;
+    config.on_error = OnError::Skip;
+    let deser = JsonDeserializerBuilder::new(config).build_serde::<Event>();
 
     // Chain: decode → filter → project to a byte row → sink into one shard.
     let (queues, mut rxs) = shard_queues(1, 4096);

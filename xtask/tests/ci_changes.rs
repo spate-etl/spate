@@ -762,6 +762,30 @@ fn needs(job: &serde_yaml::Value) -> Vec<String> {
     }
 }
 
+/// The docs.rs job builds on the latest nightly, as docs.rs does, so a nightly
+/// that breaks rustdoc fails CI before a release publishes against it.
+#[test]
+fn the_docsrs_job_builds_on_the_latest_nightly() {
+    let tests = yaml(&read_workflow("tests.yml"));
+    let docsrs = &tests["jobs"]["docsrs"];
+    assert_eq!(docsrs["if"].as_str(), Some("inputs.rust == 'true'"));
+    assert!(docsrs["timeout-minutes"].as_u64().is_some());
+    lets_no_failure_through("docsrs", docsrs, None);
+    let steps = docsrs["steps"].as_sequence().unwrap();
+    let setup = steps
+        .iter()
+        .find(|s| s["uses"].as_str() == Some("./.github/actions/setup-rust"))
+        .expect("the docsrs job runs setup-rust");
+    assert_eq!(setup["with"]["toolchain"].as_str(), Some("nightly"));
+    assert!(setup["with"].get("toolchain-file").is_none(), "{setup:?}");
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["run"].as_str() == Some("cargo xtask docsrs")),
+        "{steps:?}"
+    );
+}
+
 /// Neither `job` nor a step of it carries `continue-on-error`, which turns a
 /// failure into a success `CI gate` cannot see. The step whose `id` is
 /// `exempt` alone may.

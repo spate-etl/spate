@@ -152,8 +152,9 @@ impl Gate {
     /// all its deliveries back.
     pub(crate) fn pass(&self) {
         // The lister carries a `group.id`, so librdkafka queues its log lines
-        // and errors where only a poll drains them.
-        crate::client::serve_queued(&self.lister);
+        // and errors where only a poll drains them. It is never assigned, so one
+        // read of its queue serves what is there.
+        crate::client::serve_passes(&self.lister, 1, || {});
         let entries = self.take();
         if entries.is_empty() {
             return;

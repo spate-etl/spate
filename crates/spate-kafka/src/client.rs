@@ -469,8 +469,8 @@ pub(crate) fn serve_queued<C: ConsumerContext>(consumer: &BaseConsumer<C>) {
 /// A poll cannot report an empty queue, so each pass serves the count it read
 /// and cannot follow a growing queue. librdkafka sorts log and statistics
 /// events ahead of a rebalance, so one arriving during a pass takes a poll of
-/// its count, and the next pass reaches the rebalance. A rebalance still
-/// queued after the last pass is left for close.
+/// its count, and a later pass serves the rebalance. A rebalance still queued
+/// after the last pass is left for close.
 pub(crate) fn serve_passes<C: ConsumerContext>(
     consumer: &BaseConsumer<C>,
     passes: usize,

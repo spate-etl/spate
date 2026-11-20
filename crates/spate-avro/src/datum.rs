@@ -107,6 +107,10 @@ where
     F: RecFamily,
     for<'buf> F::Rec<'buf>: serde::Deserialize<'buf>,
 {
+    fn component_type(&self) -> &str {
+        crate::config::TAG
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

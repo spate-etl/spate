@@ -242,8 +242,9 @@ handle method shapes exist to make them the path of least resistance:
   prefix is added for you (you pass the local name); only a raw-facade metric
   needs a prefix you choose yourself, and that one must **not** be `spate_`.
   The local name follows these rules:
-  - A counter is a plural noun, an optional qualifier, then `_total`:
-    `records_dropped_total`, `records_in_total`.
+  - A counter counts a plural noun and ends in `_total`. A qualifier, when
+    there is one, sits next to the noun: `records_dropped_total`,
+    `abandoned_batches_total`, `records_in_total`.
   - A gauge that counts things in a state puts the state first and the counted
     noun last: `inflight_batches`, `remaining_objects`.
   - A gauge that measures a subject names the subject, then the measure:

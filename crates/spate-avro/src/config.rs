@@ -34,6 +34,9 @@ use spate_core::config::{ComponentConfig, DurationBounds, SectionPath, check_dur
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The deserializer's component type, and the tag its section sits under.
+pub(crate) const TAG: &str = "avro";
+
 /// Payload framing mode.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -369,7 +372,7 @@ impl AvroDeserializerBuilder {
                 if url.scheme() == "http"
                     && registry.password.as_ref().is_some_and(|p| !p.is_empty())
                 {
-                    SectionPath::deserializer("avro").warn_cleartext_credential(
+                    SectionPath::deserializer(TAG).warn_cleartext_credential(
                         "registry.password",
                         "registry.url uses http://",
                     );

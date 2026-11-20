@@ -17,7 +17,7 @@ use apache_avro::{Schema, to_avro_datum};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckRef, Checkpointer};
-use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
+use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, RecFamily};
 use spate_core::error::{DeserError, SinkError};
 use spate_core::ops::{ChunkConfig, Emitter, PushOutcome, chain};
 use spate_core::record::{PartitionId, RawPayload, Record};
@@ -89,6 +89,14 @@ struct RangeTap<D> {
 }
 
 impl<D: Deserializer<BatchFam>> Deserializer<BatchFam> for RangeTap<D> {
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
+    }
+
+    fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
+        self.inner.attach_metrics(cx);
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

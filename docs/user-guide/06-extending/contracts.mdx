@@ -117,7 +117,7 @@ reason matters, and the two are handled differently:
 | Reason | Means | What the framework does |
 | --- | --- | --- |
 | `Capacity` | The sink cannot take more right now | Engages the backpressure controller: pauses lanes, keeps polling |
-| `NotReady` | An upstream dependency is not available — a schema fetch in flight, say | Retries **without pausing the source**, and counts `spate_deser_not_ready_total` |
+| `NotReady` | An upstream dependency is not available — a schema fetch in flight, say | Retries **without pausing the source**, and counts `spate_deser_not_ready_replays_total` |
 
 Getting this wrong is a performance bug rather than a correctness one, but an
 expensive one: reporting `Capacity` for a schema fetch pauses a source that had

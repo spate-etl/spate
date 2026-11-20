@@ -1105,7 +1105,7 @@ fn handle_assign<S: Source>(
 
     health.set_assignment_received(true);
     source_metrics.rebalance_assigned();
-    source_metrics.set_lanes_active(state.assignment.len());
+    source_metrics.set_active_lanes(state.assignment.len());
     pipeline_metrics.set_state(PipelineState::Running);
 }
 
@@ -1159,7 +1159,7 @@ fn handle_added<S: Source>(
             });
         }
     }
-    source_metrics.set_lanes_active(state.assignment.len());
+    source_metrics.set_active_lanes(state.assignment.len());
 }
 
 #[expect(
@@ -1192,7 +1192,7 @@ fn handle_revoke<S: Source>(
         drain_timeout,
         watch,
     );
-    source_metrics.set_lanes_active(state.assignment.len());
+    source_metrics.set_active_lanes(state.assignment.len());
 }
 
 /// Remove finished lanes ([`SourceEvent::LanesRetired`]). Their work is
@@ -1248,7 +1248,7 @@ fn handle_retired<S: Source>(
     for p in &to_revoke {
         state.committed.remove(p);
     }
-    source_metrics.set_lanes_active(state.assignment.len());
+    source_metrics.set_active_lanes(state.assignment.len());
 }
 
 /// Shared revocation choreography: stop owning threads, wait for the

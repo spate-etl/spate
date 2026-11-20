@@ -80,6 +80,11 @@ That page also says how to add a target.
 Give each parser of outside bytes a target in `fuzz/`, one `[[bin]]` per boundary in [`fuzz/Cargo.toml`](repo:fuzz/Cargo.toml).
 [Fuzz a parser](04-writing-a-test.md#fuzz-a-parser) says how a target reaches a decoder that the crate keeps private, and what CI runs.
 
+## Name its metrics
+
+Name each metric family and label key the crate registers by [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts).
+The framework's own names follow the same rules.
+
 ## Add its docs page
 
 A connector's page is the `README.mdx` of a folder under `docs/user-guide/04-connectors/<role>/`.

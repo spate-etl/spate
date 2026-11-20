@@ -26,7 +26,7 @@ impl DeserMetrics {
                 names::L_REASON,
                 "skip_policy",
             ),
-            not_ready: labels.counter(names::DESER_NOT_READY_TOTAL),
+            not_ready: labels.counter(names::DESER_NOT_READY_REPLAYS_TOTAL),
             batch_duration: labels.histogram(names::DESER_BATCH_DURATION_SECONDS),
         }
     }

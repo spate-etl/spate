@@ -178,7 +178,7 @@ feed through `Pipeline::seeded_feed` can end once the feed reads empty.
 
 The data-plane unit of a source (`SourceLane`): one pollable stream pinned
 to one pipeline thread, yielding borrowed payload batches. Lanes map m:n
-onto pipeline threads. Lane ids are never reused. `spate_source_lanes_active`
+onto pipeline threads. Lane ids are never reused. `spate_source_active_lanes`
 counts them.
 
 *Connector mapping:*

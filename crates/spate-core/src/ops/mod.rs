@@ -145,7 +145,7 @@ pub enum BlockReason {
     /// A deserializer reported
     /// [`DeserError::NotReady`](crate::error::DeserError::NotReady): the
     /// payload replays once its dependency arrives. Counted on
-    /// `spate_deser_not_ready_total`.
+    /// `spate_deser_not_ready_replays_total`.
     NotReady,
 }
 

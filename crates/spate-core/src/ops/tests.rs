@@ -3180,7 +3180,7 @@ fn a_fatal_on_replay_fails_the_batch_and_clears_the_stash() {
         statuses.push(ack2_rx.try_recv().expect("batch 2 resolved").status);
     });
     assert_eq!(statuses[0], AckStatus::Failed);
-    let name = names::DESER_NOT_READY_TOTAL;
+    let name = names::DESER_NOT_READY_REPLAYS_TOTAL;
     assert_eq!(
         spate_test::metric_value(&rendered, name, &[("pipeline", "fataltest")]),
         Some(1.0),

@@ -118,7 +118,7 @@ The class and the stage that meets the failure decide what you see:
   names the limit, and the reason is in the warnings logged before it. The
   connector page says whether that error also carries the reason.
 - **Retryable, in a deserializer.** The batch is held and replayed while the
-  failure lasts, counted by `spate_deser_not_ready_total`.
+  failure lasts, counted by `spate_deser_not_ready_replays_total`.
 - **Retryable, in a sink.** Under the default sink retry settings the sink
   retries without limit, and the pipeline keeps running with nothing written.
   `/readyz`, `spate_sink_shard_healthy`, `spate_backpressure_paused` and

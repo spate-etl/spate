@@ -467,7 +467,7 @@ mod tests {
             src.poll_duration(Duration::from_millis(3));
             src.set_partition_lag(PartitionId(7), 40);
             src.rebalance_assigned();
-            src.set_lanes_active(4);
+            src.set_active_lanes(4);
 
             let deser = DeserMetrics::new(&labels("orders_kafka"));
             deser.batch(510, 2, Duration::from_millis(1));

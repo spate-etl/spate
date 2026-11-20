@@ -2,11 +2,10 @@
 //! taxonomy documented in [the metrics reference].
 //!
 //! Every framework metric is registered through these constants; nothing
-//! else may hard-code a metric name. Names follow Prometheus conventions:
-//! `_total` suffix on counters, unit suffixes (`_seconds`, `_bytes`,
-//! `_rows`) on everything measured in a unit, `spate_` prefix throughout.
+//! else may hard-code a metric name. Names follow [the naming rules].
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
+//! [the naming rules]: https://spate.kainth.dev/docs/user-guide/extending/instrumenting-connectors#contracts
 
 // Standard labels attached to every framework metric.
 
@@ -75,10 +74,10 @@ metric_names! {
         DESER_RECORDS_TOTAL = "spate_deser_records_total",
         /// Payloads dropped by the Skip error policy, by [`L_REASON`].
         DESER_RECORDS_DROPPED_TOTAL = "spate_deser_records_dropped_total",
-        /// Counter: payload replays awaiting an upstream dependency (e.g. a schema
-        /// fetch), counting `DeserError::NotReady` occurrences. Not an error and not
+        /// Payload replays awaiting an upstream dependency (e.g. a schema fetch),
+        /// one per `DeserError::NotReady` answer. Not an error and not
         /// backpressure.
-        DESER_NOT_READY_TOTAL = "spate_deser_not_ready_total",
+        DESER_NOT_READY_REPLAYS_TOTAL = "spate_deser_not_ready_replays_total",
 
         // Operators.
 
@@ -125,7 +124,7 @@ metric_names! {
         /// by [`L_SHARD`]. Non-zero is a framework bug, not an operating condition.
         /// The drain still completed and the data still replays, but that shard's
         /// contribution to the drain report was lost with it.
-        SINK_DRAIN_OVERRUN_TOTAL = "spate_sink_drain_overrun_total",
+        SINK_DRAIN_OVERRUNS_TOTAL = "spate_sink_drain_overruns_total",
 
         // Checkpointing.
 
@@ -165,7 +164,7 @@ metric_names! {
         /// lag has never been measured is absent rather than `0`.
         SOURCE_LAG_RECORDS = "spate_source_lag_records",
         /// Currently assigned lanes (partitions).
-        SOURCE_LANES_ACTIVE = "spate_source_lanes_active",
+        SOURCE_ACTIVE_LANES = "spate_source_active_lanes",
 
         // Queues.
 
@@ -263,7 +262,8 @@ metric_names! {
 
         // Sink.
 
-        /// Rows per sealed batch.
+        /// Rows per sealed batch. Counted in rows, as `batch.max_rows` and the
+        /// `rows` flush reason are, so the three read against each other.
         SINK_BATCH_ROWS = "spate_sink_batch_rows",
         /// Bytes per sealed batch.
         SINK_BATCH_BYTES = "spate_sink_batch_bytes",

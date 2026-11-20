@@ -303,7 +303,7 @@ impl SinkShardMetrics {
                 names::L_SHARD,
                 shard.clone(),
             ),
-            drain_overrun: labels.counter1(names::SINK_DRAIN_OVERRUN_TOTAL, names::L_SHARD, shard),
+            drain_overrun: labels.counter1(names::SINK_DRAIN_OVERRUNS_TOTAL, names::L_SHARD, shard),
             shard_healthy,
             e2e: labels.histogram(names::E2E_LATENCY_SECONDS),
             e2e_basis,

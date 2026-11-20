@@ -100,7 +100,7 @@ Every drop has a `reason`; every error has an `error_type`. The pattern is
 | `spate_operator_errors_total` | `error_type` (`record_level` or `fatal`) | Errors by what the stage did with them: `record_level` for a record a Skip policy dropped, `fatal` for a failure that stopped the pipeline. No error here is retryable, since an operator stage carries no error class to retry on. |
 | `spate_sink_errors_total` | `shard`, `error_type` | Write errors by taxonomy class. |
 | `spate_feed_errors_total` | `op`, `error_type` | Feed calls answered with an error, by the call and the feed's error kind. |
-| `spate_deser_not_ready_total` | — | Deserialization deferred because an upstream dependency was not yet available. |
+| `spate_deser_not_ready_replays_total` | — | Deserialization deferred because an upstream dependency was not yet available. |
 
 That last one is not an error. A deserializer can report that it is **not
 ready** rather than that it failed (waiting on a schema fetch, say). The

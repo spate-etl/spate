@@ -53,9 +53,9 @@
 //! re-pushes the same batch from the payload that blocked until the schema
 //! lands. A not-ready wait is an upstream dependency rather than sink
 //! pressure, so it does not engage the backpressure controller and does not
-//! pause the source; it is counted on `spate_deser_not_ready_total`. Delivery
-//! stays at-least-once (INV-1): no record is dropped, and the pipeline thread
-//! never performs the I/O itself.
+//! pause the source; it is counted on `spate_deser_not_ready_replays_total`.
+//! Delivery stays at-least-once (INV-1): no record is dropped, and the
+//! pipeline thread never performs the I/O itself.
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  production

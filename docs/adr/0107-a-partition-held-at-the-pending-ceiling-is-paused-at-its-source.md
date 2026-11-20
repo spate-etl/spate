@@ -113,9 +113,13 @@ beside it), and the causes and retries in
 
 - With the pause, resident memory grew by under 1 MiB while 360 transactions of
   900 kB each were aborted behind a partition at the ceiling. With the call to
-  the source's `pause` removed, it grew by 321,440 KiB. Measured by
-  `real_broker_a_partition_at_the_ceiling_stops_fetching` on the Apache Kafka
-  lane, one run each.
+  the source's `pause` removed, it grew by 321,440 KiB. Measured on the Apache
+  Kafka lane, one run each.
+- Over those 360 aborted transactions, the client received 364 bytes with the
+  pause and 324,172,024 bytes with the call to the source's `pause` removed.
+  `real_broker_a_partition_at_the_ceiling_stops_fetching` reads them from
+  `spate_kafka_source_rx_bytes_total` on the Apache Kafka lane, one run each,
+  and fails above 64 MiB.
 - The two-batches-every-two-seconds figure was hand-recorded from one run of
   that test before its sink linger was shortened. No committed test measures
   it.

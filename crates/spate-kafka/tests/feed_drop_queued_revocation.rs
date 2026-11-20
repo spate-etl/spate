@@ -196,7 +196,8 @@ fn the_drop_answers_a_revocation_queued_after_the_last_poll() {
         hold.lines.lock().unwrap()
     );
     assert!(
-        hold.first(CLOSING).is_none_or(|c| answered.is_some_and(|a| a < c)),
+        hold.first(CLOSING)
+            .is_none_or(|c| answered.is_some_and(|a| a < c)),
         "the close started before the revocation was answered: {:#?}",
         hold.lines.lock().unwrap()
     );

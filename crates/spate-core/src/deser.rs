@@ -59,7 +59,7 @@ pub trait Deserializer<F: RecFamily>: Send {
     /// The implementation label (`"json"`, `"avro"`) on this deserializer's
     /// stage series and on the `Meter` it receives, which is scoped
     /// `spate_<component_type>_deser_*`. The default,
-    /// [`DESERIALIZER_DEFAULT`](crate::metrics::names::DESERIALIZER_DEFAULT),
+    /// [`DESERIALIZER_DEFAULT`],
     /// receives no `Meter`.
     ///
     /// A deserializer that wraps another returns the inner one's type.

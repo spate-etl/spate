@@ -22,7 +22,7 @@
 
 use crate::sink::context::{BatchInflight, SinkContext};
 use crate::sink::frame::{FrameParser, MessageRef};
-use crate::sink::metrics::KafkaSinkStatsMetrics;
+use crate::sink::metrics::KafkaProducerStatsMetrics;
 use bytes::Bytes;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::{Header, OwnedHeaders};
@@ -98,7 +98,7 @@ pub struct KafkaWriter {
     delivery_timeout: Duration,
     /// Shared with the main producer's context, which publishes through
     /// it; filled by [`attach_metrics`](ShardWriter::attach_metrics).
-    stats_slot: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
+    stats_slot: Arc<Mutex<Option<KafkaProducerStatsMetrics>>>,
     statistics_enabled: bool,
     /// The clock the send and report deadlines run on.
     io_clock: Arc<dyn IoClock + RefUnwindSafe>,
@@ -109,7 +109,7 @@ impl KafkaWriter {
         rejection_window: Duration,
         topic: String,
         delivery_timeout: Duration,
-        stats_slot: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
+        stats_slot: Arc<Mutex<Option<KafkaProducerStatsMetrics>>>,
         statistics_enabled: bool,
         io_clock: Arc<dyn IoClock + RefUnwindSafe>,
     ) -> Self {
@@ -196,7 +196,7 @@ impl ShardWriter for KafkaWriter {
         }
         if let Some(meter) = cx.meter {
             *self.stats_slot.lock().expect("stats slot lock") =
-                Some(KafkaSinkStatsMetrics::new(meter));
+                Some(KafkaProducerStatsMetrics::new(meter));
         }
     }
 

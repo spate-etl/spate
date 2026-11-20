@@ -19,7 +19,7 @@
 //! [`write_batch`]: spate_core::sink::ShardWriter::write_batch
 
 use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
-use crate::sink::metrics::KafkaSinkStatsMetrics;
+use crate::sink::metrics::KafkaProducerStatsMetrics;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::statistics::Statistics;
@@ -110,7 +110,7 @@ pub(crate) struct SinkHooks {
     /// Filled by the writer's `attach_metrics` (main producer only, and
     /// only when statistics are enabled); the `stats` callback publishes
     /// through it from the producer's poll thread.
-    stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
+    stats: Arc<Mutex<Option<KafkaProducerStatsMetrics>>>,
     /// When the latest SASL or TLS rejection arrived, on `clock`, and its
     /// text.
     rejection: Mutex<Option<(Instant, String)>>,
@@ -122,7 +122,10 @@ pub(crate) struct SinkHooks {
 
 impl SinkHooks {
     /// The main producer's hooks, sharing the writer's statistics slot.
-    pub(crate) fn new(stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>, clock: SyncClock) -> Self {
+    pub(crate) fn new(
+        stats: Arc<Mutex<Option<KafkaProducerStatsMetrics>>>,
+        clock: SyncClock,
+    ) -> Self {
         SinkHooks {
             stats,
             rejection: Mutex::new(None),

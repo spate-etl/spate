@@ -1,7 +1,7 @@
 //! librdkafka producer statistics → `spate_kafka_sink_*` and
 //! `spate_kafka_feed_*` metric families.
 //!
-//! [`KafkaSinkStatsMetrics`] translates the periodic
+//! [`KafkaProducerStatsMetrics`] translates the periodic
 //! [`Statistics`] snapshot into the connector-owned families [the metrics
 //! reference] documents under Kafka sink. Unlike the source (whose snapshots
 //! are drained on the controller thread), the sink has no control-plane tick:
@@ -54,11 +54,12 @@ const BROKER_INT_LATENCY_P99_SECONDS: &str = "broker_int_latency_p99_seconds";
 const BROKER_OUTBUF_LATENCY_AVG_SECONDS: &str = "broker_outbuf_latency_avg_seconds";
 const BROKER_OUTBUF_LATENCY_P99_SECONDS: &str = "broker_outbuf_latency_p99_seconds";
 
-/// Handles for the producer statistics families. Owned behind a mutex by
+/// Handles for the producer statistics families. Named for the producer
+/// client because a sink and a feed both use it. Owned behind a mutex by
 /// the sink's producer context or the feed's `Core`; the poll thread updates
 /// them, and on a feed the consumer thread too during its close flush.
 #[derive(Debug)]
-pub(crate) struct KafkaSinkStatsMetrics {
+pub(crate) struct KafkaProducerStatsMetrics {
     meter: Meter,
     /// Labels on every series, ahead of `broker`.
     extra: ExtraLabels,
@@ -112,7 +113,7 @@ impl BrokerHandles {
     }
 }
 
-impl KafkaSinkStatsMetrics {
+impl KafkaProducerStatsMetrics {
     /// Resolve all fixed handles. Called once from `attach_metrics`.
     pub(crate) fn new(meter: Meter) -> Self {
         Self::with_labels(meter, Vec::new())
@@ -126,7 +127,7 @@ impl KafkaSinkStatsMetrics {
 
     fn with_labels(meter: Meter, extra: ExtraLabels) -> Self {
         let e = extra.as_slice();
-        KafkaSinkStatsMetrics {
+        KafkaProducerStatsMetrics {
             tx_requests: meter.counter(TX_REQUESTS_TOTAL, e),
             tx_bytes: meter.counter(TX_BYTES_TOTAL, e),
             rx_responses: meter.counter(RX_RESPONSES_TOTAL, e),
@@ -257,7 +258,7 @@ mod tests {
     #[test]
     fn producer_totals_and_queue_gauges_render() {
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let mut b = broker("k1:9092/1", "learned", 1);
             b.tx = 42;
             b.txbytes = 8_192;
@@ -304,7 +305,7 @@ mod tests {
             b
         };
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             for brokers in [
                 vec![counting("k1:9092/1", 1, 1), counting("k2:9092/2", 2, 5)],
                 vec![counting("k1:9092/1", 1, 5)],
@@ -336,7 +337,7 @@ mod tests {
     #[test]
     fn broker_latency_windows_convert_and_gate_on_cnt() {
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let mut b = broker("k1:9092/1", "learned", 1);
             b.rtt = Some(window(1_500, 3_000, 10)); // microseconds
             b.int_latency = Some(window(2_000, 9_000, 25)); // microseconds
@@ -366,7 +367,7 @@ mod tests {
     #[test]
     fn internal_logical_and_bootstrap_brokers_are_filtered() {
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let mut learned = broker("k1:9092/1", "learned", 1);
             learned.txretries = 5;
             learned.txerrs = 2;
@@ -407,7 +408,7 @@ mod tests {
     #[test]
     fn a_coordinator_only_broker_counts_as_up() {
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let mut coordinator_only = broker("k1:9092/1", "learned", 1);
             coordinator_only.nodename = "k1:9092".to_owned();
             coordinator_only.state = "DOWN".to_owned();
@@ -459,9 +460,9 @@ mod tests {
 
     #[test]
     fn departed_brokers_stop_updating_after_retain() {
-        let mut m_holder: Option<KafkaSinkStatsMetrics> = None;
+        let mut m_holder: Option<KafkaProducerStatsMetrics> = None;
         render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let two = Statistics {
                 brokers: HashMap::from([
                     ("k1:9092/1".to_owned(), broker("k1:9092/1", "learned", 1)),
@@ -494,7 +495,7 @@ mod tests {
     #[test]
     fn a_departed_broker_reads_down() {
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             let stay = broker("k1:9092/1", "learned", 1);
             let mut gone = broker("k2:9092/2", "learned", 2);
             gone.rtt = Some(window(1_500, 3_000, 10));
@@ -539,7 +540,7 @@ mod tests {
         // Documents the fetch-max contract (see the module docs): a
         // regressing upstream total would flat-line, not dip.
         let rendered = render_metrics(|| {
-            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut m = KafkaProducerStatsMetrics::new(meter());
             m.update(&Statistics {
                 txmsgs: 100,
                 ..Default::default()

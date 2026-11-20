@@ -122,7 +122,7 @@ use crate::epoch::{
 };
 use crate::error::{StartFailure, classify_start_error};
 use crate::lane::{KafkaLane, Shared};
-use crate::metrics::KafkaStatsMetrics;
+use crate::metrics::KafkaConsumerStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::Message;
@@ -206,7 +206,7 @@ struct Member {
     consumer: Arc<BaseConsumer<SourceContext>>,
     /// The consumer's connector-owned `spate_kafka_source_*` translator.
     /// `None` when statistics are off or the runtime provides no Meter.
-    stats: Option<KafkaStatsMetrics>,
+    stats: Option<KafkaConsumerStatsMetrics>,
     /// Live lanes of this consumer's partitions, by id.
     assignment: FastMap<LaneId, i32>,
     /// Lanes surfaced as revoked whose partitions this consumer still owns:
@@ -2068,7 +2068,7 @@ impl Source for KafkaSource {
                 None
             } else {
                 ctx.meter.as_ref().map(|m| {
-                    KafkaStatsMetrics::for_source_consumer(
+                    KafkaConsumerStatsMetrics::for_source_consumer(
                         m.clone(),
                         ctx.per_partition_detail,
                         role.1,
@@ -4709,11 +4709,13 @@ mod tests {
                     let meter = spate_core::metrics::Meter::with_namespace(
                         "kafka", "moved", "source", "kafka",
                     );
-                    member.stats = Some(crate::metrics::KafkaStatsMetrics::for_source_consumer(
-                        meter,
-                        true,
-                        Some(k),
-                    ));
+                    member.stats = Some(
+                        crate::metrics::KafkaConsumerStatsMetrics::for_source_consumer(
+                            meter,
+                            true,
+                            Some(k),
+                        ),
+                    );
                 }
                 let owned = source.members[0].live_partition_ids();
                 source.members[0]
@@ -6964,7 +6966,8 @@ mod tests {
             let mut source = opened_source(&[(0, 0), (1, 1)]);
             let meter =
                 spate_core::metrics::Meter::with_namespace("kafka", "prune", "source", "kafka");
-            source.members[0].stats = Some(crate::metrics::KafkaStatsMetrics::new(meter, true));
+            source.members[0].stats =
+                Some(crate::metrics::KafkaConsumerStatsMetrics::new(meter, true));
             let stats = parked(&[0, 1]);
             let owned = source.retained_partition_ids();
             source.members[0]

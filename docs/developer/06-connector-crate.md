@@ -82,7 +82,7 @@ Give each parser of outside bytes a target in `fuzz/`, one `[[bin]]` per boundar
 
 ## Name its metrics
 
-Name each metric family and label key the crate registers by [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts).
+Name each metric family the crate registers by [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts).
 The framework's own names follow the same rules.
 
 ## Add its docs page

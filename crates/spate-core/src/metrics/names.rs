@@ -262,8 +262,8 @@ metric_names! {
 
         // Sink.
 
-        /// Rows per sealed batch. Counted in rows, as `batch.max_rows` and the
-        /// `rows` flush reason are, so the three read against each other.
+        /// Rows per sealed batch. Counted in rows, as `batch.max_rows` is, so a
+        /// reading compares directly with that limit and the `rows` flush reason.
         SINK_BATCH_ROWS = "spate_sink_batch_rows",
         /// Bytes per sealed batch.
         SINK_BATCH_BYTES = "spate_sink_batch_bytes",

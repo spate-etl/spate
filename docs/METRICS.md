@@ -252,7 +252,7 @@ series carry its name as the `component` label (a single sink uses
 |---|---|---|---|
 | `spate_sink_records_total` | counter | `shard` | Records durably written (acknowledged flushes only). |
 | `spate_sink_bytes_total` | counter | `shard` | Bytes durably written, counted before the sink's frame codec. |
-| `spate_sink_batch_rows` | histogram | | Rows per sealed batch. Counted in rows, as `batch.max_rows` and the `rows` flush reason are, so the three read against each other. |
+| `spate_sink_batch_rows` | histogram | | Rows per sealed batch. Counted in rows, as `batch.max_rows` is, so a reading compares directly with that limit and the `rows` flush reason. |
 | `spate_sink_batch_bytes` | histogram | | Bytes per sealed batch, counted before the sink's frame codec. |
 | `spate_sink_flushes_total` | counter | `shard`, `reason` (`rows`\|`bytes`\|`linger`\|`drain`) | Flushes by trigger. |
 | `spate_sink_flush_duration_seconds` | histogram | `shard` | **Seal→settle** per durably written batch: the wait for an `inflight.max_per_shard` slot, every attempt, every retry-backoff sleep and quarantine probe wait, and the write that finally succeeded. The right input for a commit-lag budget and the **wrong** first reach for "is the sink slow" — see [What a flush contains](#what-a-flush-contains). Only settled batches are observed; an abandoned one is counted by `spate_sink_abandoned_batches_total` instead. |

@@ -4,4 +4,4 @@
 
 `deser` joins `ROLE_SEGMENTS`, so a `Meter` local name that starts with `deser_` panics, as one that starts with `source_`, `sink_` or `feed_` does. The rule holds in every namespace, including the `spate_custom_*` names `ChainCtx::meter` registers. v0.5.0 accepted such names, so a connector or pipeline author who registered one must rename it.
 
-Two cases may need a code change. A type that implements both `Deserializer` and `Source` and calls `component_type()` with method syntax must name the trait, as in `Source::component_type(&x)`. Generic code that calls `ChainBuilder::with_metrics` without a `D: Deserializer<DF>` bound must add one.
+Three cases may need a code change. A type that implements both `Deserializer` and `Source` and calls `component_type()` with method syntax must name the trait, as in `Source::component_type(&x)`. A type that implements both `Deserializer` and `ShardWriter` and calls `attach_metrics()` with method syntax must do the same, as in `ShardWriter::attach_metrics(&mut x, cx)`. Generic code that calls `ChainBuilder::with_metrics` without a `D: Deserializer<DF>` bound must add one.

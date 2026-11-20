@@ -85,9 +85,9 @@ pub struct DeserMetricsCtx {
     /// Scoped `spate_<component_type>_deser_*` and pre-labeled with the
     /// pipeline, the chain's `<component>.deserializer` and the deserializer's
     /// [`component_type`](Deserializer::component_type). `None` when that type
-    /// cannot scope a family: the default `"deserializer"` or a reserved root
-    /// opts out silently, and a malformed value is logged and also yields
-    /// `None`.
+    /// cannot scope a family: the default `"deserializer"`, `"custom"` or a
+    /// reserved root opts out silently, and a malformed value is logged and
+    /// also yields `None`.
     pub meter: Option<Meter>,
 }
 

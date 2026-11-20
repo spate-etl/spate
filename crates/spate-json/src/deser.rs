@@ -170,7 +170,7 @@ impl DecoderCore {
     ) -> Result<(), DeserError> {
         // The array is decoded in one pass, so its error handling is atomic:
         // a malformed element fails the whole payload (per `on_error`). Use
-        // `ndjson` when you need per-record isolation.
+        // `ndjson` with `on_error: skip` when you need per-record isolation.
         if self.reject_duplicate_keys
             && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {
@@ -596,6 +596,25 @@ mod tests {
         )
         .unwrap();
         assert!(out.records.is_empty(), "array error handling is atomic");
+    }
+
+    #[test]
+    fn array_fail_emits_nothing() {
+        let mut d = builder(JsonFraming::Array, OnError::Fail, false).build_serde::<Ev>();
+        let mut out = EmitCollector::new();
+        let err = d
+            .deserialize(
+                &raw(br#"[{"id":1,"name":"a"},{"oops":true}]"#),
+                &test_ack(),
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        // The good first element must not be emitted ahead of the error.
+        assert!(
+            out.records.is_empty(),
+            "no record may be emitted when the payload fails"
+        );
     }
 
     #[test]

@@ -22,9 +22,10 @@
 //! - `single_typed` / `single_value` — one flat 15-field document, decoded
 //!   into a struct and into a dynamically-typed value. The per-record cost
 //!   every payload pays, and the two ends of the typing axis.
-//! - `ndjson_batch50` — fifty records newline-delimited. This framing isolates
-//!   errors per line, so it does per-record bookkeeping the others do not; the
-//!   gap against `array_batch50` is what that isolation costs.
+//! - `ndjson_batch50` — fifty records newline-delimited. Under `Skip`, which
+//!   these cases run, this framing isolates errors per line, so it does
+//!   per-record bookkeeping the others do not; the gap against `array_batch50`
+//!   is what that isolation costs.
 //! - `array_batch50` — the same fifty records as one top-level array, decoded
 //!   in a single pass and handled atomically on error.
 //!

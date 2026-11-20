@@ -87,8 +87,7 @@ other sources.
   payload's ack, so the source offset commits only after all of them are
   durably written. A malformed record follows the per-record Skip/Fail policy
   (counted in `spate_json_deser_records_dropped_total` on a chain built with
-  `with_metrics`); NDJSON isolates errors
-  per line.
+  `with_metrics`). Under Skip, NDJSON isolates errors per line.
 - **Amazon SQS (feed)** — a unit is deleted only after every record in it
   is acknowledged. A failed unit, and a unit a stopping worker has not
   finished, return to the queue at once; one whose worker crashed returns

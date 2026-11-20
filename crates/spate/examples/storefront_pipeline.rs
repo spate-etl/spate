@@ -178,7 +178,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let deser = JsonDeserializerBuilder::from_component(&deser_section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
-                .with_metrics(ctx.pipeline.clone(), "main")
                 .build_serde::<StorefrontEvent>();
 
             let mut split = chain_owned::<StorefrontEvent, _>(deser)

@@ -74,7 +74,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 on_error: OnError::Skip,
                 reject_duplicate_keys: false,
             })
-            .with_metrics(ctx.pipeline.clone(), "main")
             .build_serde::<Event>();
             // ANCHOR_END: deserializer
             chain_owned::<Event, _>(deser)

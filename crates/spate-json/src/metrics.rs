@@ -8,9 +8,10 @@
 //! surfaces those per-record drops, mirroring the connector-owned
 //! convention used by `spate_kafka_source_*` / `spate_kafka_sink_*`.
 //!
-//! Handles are resolved once, at build time, from a
-//! [`Meter`](spate_core::metrics::Meter) scoped to the `json_deser` namespace;
-//! the per-record path only touches the resolved `Counter`.
+//! Handles are resolved once, at build time, from the
+//! [`Meter`](spate_core::metrics::Meter) the chain hands the deserializer,
+//! scoped `spate_json_deser_*`; the per-record path only touches the resolved
+//! `Counter`.
 
 use spate_core::metrics::names::L_REASON;
 use spate_core::metrics::{Counter, Meter};
@@ -28,7 +29,7 @@ pub(crate) struct JsonDeserMetrics {
 }
 
 impl JsonDeserMetrics {
-    /// Resolve the drop counters from `meter` (namespace `json_deser`).
+    /// Resolve the drop counters from `meter`.
     /// Build-time only.
     pub(crate) fn new(meter: &Meter) -> Self {
         JsonDeserMetrics {

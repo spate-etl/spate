@@ -37,9 +37,10 @@
 //! payload. The error text holds the kind of failure, and its position where the
 //! parser reports one, with no content from the record, and the `WARN` line for a skipped record carries
 //! its partition and offset. The connector-owned
-//! `spate_json_deser_*` families are minted from a [`Meter`](spate_core::metrics::Meter)
-//! when the builder is given a metrics scope (see
-//! [`JsonDeserializerBuilder::with_metrics`]); they sit alongside the
+//! `spate_json_deser_*` families are minted from the
+//! [`Meter`](spate_core::metrics::Meter) that
+//! [`ChainBuilder::with_metrics`](spate_core::ops::ChainBuilder::with_metrics)
+//! hands the deserializer; they sit alongside the
 //! framework's generic `spate_deser_*` stage metrics, which wrap every decoder.
 //!
 //! # Fidelity knobs

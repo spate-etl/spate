@@ -1143,7 +1143,7 @@ async fn receive_task(shared: Arc<Shared>) {
             wait: settings.wait,
         };
         if std::mem::take(&mut retrying) {
-            shared.count(|m| m.retried(FeedOp::Receive).increment(1));
+            shared.count(|m| m.retried(FeedOp::Receive));
         }
         let sent_at = shared.now();
         let received = shared.queue.receive(request).await;
@@ -1372,7 +1372,7 @@ async fn extend_chunk(
         return Extended::Done;
     };
     if !once_more {
-        shared.count(|m| m.retried(FeedOp::Renew).increment(1));
+        shared.count(|m| m.retried(FeedOp::Renew));
     }
     let entries = chunk
         .iter()
@@ -1401,7 +1401,7 @@ async fn extend_chunk(
                     Some(Ok(())) => h.deadline = (sent_at + *ext).min(h.hold_end),
                     Some(Err(failure)) => {
                         let refusal = Refusal::of(&failure.code);
-                        shared.count(|m| m.refused(refusal).increment(1));
+                        shared.count(|m| m.refused(refusal));
                         if refusal.takes_unit() {
                             h.gone = true;
                         } else {
@@ -1648,7 +1648,7 @@ async fn settle_task(shared: Arc<Shared>) {
             let before = fails.len();
             fails.retain(|s| now < s.deadline);
             let lapsed = before - fails.len();
-            shared.count(|m| m.fails_dropped.increment(lapsed as u64));
+            shared.count(|m| m.dropped_fails(lapsed as u64));
             let bound = shared.lock().close_bound(&*shared.clock);
             if bound.is_some_and(|bound| now >= bound) {
                 let n = std::mem::take(&mut fails).len();
@@ -1760,12 +1760,12 @@ where
                     tracing::debug!(error = %e.message, "dropping a batch {doing} units past its deadline");
                     // A close's bound reports its own drops.
                     if settling == Settling::Fail && limit == oldest {
-                        shared.count(|m| m.fails_dropped.increment(chunk.len() as u64));
+                        shared.count(|m| m.dropped_fails(chunk.len() as u64));
                     }
                     return Ok(chunk.len());
                 };
                 shared.clock.sleep_until(at).await;
-                shared.count(|m| m.retried(settling.op()).increment(1));
+                shared.count(|m| m.retried(settling.op()));
             }
         }
     }
@@ -1836,7 +1836,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
             return Err(());
         }
         if retried {
-            shared.count(|m| m.retried(FeedOp::Publish).increment(1));
+            shared.count(|m| m.retried(FeedOp::Publish));
         }
         match shared.queue.send_batch(entries.clone()).await {
             Ok(outcome) => {

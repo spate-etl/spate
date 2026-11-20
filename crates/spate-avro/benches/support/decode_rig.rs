@@ -31,7 +31,7 @@
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use spate_avro::{
-    AvroDatumDeserializer, AvroDeserializerBuilder, AvroMode, AvroSerdeDeserializer, AvroSettings,
+    AvroDatumDeserializer, AvroDeserializerBuilder, AvroDeserializerConfig, AvroSerdeDeserializer,
     AvroValueDeserializer, RegistrySection, SchemaSource,
 };
 use spate_core::checkpoint::AckRef;
@@ -172,15 +172,11 @@ pub(crate) fn rig<D>(
     payload: Vec<u8>,
     build: impl FnOnce(&AvroDeserializerBuilder) -> D,
 ) -> Rig<D> {
-    let settings = AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(schema)),
-        ..AvroSettings::default()
-    };
+    let settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+    let builder = AvroDeserializerBuilder::new(settings, rt.handle()).unwrap();
     let deser = build(&builder);
     // The rig holds the only `AckRef`, so the batch never resolves and no
     // message is ever sent, so the receiver has nothing to keep alive.
@@ -198,7 +194,7 @@ pub(crate) fn rig<D>(
 /// and its reader schema. The runtime is never driven, so a Confluent rig
 /// built this way never performs a fetch.
 pub(crate) fn batch_rig<D>(
-    settings: &AvroSettings,
+    settings: &AvroDeserializerConfig,
     payloads: Vec<Vec<u8>>,
     decodes: bool,
     build: impl FnOnce(&AvroDeserializerBuilder) -> D,
@@ -206,7 +202,7 @@ pub(crate) fn batch_rig<D>(
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let builder = AvroDeserializerBuilder::from_settings(settings, rt.handle()).unwrap();
+    let builder = AvroDeserializerBuilder::new(settings.clone(), rt.handle()).unwrap();
     let deser = build(&builder);
     let (ack, _ack_rx) = AckRef::test_pair();
     BatchRig {
@@ -221,13 +217,10 @@ pub(crate) fn batch_rig<D>(
 
 /// Raw-mode settings over one inline schema, optionally resolved into a
 /// reader schema.
-pub(crate) fn raw_settings(schema: &str, reader: Option<&str>) -> AvroSettings {
-    AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(schema)),
-        reader_schema: reader.map(SchemaSource::inline),
-        ..AvroSettings::default()
-    }
+pub(crate) fn raw_settings(schema: &str, reader: Option<&str>) -> AvroDeserializerConfig {
+    let mut config = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
+    config.reader_schema = reader.map(SchemaSource::inline);
+    config
 }
 
 // ---------------------------------------------------------------------------
@@ -235,14 +228,12 @@ pub(crate) fn raw_settings(schema: &str, reader: Option<&str>) -> AvroSettings {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn flat_value_rig() -> Rig<AvroValueDeserializer> {
-    rig(orders::SCHEMA, orders::order_datum(), |b| {
-        b.build_value().expect("value builder")
-    })
+    rig(orders::SCHEMA, orders::order_datum(), |b| b.build_value())
 }
 
 pub(crate) fn flat_serde_rig() -> Rig<AvroSerdeDeserializer<orders::Order>> {
     rig(orders::SCHEMA, orders::order_datum(), |b| {
-        b.build_serde::<orders::Order>().expect("serde builder")
+        b.build_serde::<orders::Order>()
     })
 }
 
@@ -255,13 +246,13 @@ pub(crate) fn flat_datum_rig() -> Rig<AvroDatumDeserializer<Owned<orders::Order>
 
 pub(crate) fn flat_value_malformed_rig() -> Rig<AvroValueDeserializer> {
     rig(orders::SCHEMA, orders::malformed_datum(), |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
 pub(crate) fn batch_value_rig() -> Rig<AvroValueDeserializer> {
     rig(orders::BATCH_SCHEMA, orders::batch_datum(), |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
@@ -276,14 +267,14 @@ pub(crate) fn batch_datum_rig() -> Rig<AvroDatumDeserializer<Owned<orders::Place
 pub(crate) fn flat_corpus_value_rig() -> BatchRig<AvroValueDeserializer> {
     let settings = raw_settings(orders::SCHEMA, None);
     batch_rig(&settings, corpora::order_datums(), true, |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
 pub(crate) fn flat_corpus_serde_rig() -> BatchRig<AvroSerdeDeserializer<orders::Order>> {
     let settings = raw_settings(orders::SCHEMA, None);
     batch_rig(&settings, corpora::order_datums(), true, |b| {
-        b.build_serde::<orders::Order>().expect("serde builder")
+        b.build_serde::<orders::Order>()
     })
 }
 
@@ -302,7 +293,7 @@ pub(crate) fn flat_corpus_datum_rig() -> BatchRig<AvroDatumDeserializer<Owned<or
 pub(crate) fn order_batch_value_rig() -> BatchRig<AvroValueDeserializer> {
     let settings = raw_settings(batches::BATCH_SCHEMA, None);
     batch_rig(&settings, batches::order_batches(), true, |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
@@ -310,7 +301,6 @@ pub(crate) fn order_batch_serde_rig() -> BatchRig<AvroSerdeDeserializer<batches:
     let settings = raw_settings(batches::BATCH_SCHEMA, None);
     batch_rig(&settings, batches::order_batches(), true, |b| {
         b.build_serde::<batches::OrderPlaced>()
-            .expect("serde builder")
     })
 }
 
@@ -427,7 +417,7 @@ fn flatten_rig<D, S>(
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+    let builder = AvroDeserializerBuilder::new(settings, rt.handle()).unwrap();
     let deser = build(&builder);
     let (ack, _ack_rx) = AckRef::test_pair();
     FlattenRig {
@@ -441,7 +431,7 @@ fn flatten_rig<D, S>(
 
 pub(crate) fn value_flatten_rig() -> FlattenRig<AvroValueDeserializer, ValueFlattenSink> {
     flatten_rig(batches::order_batches(), ValueFlattenSink(0), |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
@@ -457,13 +447,10 @@ pub(crate) fn typed_flatten_rig()
 // Confluent framing and schema-cache lookup
 // ---------------------------------------------------------------------------
 
-pub(crate) fn confluent_settings(url: String) -> AvroSettings {
-    AvroSettings {
-        mode: AvroMode::Confluent,
-        registry: Some(RegistrySection::new(url)),
-        negative_cache_ttl: NEGATIVE_TTL,
-        ..AvroSettings::default()
-    }
+pub(crate) fn confluent_settings(url: String) -> AvroDeserializerConfig {
+    let mut config = AvroDeserializerConfig::confluent(RegistrySection::new(url));
+    config.negative_cache_ttl = NEGATIVE_TTL;
+    config
 }
 
 /// A Confluent rig whose cache the stub registry has already answered for.
@@ -478,8 +465,8 @@ pub(crate) fn warmed_confluent_rig(id: u32, want: Warm) -> BatchRig<AvroValueDes
         .enable_all()
         .build()
         .unwrap();
-    let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
-    let mut deser = builder.build_value().expect("value builder");
+    let builder = AvroDeserializerBuilder::new(settings, rt.handle()).unwrap();
+    let mut deser = builder.build_value();
     let payloads = corpora::confluent_orders(id);
     let (ack, _ack_rx) = AckRef::test_pair();
     let mut sink = orders::Sink(0);
@@ -516,8 +503,8 @@ pub(crate) fn confluent_mixed_rig() -> BatchRig<AvroValueDeserializer> {
         .enable_all()
         .build()
         .unwrap();
-    let builder = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
-    let mut deser = builder.build_value().expect("value builder");
+    let builder = AvroDeserializerBuilder::new(settings, rt.handle()).unwrap();
+    let mut deser = builder.build_value();
     let (ack, _ack_rx) = AckRef::test_pair();
     let mut sink = orders::Sink(0);
     // One payload per id, so every id is Ready in the memo before the walk.
@@ -551,20 +538,16 @@ pub(crate) fn confluent_unknown_rig() -> BatchRig<AvroValueDeserializer> {
         &settings,
         corpora::confluent_orders(corpora::UNKNOWN_ID),
         false,
-        |b| b.build_value().expect("value builder"),
+        |b| b.build_value(),
     )
 }
 
 /// Single-object framing whose fingerprint matches the configured schema, so
 /// every payload resolves and decodes.
 pub(crate) fn single_object_rig() -> BatchRig<AvroValueDeserializer> {
-    let settings = AvroSettings {
-        mode: AvroMode::SingleObject,
-        schema: Some(SchemaSource::inline(orders::SCHEMA)),
-        ..AvroSettings::default()
-    };
+    let settings = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
     batch_rig(&settings, corpora::matching_single_object(), true, |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
@@ -577,7 +560,7 @@ pub(crate) fn evolution_rig(
 ) -> BatchRig<AvroSerdeDeserializer<corpora::Evolved>> {
     let settings = raw_settings(corpora::EVENT_WRITER, reader);
     batch_rig(&settings, corpora::event_datums(), true, |b| {
-        b.build_serde::<corpora::Evolved>().expect("serde builder")
+        b.build_serde::<corpora::Evolved>()
     })
 }
 
@@ -624,7 +607,7 @@ pub(crate) fn long_text_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::L
 pub(crate) fn truncated_value_rig() -> BatchRig<AvroValueDeserializer> {
     let settings = raw_settings(orders::SCHEMA, None);
     batch_rig(&settings, corpora::truncated_order_datums(), false, |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }
 
@@ -639,17 +622,13 @@ pub(crate) fn truncated_datum_rig() -> BatchRig<AvroDatumDeserializer<Owned<orde
 pub(crate) fn truncated_serde_rig() -> BatchRig<AvroSerdeDeserializer<orders::Order>> {
     let settings = raw_settings(orders::SCHEMA, None);
     batch_rig(&settings, corpora::truncated_order_datums(), false, |b| {
-        b.build_serde::<orders::Order>().expect("serde builder")
+        b.build_serde::<orders::Order>()
     })
 }
 
 pub(crate) fn stale_fingerprint_rig() -> BatchRig<AvroValueDeserializer> {
-    let settings = AvroSettings {
-        mode: AvroMode::SingleObject,
-        schema: Some(SchemaSource::inline(orders::SCHEMA)),
-        ..AvroSettings::default()
-    };
+    let settings = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
     batch_rig(&settings, corpora::stale_single_object(), false, |b| {
-        b.build_value().expect("value builder")
+        b.build_value()
     })
 }

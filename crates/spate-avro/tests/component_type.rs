@@ -20,7 +20,8 @@ fn builder(runtime: &tokio::runtime::Runtime) -> AvroDeserializerBuilder {
         "avro",
         &format!("mode: raw\nschema:\n  inline: '{SCHEMA}'\n"),
     );
-    AvroDeserializerBuilder::from_component(&section, runtime.handle()).expect("avro builder")
+    AvroDeserializerBuilder::from_component_config(&section, runtime.handle())
+        .expect("avro builder")
 }
 
 fn assert_stage_is_avro<T, D>(pipeline: &'static str, deser: D)
@@ -49,7 +50,7 @@ fn every_avro_deserializer_labels_its_stage_avro() {
         .build()
         .unwrap();
     let builder = builder(&runtime);
-    assert_stage_is_avro::<AvroValue, _>("avro-value", builder.build_value().unwrap());
-    assert_stage_is_avro::<E, _>("avro-serde", builder.build_serde::<E>().unwrap());
+    assert_stage_is_avro::<AvroValue, _>("avro-value", builder.build_value());
+    assert_stage_is_avro::<E, _>("avro-serde", builder.build_serde::<E>());
     assert_stage_is_avro::<E, _>("avro-datum", builder.build_serde_datum::<E>().unwrap());
 }

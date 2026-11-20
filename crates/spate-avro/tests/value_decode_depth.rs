@@ -77,8 +77,9 @@ where
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).unwrap()).unwrap();
     let render = pipeline.metrics().render_fn();
     let section = pipeline.config().deserializer.clone().unwrap();
-    let deser =
-        build(&AvroDeserializerBuilder::from_component(&section, &pipeline.io_handle()).unwrap());
+    let deser = build(
+        &AvroDeserializerBuilder::from_component_config(&section, &pipeline.io_handle()).unwrap(),
+    );
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);
     let runtime = pipeline
@@ -131,7 +132,7 @@ where
 
 #[test]
 fn a_datum_past_the_depth_limit_is_dropped_on_the_value_path() {
-    let (heads, dropped) = run(|b| b.build_value().unwrap(), head_of);
+    let (heads, dropped) = run(|b| b.build_value(), head_of);
     assert_eq!(
         heads,
         [1, 2],
@@ -142,7 +143,7 @@ fn a_datum_past_the_depth_limit_is_dropped_on_the_value_path() {
 
 #[test]
 fn a_datum_past_the_depth_limit_is_dropped_on_the_serde_path() {
-    let (heads, dropped) = run(|b| b.build_serde::<Node>().unwrap(), |n: &Node| n.value);
+    let (heads, dropped) = run(|b| b.build_serde::<Node>(), |n: &Node| n.value);
     assert_eq!(
         heads,
         [1, 2],

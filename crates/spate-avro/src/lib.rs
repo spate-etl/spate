@@ -62,8 +62,8 @@ pub const MAX_READY_ENTRIES: usize = cache::MAX_READY_ENTRIES;
 #[doc(hidden)]
 pub const MAX_READY_BYTES: usize = cache::MAX_READY_BYTES;
 pub use config::{
-    AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection,
-    SchemaSource, TlsSection,
+    AvroDeserializerBuilder, AvroDeserializerConfig, AvroMode, RegistrySection, SchemaSource,
+    TlsSection,
 };
 pub use datum::AvroDatumDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};

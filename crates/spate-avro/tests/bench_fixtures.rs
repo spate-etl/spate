@@ -19,7 +19,7 @@
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 
 use spate_avro::{
-    AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection, SchemaSource,
+    AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, RegistrySection, SchemaSource,
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
@@ -56,17 +56,17 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-fn builder(settings: &AvroSettings, rt: &tokio::runtime::Runtime) -> AvroDeserializerBuilder {
-    AvroDeserializerBuilder::from_settings(settings, rt.handle()).unwrap()
+fn builder(
+    settings: &AvroDeserializerConfig,
+    rt: &tokio::runtime::Runtime,
+) -> AvroDeserializerBuilder {
+    AvroDeserializerBuilder::new(settings.clone(), rt.handle()).unwrap()
 }
 
-fn raw_settings(schema: &str, reader: Option<&str>) -> AvroSettings {
-    AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(schema)),
-        reader_schema: reader.map(SchemaSource::inline),
-        ..AvroSettings::default()
-    }
+fn raw_settings(schema: &str, reader: Option<&str>) -> AvroDeserializerConfig {
+    let mut config = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
+    config.reader_schema = reader.map(SchemaSource::inline);
+    config
 }
 
 /// How many of a corpus decode, and how many fail, the pair every batch
@@ -115,9 +115,7 @@ where
 /// optionally resolved into a reader schema.
 fn decode_one_value(schema: &str, reader: Option<&str>, payload: &[u8]) -> AvroValue {
     let rt = runtime();
-    let mut deser = builder(&raw_settings(schema, reader), &rt)
-        .build_value()
-        .unwrap();
+    let mut deser = builder(&raw_settings(schema, reader), &rt).build_value();
     let (ack, _rx) = AckRef::test_pair();
     let mut out = EmitCollector::<AvroValue>::new();
     deser
@@ -257,8 +255,7 @@ fn the_decoding_corpora_decode_in_full() {
         Some(corpora::EVENT_DEFAULTED),
     ] {
         let deser = builder(&raw_settings(corpora::EVENT_WRITER, reader), &rt)
-            .build_serde::<corpora::Evolved>()
-            .unwrap();
+            .build_serde::<corpora::Evolved>();
         assert_eq!(
             outcomes(deser, &events),
             (corpora::BATCH, 0),
@@ -307,12 +304,10 @@ fn the_batch_corpus_decodes_on_every_path() {
         0,
     );
 
-    let deser = builder(&settings, &rt).build_value().unwrap();
+    let deser = builder(&settings, &rt).build_value();
     assert_eq!(outcomes(deser, &payloads), want, "the value path");
 
-    let deser = builder(&settings, &rt)
-        .build_serde::<batches::OrderPlaced>()
-        .unwrap();
+    let deser = builder(&settings, &rt).build_serde::<batches::OrderPlaced>();
     assert_eq!(outcomes(deser, &payloads), want, "the two-pass typed path");
 
     let deser = builder(&settings, &rt)
@@ -429,17 +424,11 @@ fn the_poison_corpora_fail_on_every_payload() {
         .unwrap();
     assert_eq!(outcomes(deser, &truncated), (0, corpora::BATCH));
 
-    let deser = builder(&raw_settings(orders::SCHEMA, None), &rt)
-        .build_serde::<orders::Order>()
-        .unwrap();
+    let deser = builder(&raw_settings(orders::SCHEMA, None), &rt).build_serde::<orders::Order>();
     assert_eq!(outcomes(deser, &truncated), (0, corpora::BATCH));
 
-    let single_object = AvroSettings {
-        mode: AvroMode::SingleObject,
-        schema: Some(SchemaSource::inline(orders::SCHEMA)),
-        ..AvroSettings::default()
-    };
-    let deser = builder(&single_object, &rt).build_value().unwrap();
+    let single_object = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
+    let deser = builder(&single_object, &rt).build_value();
     assert_eq!(
         outcomes(deser, &corpora::stale_single_object()),
         (0, corpora::BATCH),
@@ -454,12 +443,9 @@ fn the_poison_corpora_fail_on_every_payload() {
 fn the_single_payload_fixtures_still_decode_and_fail_as_documented() {
     let rt = runtime();
     let b = builder(&raw_settings(orders::SCHEMA, None), &rt);
+    assert_eq!(outcomes(b.build_value(), &[orders::order_datum()]), (1, 0));
     assert_eq!(
-        outcomes(b.build_value().unwrap(), &[orders::order_datum()]),
-        (1, 0)
-    );
-    assert_eq!(
-        outcomes(b.build_value().unwrap(), &[orders::malformed_datum()]),
+        outcomes(b.build_value(), &[orders::malformed_datum()]),
         (0, 1),
         "the malformed fixture decodes cleanly, so the error-path case is \
          counting the happy path"
@@ -686,8 +672,7 @@ fn a_reader_field_alias_does_not_resolve() {
         &raw_settings(corpora::EVENT_WRITER, Some(corpora::EVENT_ALIASED)),
         &rt,
     )
-    .build_value()
-    .unwrap();
+    .build_value();
     let (ack, _rx) = AckRef::test_pair();
     let mut out = EmitCollector::<AvroValue>::new();
     let err = deser
@@ -719,25 +704,21 @@ fn the_confluent_corpus_carries_the_wire_header() {
 #[test]
 fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
     let stub = StubRegistry::start(&[(corpora::READY_ID, orders::SCHEMA)]);
-    let settings = AvroSettings {
-        mode: AvroMode::Confluent,
-        registry: Some(RegistrySection::new(stub.url())),
-        negative_cache_ttl: Duration::from_secs(3_600),
-        ..AvroSettings::default()
-    };
+    let mut settings = AvroDeserializerConfig::confluent(RegistrySection::new(stub.url()));
+    settings.negative_cache_ttl = Duration::from_secs(3_600);
     let rt = io_runtime();
     let b = builder(&settings, &rt);
     let (ack, _rx) = AckRef::test_pair();
 
     let ready = corpora::confluent_orders(corpora::READY_ID);
-    let mut deser = b.build_value().unwrap();
+    let mut deser = b.build_value();
     let mut sink = orders::Sink(0);
     registry_stub::warm(&mut deser, &rt, &ack, &mut sink, &ready[0], Warm::Ready);
     // Warmed: the whole corpus now decodes without the runtime running again.
     assert_eq!(outcomes(deser, &ready[..64]), (64, 0));
 
     let poisoned = corpora::confluent_orders(corpora::POISON_ID);
-    let mut deser = b.build_value().unwrap();
+    let mut deser = b.build_value();
     registry_stub::warm(
         &mut deser,
         &rt,
@@ -757,16 +738,13 @@ fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
 /// no fetch is ever attempted.
 #[test]
 fn an_undriven_runtime_leaves_every_id_missing() {
-    let settings = AvroSettings {
-        mode: AvroMode::Confluent,
-        registry: Some(RegistrySection::new("http://127.0.0.1:1".to_owned())),
-        negative_cache_ttl: Duration::from_secs(3_600),
-        ..AvroSettings::default()
-    };
+    let mut settings =
+        AvroDeserializerConfig::confluent(RegistrySection::new("http://127.0.0.1:1".to_owned()));
+    settings.negative_cache_ttl = Duration::from_secs(3_600);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let deser = builder(&settings, &rt).build_value().unwrap();
+    let deser = builder(&settings, &rt).build_value();
     let payloads = corpora::confluent_orders(corpora::UNKNOWN_ID);
     assert_eq!(outcomes(deser, &payloads[..64]), (0, 64));
 }

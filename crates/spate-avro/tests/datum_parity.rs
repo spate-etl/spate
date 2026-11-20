@@ -15,7 +15,7 @@
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use proptest::prelude::*;
-use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::Deserializer;
 use spate_test::{EmitCollector, raw_payload};
@@ -24,17 +24,13 @@ use std::f32::consts::PI;
 use std::fmt::Debug;
 
 fn builder(schema_json: &str) -> AvroDeserializerBuilder {
-    let settings = AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(schema_json)),
-        ..AvroSettings::default()
-    };
+    let settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema_json));
     let rt = Box::leak(Box::new(
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap(),
     ));
-    AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap()
+    AvroDeserializerBuilder::new(settings, rt.handle()).unwrap()
 }
 
 /// Decode `datum` through both typed paths and assert byte-identical
@@ -48,7 +44,6 @@ where
 
     let mut two_pass = EmitCollector::<T>::new();
     b.build_serde::<T>()
-        .unwrap()
         .deserialize(&raw_payload(datum), &ack, &mut two_pass)
         .expect("two-pass decode");
     let mut single_pass = EmitCollector::<T>::new();
@@ -591,9 +586,9 @@ fn truncated_trailing_option_is_malformed_on_both_paths() {
     }
     let b = builder(SCH);
     for bytes in [&[18][..], &[18, 128][..]] {
-        let mut value = b.build_value().unwrap();
+        let mut value = b.build_value();
         assert_malformed(&mut value, bytes);
-        let mut two = b.build_serde::<T>().unwrap();
+        let mut two = b.build_serde::<T>();
         assert_malformed(&mut two, bytes);
         let mut single = b.build_serde_datum::<T>().unwrap();
         assert_malformed(&mut single, bytes);
@@ -625,7 +620,7 @@ fn value_rejects_truncated_string_body() {
     const SCH: &str = r#"{"type":"record","name":"R","fields":[{"name":"s","type":"string"}]}"#;
     for bytes in [&[0x22][..], &[4, b'a'][..]] {
         for warm in [false, true] {
-            let mut deser = builder(SCH).build_value().unwrap();
+            let mut deser = builder(SCH).build_value();
             if warm {
                 let mut out = EmitCollector::new();
                 deser
@@ -648,7 +643,7 @@ fn value_rejects_truncated_boolean() {
     let b = builder(
         r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"b","type":"boolean"}]}"#,
     );
-    assert_malformed(&mut b.build_value().unwrap(), &[18]);
+    assert_malformed(&mut b.build_value(), &[18]);
 }
 
 /// Complete datums retain empty strings, booleans, unions and trailing bytes; empty payloads are tombstones.
@@ -671,7 +666,7 @@ fn complete_datums_keep_value_backend_semantics() {
     ] {
         let schema =
             format!(r#"{{"type":"record","name":"R","fields":[{{"name":"b","type":{field}}}]}}"#);
-        let mut deser = builder(&schema).build_value().unwrap();
+        let mut deser = builder(&schema).build_value();
         for trailing in [false, true] {
             let mut datum = bytes.clone();
             if trailing {
@@ -703,7 +698,6 @@ fn value_big_decimal_round_trip() {
     let mut out = EmitCollector::new();
     builder(sch)
         .build_value()
-        .unwrap()
         .deserialize(&raw_payload(&bytes), &spate_test::test_ack(), &mut out)
         .unwrap();
     assert_eq!(out.records[0].payload, expected);
@@ -755,7 +749,6 @@ fn invalid_utf8_in_a_skipped_field_diverges_by_design() {
 
     let mut two_pass = EmitCollector::<T>::new();
     b.build_serde::<T>()
-        .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
     assert!(two_pass.records.is_empty());
@@ -780,7 +773,7 @@ fn zero_width_item_bomb_is_refused_on_both_paths() {
     .unwrap();
 
     let b = builder(SCH);
-    assert_malformed(&mut b.build_serde::<Vec<()>>().unwrap(), &datum);
+    assert_malformed(&mut b.build_serde::<Vec<()>>(), &datum);
     assert_malformed(&mut b.build_serde_datum::<Vec<()>>().unwrap(), &datum);
 }
 
@@ -804,7 +797,6 @@ fn union_into_map_target_diverges_by_design() {
 
     let mut two_pass = EmitCollector::<HashMap<String, i64>>::new();
     b.build_serde::<HashMap<String, i64>>()
-        .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
 
@@ -826,7 +818,6 @@ fn garbage_errors_on_both_paths() {
     let garbage = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
     let mut out = EmitCollector::<SensorBatch>::new();
     b.build_serde::<SensorBatch>()
-        .unwrap()
         .deserialize(&raw_payload(&garbage), &ack, &mut out)
         .unwrap_err();
     b.build_serde_datum::<SensorBatch>()
@@ -908,7 +899,6 @@ fn char_and_wide_integer_targets_diverge_by_design() {
 
         let mut two_pass = EmitCollector::<T>::new();
         b.build_serde::<T>()
-            .unwrap()
             .deserialize(&raw_payload(datum), &ack, &mut two_pass)
             .expect("the two-pass path decodes this target");
         assert_eq!(two_pass.records.len(), 1);

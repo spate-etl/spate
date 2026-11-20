@@ -1,0 +1,3 @@
+**Breaking:** **Two Datagen source metrics and one label are renamed to follow the naming rules** (`spate-datagen`)
+
+The Datagen source now exports `spate_datagen_source_tick_overruns_total` and `spate_datagen_source_remaining_events`, and labels `spate_datagen_source_events_generated_total` by `event_type`. In previous versions these were `spate_datagen_source_tick_overrun_total`, `spate_datagen_source_events_remaining` and the `event` label. The `event_type` values are unchanged: `order_placed`, `payment_captured` and `refund_issued`. The `event` label now has one meaning across the framework, the rebalance event on `spate_source_rebalances_total`. Dashboards and alerts that select these series need the new names.

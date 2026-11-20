@@ -2,14 +2,15 @@
 //! (namespace `datagen`, role `source` → `spate_datagen_source_*`).
 //!
 //! Every handle is resolved once at `open` and never on the record path
-//! (INV-8). The `event` label has three values and exactly three
+//! (INV-8). The `event_type` label has three values and exactly three
 //! pre-registered handles behind it; a lane tallies a batch by index and adds
 //! the three totals at the batch boundary, so no name is resolved and no
 //! counter is touched per record.
 //!
 //! The split between the two structs holds INV-10. **Lanes own counters
-//! only.** Every gauge is written from the controller thread: `events_remaining`
-//! and `open_orders` from `poll_events`, `committed_offset` from `commit`.
+//! only.** Every gauge is written from the controller thread:
+//! `remaining_events` and `open_orders` from `poll_events`, `committed_offset`
+//! from `commit`.
 //! Both run on that one thread, so each series has exactly one live writer.
 //!
 //! This source registers no `spate_source_lag_records` and leaves
@@ -70,7 +71,7 @@ pub(crate) struct DatagenMetrics {
     /// The lane half, handed out by cloning.
     counters: LaneCounters,
     /// Events left to generate across every lane; 0 for an unbounded stream.
-    events_remaining: Gauge,
+    remaining_events: Gauge,
     /// Orders placed and not yet captured, across every lane.
     open_orders: Gauge,
     /// Last committed watermark per partition, indexed by partition id.
@@ -87,7 +88,7 @@ impl DatagenMetrics {
         per_partition_detail: bool,
     ) -> DatagenMetrics {
         let generated = |event: &'static str| {
-            meter.counter("events_generated_total", &[("event", event.into())])
+            meter.counter("events_generated_total", &[("event_type", event.into())])
         };
         DatagenMetrics {
             counters: LaneCounters {
@@ -95,9 +96,9 @@ impl DatagenMetrics {
                 payment_captured: generated("payment_captured"),
                 refund_issued: generated("refund_issued"),
                 ticks: meter.counter("ticks_total", &[]),
-                tick_overruns: meter.counter("tick_overrun_total", &[]),
+                tick_overruns: meter.counter("tick_overruns_total", &[]),
             },
-            events_remaining: meter.gauge("events_remaining", &[]),
+            remaining_events: meter.gauge("remaining_events", &[]),
             open_orders: meter.gauge("open_orders", &[]),
             committed_offset: if per_partition_detail {
                 (0..partitions)
@@ -118,8 +119,8 @@ impl DatagenMetrics {
 
     /// Publish the run-progress gauges. Called once per `poll_events`, from
     /// the controller thread and nowhere else.
-    pub(crate) fn publish(&self, events_remaining: u64, open_orders: u64) {
-        self.events_remaining.set(events_remaining as f64);
+    pub(crate) fn publish(&self, remaining_events: u64, open_orders: u64) {
+        self.remaining_events.set(remaining_events as f64);
         self.open_orders.set(open_orders as f64);
     }
 
@@ -172,10 +173,10 @@ mod tests {
         ]
     }
 
-    /// Each event kind has its own pre-registered handle, so the `event` label
-    /// costs no lookup on the record path (INV-8) and its cardinality is three
-    /// by construction. The tally an event lands in is what decides the series
-    /// its count reaches, so a transposed index fails here.
+    /// Each event kind has its own pre-registered handle, so the `event_type`
+    /// label costs no lookup on the record path (INV-8) and its cardinality is
+    /// three by construction. The tally an event lands in is what decides the
+    /// series its count reaches, so a transposed index fails here.
     #[test]
     fn every_event_kind_counts_against_its_own_pre_registered_handle() {
         let rendered = render_metrics(|| {
@@ -195,13 +196,13 @@ mod tests {
             ("refund_issued", 3),
         ] {
             let want = format!(
-                r#"spate_datagen_events_generated_total{{pipeline="orders",component="events",component_type="datagen",event="{event}"}} {count}"#
+                r#"spate_datagen_events_generated_total{{pipeline="orders",component="events",component_type="datagen",event_type="{event}"}} {count}"#
             );
             assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
         }
         assert!(rendered.contains("spate_datagen_ticks_total"), "{rendered}");
         assert!(
-            rendered.contains("spate_datagen_tick_overrun_total"),
+            rendered.contains("spate_datagen_tick_overruns_total"),
             "{rendered}"
         );
     }
@@ -212,7 +213,7 @@ mod tests {
             DatagenMetrics::new(&meter("gauges"), 2, false).publish(97, 12);
         });
         assert!(
-            rendered.contains("spate_datagen_events_remaining{") && rendered.contains("} 97"),
+            rendered.contains("spate_datagen_remaining_events{") && rendered.contains("} 97"),
             "{rendered}"
         );
         assert!(

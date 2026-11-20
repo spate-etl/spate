@@ -62,7 +62,7 @@ events per second at the defaults. It is a ceiling rather than a delivered
 rate: a lane polled a whole interval late re-anchors to the present instead of
 replaying the ticks it missed, so a pipeline that cannot absorb the configured
 rate runs below it and counts the shortfall in
-`spate_datagen_source_tick_overrun_total`. There is no `rate` key.
+`spate_datagen_source_tick_overruns_total`. There is no `rate` key.
 
 Validation rejects `partitions` outside 1 to 1024, `events_per_tick` at zero,
 `count` at zero, and a `count` smaller than `partitions`; the budget is split
@@ -141,17 +141,17 @@ noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_datagen_source_events_generated_total` | counter | `event` | Events emitted, by kind: `order_placed`, `payment_captured`, `refund_issued`. |
+| `spate_datagen_source_events_generated_total` | counter | `event_type` | Events emitted, by kind: `order_placed`, `payment_captured`, `refund_issued`. |
 | `spate_datagen_source_ticks_total` | counter | — | Release cadences that fired, summed across lanes — `partitions` per cadence. Stays at zero when unthrottled. |
-| `spate_datagen_source_tick_overrun_total` | counter | — | Cadences that fired a whole interval or more late, summed across lanes: the lane re-anchors to the present and the missed ticks are not replayed. A lane late by less than one interval counts nothing. Stays at zero when unthrottled. |
-| `spate_datagen_source_events_remaining` | gauge | — | Events left in a bounded budget across all lanes. Zero when unbounded. |
+| `spate_datagen_source_tick_overruns_total` | counter | — | Cadences that fired a whole interval or more late, summed across lanes: the lane re-anchors to the present and the missed ticks are not replayed. A lane late by less than one interval counts nothing. Stays at zero when unthrottled. |
+| `spate_datagen_source_remaining_events` | gauge | — | Events left in a bounded budget across all lanes. Zero when unbounded. |
 | `spate_datagen_source_open_orders` | gauge | — | Orders placed but not yet captured, summed across lanes. The mix places faster than it captures, and an order the lane's ring evicts is never captured, so this rises for as long as the run lasts and is not a backlog that settles. |
 | `spate_datagen_source_committed_offset` | gauge | `partition` | The last watermark committed. Registered only when `metrics.per_partition_detail` is on. |
 
 Counters are incremented by the lanes and gauges are published by the control
 plane, which is how each gauge series keeps one live owner.
 
-There is no consumer-lag family; `spate_datagen_source_events_remaining`
+There is no consumer-lag family; `spate_datagen_source_remaining_events`
 carries the bounded case instead.
 
 See [Metrics](../../../../METRICS.md) for the taxonomy, the reserved roots and

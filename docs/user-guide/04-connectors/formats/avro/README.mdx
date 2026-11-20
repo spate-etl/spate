@@ -54,7 +54,7 @@ deserializer:
 | `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
 | `negative_cache_ttl` | duration | `30s` | The longest a schema id the registry could not serve stays negatively cached before a refetch is allowed. The cache holds at most 1,024 such ids and drops the oldest for a new one, so a dropped id is refetched on its next record. At least `100ms`, so a negative entry outlives the replay of the record it holds; a shorter value fails at startup in every mode. |
-| `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
+| `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). A reader schema that recurses through a union limits how deep a datum may recurse; see [Schema evolution](#schema-evolution). |
 | `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
 Mode requirements are validated at construction with explicit messages:
@@ -199,6 +199,27 @@ edge cases:
   `ErrorPolicy` (Skip or Fail) like any other poison payload. With the
   engine's default settings a held batch is replayed inside the `100ms` floor,
   so a permanent bad id cannot wedge the pipeline into an infinite retry.
+- The cache holds at most 1,024 compiled schemas and an estimated 64 MiB of
+  them. At either bound it evicts the oldest schema that no record has used
+  since the cache last considered it. Among schemas older than the 256
+  newest, one in use is evicted after those that are not. An evicted id is
+  fetched again on its next record, and that fetch can fail as a first fetch
+  can: an outage holds the batch, and a rejection stops the pipeline.
+- The cache evicts its 256 newest schemas last, so a held batch replays
+  before its schema can leave. Records that name 256 fresh ids inside one
+  replay interval, 2 ms by default, can evict a schema before its batch
+  replays, and the batch then fetches it again. Schemas large enough to reach
+  the 64 MiB bound in fewer than 256 inserts have the same effect.
+- A pipeline thread keeps the schemas it last saw until its next record, so
+  each thread that receives no records can hold up to the bounds again.
+- `prewarm_subjects` above either bound keeps the subjects listed last, and
+  the rest are fetched by id when a record needs them.
+- A schema estimated to hold more than 64 MiB compiled is refused. Its id is
+  negatively cached and its records follow the `ErrorPolicy`. The estimate is
+  20 bytes for each byte of the schema's JSON, and 20 more for each byte of a
+  record, enum or fixed, once per name it has and again inside each record
+  that holds it. A 240 KB schema of 40 equal records, each inside the last,
+  is over the bound, and so is a 30 KB record with 110 aliases.
 
 ## Error handling
 
@@ -212,6 +233,45 @@ under either policy.
 
 A datum decode that attempts to read past the payload returns a malformed
 record error and follows the configured Skip or Fail record error policy.
+
+Every deserializer also refuses a datum past the bounds below, as a malformed
+record under the same policy. The bounds keep one record from exhausting the
+pipeline thread's stack or memory:
+
+- **Nesting.** `build_value` and `build_serde` accept 32 levels. A level is a
+  record field, an array or map item, a union branch, a named-type reference,
+  or the bytes of a `decimal` or `big-decimal`. A list whose `next` field is
+  `["null", "Node"]` takes three levels per node, so 10 nodes is the deepest
+  these two accept. `build_datum` accepts 128 levels. Where the target reads
+  the list, it does not count a named-type reference as a level, so it
+  accepts 64 nodes. Where the target ignores the field, it counts all three,
+  so it accepts 42.
+- **Collection items.** The arrays and maps of one datum may claim as many
+  items as the payload has bytes, or 65,536 if that is more. An item that
+  takes no bytes on the wire, such as a `null` or an empty record, counts like
+  any other. In a field the target ignores, `build_datum` skips a block that
+  gives its size in bytes, and does not count its items.
+- **Decoded size.** `build_value` and `build_serde` build the whole decoded
+  tree in memory. They refuse a datum whose tree would take more than 1,024
+  bytes for each payload byte, or 64 MiB if that is more. The estimate counts
+  each value, the field names copied into every record, enum symbols, and
+  string, bytes and map key contents. With a `reader_schema` it also counts
+  the fields and defaults that resolution into it adds. A record of long
+  strings takes about 3 bytes per payload byte, and one of many `null` fields
+  with long names about 240. `build_datum` builds no such tree.
+
+A datum that recurses past the resolution limit of a recursive `reader_schema`
+is also a malformed record, and follows the same policy.
+[Schema evolution](#schema-evolution) states the limit.
+
+The error text for a refused datum quotes no string, bytes or field value from
+the record. The typed single-pass path names what the record type expected,
+such as the type or the enum's variants. The other paths say that the decode
+failed or that the record does not match the target type, and name a reader
+field the record lacks. A refusal by the bounds above names the count, length,
+union index or limit it read. Those numbers come from the payload, so in a
+datum that does not match its schema they can be a field's bytes read as a
+length.
 
 The unit is the payload. One datum is one record here, so there is no partial
 outcome to reason about. Drops surface in the framework's stage families,
@@ -246,6 +306,35 @@ the deserializer's `ErrorPolicy`. A `double` narrowed to a `float` is **not**
 checked and saturates to infinity, and a `long` narrowed to a `float` or a
 `double` loses precision, both without an error and without a metric moving.
 Widen a field freely; do not narrow one.
+
+A reader schema that recurses through a union limits how deep a datum may
+recurse. A linked list whose `next` field is `["null", "Node"]` is such a
+schema. Resolution tries a value against a union's branches and then resolves it
+again, so each time a datum passes through the same union again, the cost of
+everything below doubles. Each datum is therefore weighed before it is resolved.
+A value weighs one, plus one for each 64 bytes of text, binary content, field
+names or map keys it holds. It weighs double for each time its path has already
+passed through the union it is under. Where the union a value is under has
+several branches the value could resolve into, the value is weighed against
+each branch. A value the reader schema drops is weighed like any other, because
+resolution copies it.
+
+A datum is refused as a malformed record when the doubling adds more than 1,024
+to its weight, and more than three times what the datum weighs with no
+doubling. Where the datum's encoded length in bytes is less than that undoubled
+weight, the length takes its place, because a value such as a null takes no
+bytes to encode. The refused record takes the deserializer's `ErrorPolicy`.
+
+How deep a datum may recurse therefore depends on how much it holds. A linked
+list whose nodes have one other field resolves up to 9 nodes, and one whose
+nodes have 40 other fields up to 5 nodes. A binary tree with no other fields
+resolves up to 5 levels. The tests in
+[`spate-avro/src/resolve.rs`](repo:crates/spate-avro/src/resolve.rs) pin these
+figures.
+
+Under a reader schema that does not recurse, nothing in a datum is doubled,
+because the schema fixes how its unions nest and no datum can deepen them.
+This limit never refuses such a datum.
 
 ## Metrics
 

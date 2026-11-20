@@ -761,7 +761,7 @@ pub(crate) fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
 /// Follow one held partition's fetch state across statistics windows, and
 /// report a run of windows in which it is not fetching.
 ///
-/// A partition paused by backpressure keeps reporting `active`.
+/// A partition the runtime has paused keeps reporting `active`.
 /// `rd_kafka_toppar_pause_resume` sets a pause flag, rewinds the fetch
 /// position and purges the fetch queue without assigning `rktp_fetch_state`,
 /// so a run of non-active windows means the partition is not being consumed.

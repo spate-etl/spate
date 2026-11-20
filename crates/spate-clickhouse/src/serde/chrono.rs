@@ -35,7 +35,7 @@ pub mod datetime {
     {
         let ts = dt.timestamp();
         u32::try_from(ts)
-            .map_err(|_| S::Error::custom(format!("{dt} cannot be represented as DateTime")))?
+            .map_err(|_| S::Error::custom("value out of range for DateTime"))?
             .serialize(serializer)
     }
 
@@ -46,7 +46,7 @@ pub mod datetime {
     {
         let ts = u32::deserialize(deserializer)?;
         DateTime::<Utc>::from_timestamp(i64::from(ts), 0)
-            .ok_or_else(|| D::Error::custom(format!("{ts} cannot be converted to DateTime<Utc>")))
+            .ok_or_else(|| D::Error::custom("timestamp out of range for DateTime<Utc>"))
     }
 
     crate::serde::option_module!(::chrono::DateTime<::chrono::Utc>);
@@ -80,7 +80,7 @@ pub mod datetime64 {
                     let ts = i64::deserialize(deserializer)?;
                     #[allow(clippy::redundant_closure_call)]
                     ($from)(ts).ok_or_else(|| {
-                        D::Error::custom(format!("can't create DateTime<Utc> from {ts}"))
+                        D::Error::custom("timestamp out of range for DateTime<Utc>")
                     })
                 }
 
@@ -112,7 +112,7 @@ pub mod datetime64 {
         nanos,
         to = |dt: &DateTime<Utc>| dt
             .timestamp_nanos_opt()
-            .ok_or_else(|| format!("{dt} cannot be represented as DateTime64(9)")),
+            .ok_or("value out of range for DateTime64(9)"),
         from = |ts| Some(DateTime::<Utc>::from_timestamp_nanos(ts))
     }
 }
@@ -131,13 +131,11 @@ pub mod date {
     {
         let origin = ORIGIN.unwrap();
         if *d < origin {
-            return Err(S::Error::custom(format!(
-                "{d} cannot be represented as Date"
-            )));
+            return Err(S::Error::custom("value out of range for Date"));
         }
         let days = (*d - origin).num_days();
         u16::try_from(days)
-            .map_err(|_| S::Error::custom(format!("{d} cannot be represented as Date")))?
+            .map_err(|_| S::Error::custom("value out of range for Date"))?
             .serialize(serializer)
     }
 
@@ -171,13 +169,11 @@ pub mod date32 {
         S: Serializer,
     {
         if *d < MIN.unwrap() || *d > MAX.unwrap() {
-            return Err(S::Error::custom(format!(
-                "{d} cannot be represented as Date32"
-            )));
+            return Err(S::Error::custom("value out of range for Date32"));
         }
         let days = (*d - ORIGIN.unwrap()).num_days();
         i32::try_from(days)
-            .map_err(|_| S::Error::custom(format!("{d} cannot be represented as Date32")))?
+            .map_err(|_| S::Error::custom("value out of range for Date32"))?
             .serialize(serializer)
     }
 
@@ -205,7 +201,7 @@ pub mod time {
         S: Serializer,
     {
         i32::try_from(t.num_seconds())
-            .map_err(|_| S::Error::custom(format!("{t} cannot be represented as Time")))?
+            .map_err(|_| S::Error::custom("value out of range for Time"))?
             .serialize(serializer)
     }
 
@@ -274,7 +270,7 @@ pub mod time64 {
         micros,
         to = |t: &Duration| t
             .num_microseconds()
-            .ok_or_else(|| format!("{t} has too many microseconds for Time64(6)")),
+            .ok_or("value has too many microseconds for Time64(6)"),
         from = Duration::microseconds
     }
     time64_precision! {
@@ -282,7 +278,7 @@ pub mod time64 {
         nanos,
         to = |t: &Duration| t
             .num_nanoseconds()
-            .ok_or_else(|| format!("{t} has too many nanoseconds for Time64(9)")),
+            .ok_or("value has too many nanoseconds for Time64(9)"),
         from = Duration::nanoseconds
     }
 }
@@ -369,5 +365,75 @@ mod tests {
         let d = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
         assert_eq!(enc(&OptDateRow(Some(d))), [0, 1, 0]);
         assert_eq!(enc(&OptDateRow(None)), [1]);
+    }
+
+    fn custom<T: Serialize>(v: &T) -> String {
+        match enc_err(v) {
+            RowBinaryError::Custom(text) => text,
+            other => panic!("expected a custom error, got {other}"),
+        }
+    }
+
+    /// Each value's own `Display` would put it in the text.
+    #[test]
+    fn a_refused_value_is_not_quoted() {
+        #[derive(Serialize)]
+        struct Time64NanosRow(#[serde(with = "crate::serde::chrono::time64::nanos")] Duration);
+
+        let far = Utc.with_ymd_and_hms(2200, 1, 1, 0, 0, 0).unwrap();
+        let old = NaiveDate::from_ymd_opt(1900, 1, 1).unwrap();
+        let late = NaiveDate::from_ymd_opt(2200, 1, 1).unwrap();
+        let ancient = NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
+        assert_eq!(custom(&DtRow(far)), "value out of range for DateTime");
+        assert_eq!(
+            custom(&Dt64NanosRow(
+                Utc.with_ymd_and_hms(2300, 1, 1, 0, 0, 0).unwrap()
+            )),
+            "value out of range for DateTime64(9)"
+        );
+        assert_eq!(custom(&DateRow(old)), "value out of range for Date");
+        assert_eq!(custom(&DateRow(late)), "value out of range for Date");
+        assert_eq!(custom(&Date32Row(ancient)), "value out of range for Date32");
+        assert_eq!(
+            custom(&TimeRow(Duration::seconds(i64::from(i32::MAX) + 1))),
+            "value out of range for Time"
+        );
+        assert_eq!(
+            custom(&Time64MicrosRow(
+                Duration::try_milliseconds(i64::MAX).unwrap()
+            )),
+            "value has too many microseconds for Time64(6)"
+        );
+        assert_eq!(
+            custom(&Time64NanosRow(
+                Duration::try_milliseconds(i64::MAX).unwrap()
+            )),
+            "value has too many nanoseconds for Time64(9)"
+        );
+    }
+
+    #[test]
+    fn a_decoded_timestamp_out_of_range_is_not_quoted() {
+        use super::datetime64::millis;
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error, I64Deserializer};
+
+        let ticks: I64Deserializer<Error> = i64::MAX.into_deserializer();
+        let err = millis::deserialize(ticks).unwrap_err();
+        assert_eq!(err.to_string(), "timestamp out of range for DateTime<Utc>");
+    }
+
+    /// The first day `Date` holds and the last day `Date32` holds both
+    /// encode, and the day after the last is refused.
+    #[test]
+    fn the_date_range_ends_are_inclusive() {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        assert_eq!(enc(&DateRow(epoch)), 0u16.to_le_bytes());
+        let last = NaiveDate::from_ymd_opt(2299, 12, 31).unwrap();
+        assert_eq!(enc(&Date32Row(last)), 120_529i32.to_le_bytes());
+        assert_eq!(
+            custom(&Date32Row(last.succ_opt().unwrap())),
+            "value out of range for Date32"
+        );
     }
 }

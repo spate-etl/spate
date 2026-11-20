@@ -145,6 +145,10 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// pipeline regardless of policy; fatal means the encoder itself is
     /// broken (e.g. the row type cannot match the target schema), so every
     /// subsequent record would fail identically.
+    ///
+    /// The stage logs the error's text for a skipped record and uses it as
+    /// the pipeline's failure reason, so an encoder keeps the record's
+    /// content out of it.
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,

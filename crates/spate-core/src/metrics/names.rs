@@ -131,6 +131,9 @@ metric_names! {
 
         /// Source commit calls, by [`L_OUTCOME`].
         CHECKPOINT_COMMITS_TOTAL = "spate_checkpoint_commits_total",
+        /// Times a partition held at `checkpoint.max_pending_batches` had its
+        /// lanes paused at the source.
+        CHECKPOINT_CEILING_PAUSES_TOTAL = "spate_checkpoint_ceiling_pauses_total",
 
         // Feed.
 

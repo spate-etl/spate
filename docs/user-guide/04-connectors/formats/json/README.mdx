@@ -91,6 +91,17 @@ pipeline. The common case, per-record **skip**, needs no chain-side change.
 Undecodable data that stops the pipeline replays under at-least-once; replay
 never loses records.
 
+The `WARN` line for a skipped record and the failure reason carry no content
+from the record. The `WARN` line carries the record's `partition` and `offset`.
+The error text says that the document does not parse, that it does not match
+the record type, or that it repeats an object key. With `serde_json` the text
+ends in the line and column. With the `simd` feature a parse error gives the
+character index, and a document that does not match the record type gives no
+position.
+
+Under `ndjson` framing the position counts within the refused line, so the line
+is always 1. The text does not say which line of the payload was refused.
+
 ## Fidelity & features
 
 - `reject_duplicate_keys` (config) turns `serde_json`'s silent last-value-wins

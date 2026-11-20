@@ -68,6 +68,10 @@ stage:
   deserializer stage defaults to Skip, since malformed input is the outside
   world's fault and a failing map is yours).
 
+Spate logs the closure's error text in the `WARN` line for a skipped record and
+uses it as the pipeline's failure reason. Keep the record's content out of that
+text.
+
 There is no third option: no dead-letter queue, no silent
 drop. Every skipped record is visible in metrics
 ([Error handling](../02-concepts/04-error-handling.mdx),

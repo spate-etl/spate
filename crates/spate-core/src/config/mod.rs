@@ -233,9 +233,10 @@ pub struct CheckpointSection {
     pub interval: Duration,
     /// Hard per-partition ceiling on unacknowledged batches. A partition at
     /// the ceiling has its lanes skipped at the poll boundary until
-    /// acknowledgments retire batches. No pause is involved, and other
-    /// partitions are unaffected. Bounds tracker memory and the replay a
-    /// stalled partition can accumulate.
+    /// acknowledgments retire batches, and other partitions are unaffected.
+    /// One that stays there for [`BackpressureSection::min_pause`] also has
+    /// its lanes paused at the source until it leaves the ceiling. Bounds
+    /// tracker memory and the replay a stalled partition can accumulate.
     pub max_pending_batches: usize,
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
     /// `terminationGracePeriodSeconds`, and more than
@@ -286,6 +287,11 @@ pub struct BackpressureSection {
     pub low_ratio: f64,
     /// Minimum pause duration before resuming (avoids flapping; pausing a
     /// Kafka partition purges its prefetch, so resume is not free).
+    ///
+    /// Also how long a partition stays at
+    /// [`CheckpointSection::max_pending_batches`] before its lanes are paused
+    /// at the source. Zero pauses them as soon as the partition reaches the
+    /// ceiling, and a longer value leaves the source fetching for that long.
     #[serde(with = "humantime_serde")]
     pub min_pause: Duration,
 }
@@ -325,6 +331,10 @@ pub struct AdminSection {
     /// A port of `0` asks the kernel to pick a free one, and the start logs
     /// the address the server bound, at `INFO`. [Monitoring][mon] names the
     /// message it goes out under.
+    ///
+    /// The server has no authentication, so bind it where only the probes
+    /// and the scraper reach it. [`crate::admin`] states the limits it holds
+    /// against any client.
     ///
     /// [mon]: https://spate.kainth.dev/docs/user-guide/deployment/monitoring
     #[serde(deserialize_with = "listen_or_none")]

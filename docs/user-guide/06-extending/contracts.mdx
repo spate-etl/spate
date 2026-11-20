@@ -82,6 +82,10 @@ Records go out through the emitter rather than back through a return value, so
 a payload that contains a thousand records does not allocate a collection to
 hand them over.
 
+Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload
+and uses it as the pipeline's failure reason. Keep the payload's content out of
+that text, because logs are often read by people who may not read the data.
+
 ## Records and what a batch reports
 
 ```rust

@@ -406,7 +406,9 @@ part per non-empty created object (see
 [Storage notifications](#storage-notifications)). A descriptor may name
 several whole objects, at most `MAX_UNIT_MEMBERS` (4,096), which one lane
 reads in order. A unit whose body is neither, or a descriptor naming no object
-or more than that, is failed back to the feed. A whole-object part over one
+or more than that, is failed back to the feed. So is a descriptor naming a key
+outside the prefix of the source's `url`, by the rule a notification's key
+meets. A whole-object part over one
 object is cut into byte ranges on the conditions in
 [Large objects and byte ranges](#large-objects-and-byte-ranges), with the ETag
 taken from the descriptor or the notification, so a part with no ETag is read
@@ -647,7 +649,8 @@ whose fields do not match these types is failed back too. An object of size
 
 A body that is neither a notification nor a descriptor is failed back the same
 way, and that includes an S3 message inside an SNS envelope. So is a
-descriptor whose ETag `If-Match` cannot carry. On a store that
+descriptor whose ETag `If-Match` cannot carry, or one naming a key outside the
+prefix. On a store that
 puts several records in one message, one such record dead-letters the message
 with its other records. A source whose `url` names the whole bucket
 (`s3://bucket/`) reads every created key in it. The message is acknowledged

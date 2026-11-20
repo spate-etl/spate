@@ -31,7 +31,7 @@ pub mod datetime {
     {
         let ts = dt.unix_timestamp();
         u32::try_from(ts)
-            .map_err(|_| S::Error::custom(format!("{dt} cannot be represented as DateTime")))?
+            .map_err(|_| S::Error::custom("value out of range for DateTime"))?
             .serialize(serializer)
     }
 
@@ -57,7 +57,7 @@ pub mod datetime64 {
     {
         let ts = dt.unix_timestamp_nanos() / div;
         i64::try_from(ts)
-            .map_err(|_| S::Error::custom(format!("{dt} cannot be represented as DateTime64")))?
+            .map_err(|_| S::Error::custom("value out of range for DateTime64"))?
             .serialize(serializer)
     }
 
@@ -129,13 +129,11 @@ pub mod date {
     {
         let origin = ORIGIN.unwrap();
         if *d < origin {
-            return Err(S::Error::custom(format!(
-                "{d} cannot be represented as Date"
-            )));
+            return Err(S::Error::custom("value out of range for Date"));
         }
         let days = (*d - origin).whole_days();
         u16::try_from(days)
-            .map_err(|_| S::Error::custom(format!("{d} cannot be represented as Date")))?
+            .map_err(|_| S::Error::custom("value out of range for Date"))?
             .serialize(serializer)
     }
 
@@ -169,13 +167,11 @@ pub mod date32 {
         S: Serializer,
     {
         if *d < MIN.unwrap() || *d > MAX.unwrap() {
-            return Err(S::Error::custom(format!(
-                "{d} cannot be represented as Date32"
-            )));
+            return Err(S::Error::custom("value out of range for Date32"));
         }
         let days = (*d - ORIGIN.unwrap()).whole_days();
         i32::try_from(days)
-            .map_err(|_| S::Error::custom(format!("{d} cannot be represented as Date32")))?
+            .map_err(|_| S::Error::custom("value out of range for Date32"))?
             .serialize(serializer)
     }
 
@@ -204,7 +200,7 @@ pub mod time {
         S: Serializer,
     {
         i32::try_from(t.whole_seconds())
-            .map_err(|_| S::Error::custom(format!("{t} cannot be represented as Time")))?
+            .map_err(|_| S::Error::custom("value out of range for Time"))?
             .serialize(serializer)
     }
 
@@ -237,9 +233,7 @@ pub mod time64 {
                     S: Serializer,
                 {
                     let ticks = i64::try_from(i128::from(t.$whole())).map_err(|_| {
-                        S::Error::custom(format!(
-                            "{t} has too many ticks for this Time64 precision"
-                        ))
+                        S::Error::custom("value has too many ticks for this Time64 precision")
                     })?;
                     ticks.serialize(serializer)
                 }
@@ -352,5 +346,65 @@ mod tests {
         let dt = datetime!(1970-01-01 0:00:07 UTC);
         assert_eq!(enc(&OptDtRow(Some(dt))), [0, 7, 0, 0, 0]);
         assert_eq!(enc(&OptDtRow(None)), [1]);
+    }
+
+    fn custom<T: Serialize>(v: &T) -> String {
+        match enc_err(v) {
+            RowBinaryError::Custom(text) => text,
+            other => panic!("expected a custom error, got {other}"),
+        }
+    }
+
+    /// Each value's own `Display` would put it in the text.
+    #[test]
+    fn a_refused_value_is_not_quoted() {
+        #[derive(Serialize)]
+        struct Dt64NanosRow(
+            #[serde(with = "crate::serde::time::datetime64::nanos")] OffsetDateTime,
+        );
+
+        assert_eq!(
+            custom(&DtRow(datetime!(2200-01-01 0:00 UTC))),
+            "value out of range for DateTime"
+        );
+        assert_eq!(
+            custom(&Dt64NanosRow(datetime!(2300-01-01 0:00 UTC))),
+            "value out of range for DateTime64"
+        );
+        assert_eq!(
+            custom(&DateRow(date!(1900 - 01 - 01))),
+            "value out of range for Date"
+        );
+        assert_eq!(
+            custom(&DateRow(date!(2200 - 01 - 01))),
+            "value out of range for Date"
+        );
+        assert_eq!(
+            custom(&Date32Row(date!(1899 - 12 - 31))),
+            "value out of range for Date32"
+        );
+        assert_eq!(
+            custom(&TimeRow(Duration::seconds(i64::from(i32::MAX) + 1))),
+            "value out of range for Time"
+        );
+        assert_eq!(
+            custom(&Time64NanosRow(Duration::MAX)),
+            "value has too many ticks for this Time64 precision"
+        );
+    }
+
+    /// The first day `Date` holds and the last day `Date32` holds both
+    /// encode, and the day after the last is refused.
+    #[test]
+    fn the_date_range_ends_are_inclusive() {
+        assert_eq!(enc(&DateRow(date!(1970 - 01 - 01))), 0u16.to_le_bytes());
+        assert_eq!(
+            enc(&Date32Row(date!(2299 - 12 - 31))),
+            120_529i32.to_le_bytes()
+        );
+        assert_eq!(
+            custom(&Date32Row(date!(2300 - 01 - 01))),
+            "value out of range for Date32"
+        );
     }
 }

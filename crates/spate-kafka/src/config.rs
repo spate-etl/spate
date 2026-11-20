@@ -222,6 +222,12 @@ pub struct KafkaSourceConfig {
     /// 65.5 MB per partition and a 100-partition assignment can hold up to
     /// ~6.6 GB of prefetched messages.
     ///
+    /// Both thresholds count what will be delivered. A fetch response stays
+    /// in memory until its last record or transaction marker is polled, and
+    /// the records of an aborted transaction in it are not counted, so a
+    /// topic that carries aborted transactions can hold more than these
+    /// figures while its partition is polled slowly.
+    ///
     /// Lowering them here caps that, at a throughput cost that is steep on a
     /// backlogged consumer. Note also that librdkafka clamps `fetch.max.bytes`
     /// to `queued.max.messages.kbytes * 1024` unless `fetch.max.bytes` is set

@@ -105,7 +105,10 @@ A decode error then meets the chain's deserializer error policy, set with
 A record that `on_error: skip` drops never reaches the sink. The source commits
 past it once the rest of its batch is written.
 
-Drops under `on_error: skip` log a rate-limited `WARN`. The crate also counts
+Drops under `on_error: skip` log a rate-limited `WARN`. The line carries the
+record's partition and offset, and an error text that holds the kind of failure,
+with no content from the record. The text gives a position where the parser
+reports one, counted within the refused line under `ndjson`. The crate also counts
 each drop, when the builder is given `JsonDeserializerBuilder::with_metrics`,
 and the chain's `with_metrics` does not affect that count. A dropped array
 counts once. The framework's deserializer metrics count each payload that the

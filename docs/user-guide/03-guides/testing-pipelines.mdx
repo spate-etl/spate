@@ -116,7 +116,7 @@ last offset, then trigger the drain and join the spawned run for its
 - `push` / `push_many` queue payloads and return their offsets;
   `push_at` sets an explicit event timestamp.
 - `revoke_lanes` returns a `DrainBarrierProbe` for testing rebalance drain
-  choreography; `paused_lanes()` observes backpressure.
+  choreography; `paused_lanes()` lists the lanes the runtime has paused.
 - The mock is deliberately strict: misuse that would indicate a runtime bug
   (pausing an unassigned lane, duplicate lane ids) panics with a clear
   message rather than passing silently.

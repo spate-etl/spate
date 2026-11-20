@@ -26,6 +26,15 @@ concrete mechanism.
 Connectors that share a client share a matrix; the Kafka source, sink and
 feed render the same one, from the same partial.
 
+## The admin port has no authentication
+
+The admin server (`admin.listen`) serves `/healthz`, `/readyz` and `/metrics`
+over plain HTTP to any client that reaches the port. Put the port on a network
+that only the kubelet and your metrics scraper reach, for example one a
+Kubernetes `NetworkPolicy` restricts.
+[Docker](../05-deployment/docker.mdx#probes-and-the-admin-server) lists the
+limits the server holds on its connections.
+
 ## Secrets stay out of the file
 
 Never commit credentials. Every value in the config, including inside connector

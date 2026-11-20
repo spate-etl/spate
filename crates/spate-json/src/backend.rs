@@ -65,11 +65,22 @@ impl fmt::Display for DecodeError {
     }
 }
 
-impl From<serde_json::Error> for DecodeError {
-    fn from(e: serde_json::Error) -> Self {
+/// What a data error says in place of serde's message, which quotes the
+/// value, key or variant it refused.
+const MISMATCH: &str = "the document does not match the record type";
+
+impl DecodeError {
+    /// A `serde_json` error, with `data` as the text of a data error.
+    fn from_serde_json(e: &serde_json::Error, data: &str) -> Self {
+        let msg = match e.classify() {
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => e.to_string(),
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                format!("{data} at line {} column {}", e.line(), e.column())
+            }
+        };
         DecodeError {
             is_data: e.is_data(),
-            msg: e.to_string(),
+            msg,
         }
     }
 }
@@ -80,7 +91,7 @@ impl From<serde_json::Error> for DecodeError {
 #[cfg(not(feature = "simd"))]
 #[inline]
 pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
-    serde_json::from_slice(bytes).map_err(DecodeError::from)
+    serde_json::from_slice(bytes).map_err(|e| DecodeError::from_serde_json(&e, MISMATCH))
 }
 
 // Reused per-thread scratch for the simd-json backend: the mutable copy target
@@ -112,10 +123,70 @@ pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeE
         simd_json::serde::from_slice_with_buffers::<T>(buf.as_mut_slice(), buffers).map_err(|e| {
             DecodeError {
                 is_data: false,
-                msg: e.to_string(),
+                msg: simd_text(&e),
             }
         })
     })
+}
+
+/// The text of a `simd-json` error: its kind and byte index.
+///
+/// `simd-json`'s own `Display` also prints the input character at the index.
+#[cfg(feature = "simd")]
+fn simd_text(e: &simd_json::Error) -> String {
+    use simd_json::ErrorType as T;
+    match e.error() {
+        // serde's message, which quotes what it refused. simd-json reports
+        // no index for it.
+        T::Serde(_) => MISMATCH.to_owned(),
+        // Kinds only simd-json's serde layer raises, for a value of the
+        // wrong type. They hold no input and it reports no index for them.
+        kind @ (T::Unexpected(..)
+        | T::ExpectedArray
+        | T::ExpectedBoolean
+        | T::ExpectedEnum
+        | T::ExpectedFloat
+        | T::ExpectedMap
+        | T::ExpectedSigned
+        | T::ExpectedString
+        | T::ExpectedUnsigned
+        | T::KeyMustBeAString) => format!("{MISMATCH} ({kind:?})"),
+        // Kinds that hold no input. A kind a later simd-json adds is not
+        // printed until it is listed here.
+        kind @ (T::InputTooLarge
+        | T::InsufficientPadding
+        | T::BadKeyType
+        | T::ExpectedArrayComma
+        | T::ExpectedInteger
+        | T::ExpectedObjectColon
+        | T::ExpectedMapComma
+        | T::ExpectedMapEnd
+        | T::ExpectedNull
+        | T::ExpectedTrue
+        | T::ExpectedFalse
+        | T::ExpectedNumber
+        | T::InternalError
+        | T::InvalidEscape
+        | T::InvalidExponent
+        | T::InvalidNumber
+        | T::InvalidUtf8
+        | T::InvalidUnicodeEscape
+        | T::InvalidUnicodeCodepoint
+        | T::NoStructure
+        | T::Parser
+        | T::Eof
+        | T::Syntax
+        | T::TrailingData
+        | T::UnexpectedCharacter
+        | T::UnterminatedString
+        | T::ExpectedArrayContent
+        | T::ExpectedObjectContent
+        | T::ExpectedObjectKey
+        | T::Overflow
+        | T::DepthLimitExceeded
+        | T::SimdUnsupported) => format!("{kind:?} at character {}", e.index()),
+        _ => format!("malformed JSON at character {}", e.index()),
+    }
 }
 
 /// Validate that no JSON object anywhere in `bytes` contains a duplicate key.
@@ -130,7 +201,7 @@ pub(crate) fn check_no_duplicate_keys(bytes: &[u8]) -> Result<(), DecodeError> {
     // first repeated key; the value is discarded.
     serde_json::from_slice::<DupGuard>(bytes)
         .map(|_| ())
-        .map_err(DecodeError::from)
+        .map_err(|e| DecodeError::from_serde_json(&e, "duplicate object key"))
 }
 
 /// A throwaway shape that accepts any JSON value but rejects an object with a
@@ -197,8 +268,8 @@ impl<'de> Visitor<'de> for DupVisitor {
         // quality hasher, seeded afresh for each object.
         let mut seen: QualitySet<Cow<'de, str>> = QualitySet::default();
         while let Some(Key(key)) = map.next_key::<Key<'de>>()? {
-            if let Some(dup) = seen.replace(key) {
-                return Err(de::Error::custom(format!("duplicate object key `{dup}`")));
+            if seen.replace(key).is_some() {
+                return Err(de::Error::custom("duplicate object key"));
             }
             // Recurse so nested objects are guarded too.
             map.next_value::<DupGuard>()?;
@@ -294,35 +365,130 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_key_names_the_key() {
+    fn a_duplicate_key_is_reported_by_position_without_the_key() {
         let err = check_no_duplicate_keys(br#"{"id":1,"id":2}"#).unwrap_err();
         assert!(err.is_data, "{err}");
-        assert_eq!(
-            err.to_string(),
-            "duplicate object key `id` at line 1 column 12"
-        );
+        assert_eq!(err.to_string(), "duplicate object key at line 1 column 12");
     }
 
     #[test]
     fn escaped_spelling_is_the_same_key() {
         let err = check_no_duplicate_keys(br#"{"\u0061":1,"a":2}"#).unwrap_err();
         assert!(err.is_data, "{err}");
-        assert!(
-            err.to_string().starts_with("duplicate object key `a`"),
-            "{err}"
-        );
+        assert_eq!(err.to_string(), "duplicate object key at line 1 column 15");
     }
 
     /// The set holds the plain spelling and the escaped one probes it, the
-    /// reverse of `escaped_spelling_is_the_same_key`. The message names the key
-    /// the set already held.
+    /// reverse of `escaped_spelling_is_the_same_key`.
     #[test]
     fn plain_spelling_matches_an_escaped_duplicate() {
         let err = check_no_duplicate_keys(br#"{"a":1,"\u0061":2}"#).unwrap_err();
         assert!(err.is_data, "{err}");
-        assert!(
-            err.to_string().starts_with("duplicate object key `a`"),
-            "{err}"
+        assert_eq!(err.to_string(), "duplicate object key at line 1 column 15");
+    }
+
+    /// A syntax error in the guard's pass keeps the parser's text.
+    #[test]
+    fn the_guard_reports_a_syntax_error_as_the_parser_words_it() {
+        let err = check_no_duplicate_keys(b"{not json").unwrap_err();
+        assert!(!err.is_data, "{err}");
+        assert_eq!(err.to_string(), "key must be a string at line 1 column 2");
+    }
+
+    #[derive(Debug, Deserialize)]
+    enum Status {
+        Active,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Strict {
+        #[allow(dead_code)]
+        n: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Typed {
+        #[allow(dead_code)]
+        n: u32,
+        #[allow(dead_code)]
+        #[serde(default)]
+        status: Option<Status>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        at: Option<std::net::IpAddr>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        small: Option<u8>,
+    }
+
+    fn typed(doc: &[u8]) -> String {
+        decode_one::<Typed>(doc).unwrap_err().to_string()
+    }
+
+    /// serde's message for a document that does not fit the record type
+    /// quotes the value, variant or key it refused. The text carries none of
+    /// them, nor a message the record type's own `Deserialize` wrote.
+    #[cfg(not(feature = "simd"))]
+    #[test]
+    fn a_data_error_carries_its_position_and_no_content() {
+        const MISMATCH: &str = "the document does not match the record type";
+        let cases: [(&[u8], usize); 4] = [
+            (br#"{"n":"hunter2"}"#, 14),
+            (br#"{"n":1,"status":"hunter2"}"#, 25),
+            (br#"{"n":1,"at":"hunter2"}"#, 21),
+            (br#"{"n":1,"small":4242}"#, 19),
+        ];
+        for (doc, column) in cases {
+            assert_eq!(typed(doc), format!("{MISMATCH} at line 1 column {column}"));
+        }
+        let unknown_field = decode_one::<Strict>(br#"{"n":1,"hunter2":2}"#).unwrap_err();
+        assert!(unknown_field.is_data, "{unknown_field}");
+        assert_eq!(
+            unknown_field.to_string(),
+            format!("{MISMATCH} at line 1 column 16")
+        );
+    }
+
+    #[cfg(not(feature = "simd"))]
+    #[test]
+    fn a_syntax_error_keeps_the_parser_text() {
+        let bare_word = decode_one::<Typed>(br#"{"n":hunter2}"#).unwrap_err();
+        assert!(!bare_word.is_data, "{bare_word}");
+        assert_eq!(bare_word.to_string(), "expected value at line 1 column 6");
+        assert_eq!(
+            typed(br#"{"n":"hunter2"#),
+            "EOF while parsing a string at line 1 column 13"
+        );
+    }
+
+    /// `simd-json` gives no index for a document that does not fit the record
+    /// type, so the text is the class.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn a_data_error_carries_no_content() {
+        const MISMATCH: &str = "the document does not match the record type";
+        for doc in [
+            &br#"{"n":1,"status":"hunter2"}"#[..],
+            br#"{"n":1,"at":"hunter2"}"#,
+        ] {
+            assert_eq!(typed(doc), MISMATCH);
+        }
+        let unknown_field = decode_one::<Strict>(br#"{"n":1,"hunter2":2}"#).unwrap_err();
+        assert_eq!(unknown_field.to_string(), MISMATCH);
+        for doc in [&br#"{"n":"hunter2"}"#[..], br#"{"n":1,"small":4242}"#] {
+            assert_eq!(typed(doc), format!("{MISMATCH} (ExpectedUnsigned)"));
+        }
+    }
+
+    /// `simd-json`'s own text ends with the input character at the index.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn a_syntax_error_names_its_kind_and_index_without_the_character() {
+        assert_eq!(typed(br#"{"n":hunter2}"#), "InternalError at character 5");
+        assert_eq!(
+            typed(br#"{"n":"hun\qter2"}"#),
+            "InvalidEscape at character 3"
         );
     }
 

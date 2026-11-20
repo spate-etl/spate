@@ -124,6 +124,37 @@ fn full_lifecycle_polls_acks_and_commits() {
     );
 }
 
+/// A lane told its batch is finished lets go of the batch's messages, and
+/// with them the fetch responses they keep alive, before its next poll.
+#[test]
+fn a_lane_releases_its_messages_when_its_batch_is_finished() {
+    let cluster = MockKafka::new();
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 5, 1, "r");
+
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(config(&brokers, "release"));
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, HANG);
+    cp.begin_epoch(&[PartitionId(0)], 1);
+    let lane = &mut lanes[0];
+
+    let mut errors = Vec::new();
+    wait_until(HANG, "a batch", || {
+        serve_events(&mut source, &mut errors);
+        lane.poll(64, Duration::from_millis(50))
+            .expect("poll")
+            .is_some()
+    });
+    assert!(
+        !format!("{lane:?}").contains("held: 0"),
+        "the batch's messages are held for its payloads: {lane:?}"
+    );
+    lane.release_batch();
+    assert!(format!("{lane:?}").contains("held: 0"), "{lane:?}");
+}
+
 /// A paused lane delivers nothing while its consumer keeps fetching the
 /// lane beside it, and on resume it delivers every record gap-free.
 #[test]

@@ -195,7 +195,7 @@ pub(crate) struct FetcherParams {
     /// they are.
     pub(crate) range_bytes: usize,
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
-    /// Backpressure pause (set by `Source::pause`): checked between sends.
+    /// Pause flag (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
     /// First step of the read schedule, [`read_backoff`]; tests shrink it.
     pub(crate) retry_base: Duration,
@@ -1689,6 +1689,29 @@ mod tests {
         let reason = reason.expect("a rewritten key is not_found split poison");
         assert!(reason.contains("\"/p/a\" is not an object key"), "{reason}");
         assert!(reason.contains("\"p/a\" in its place"), "{reason}");
+    }
+
+    /// A key with a `..` segment poisons the unit rather than reading the
+    /// object the segment would resolve to.
+    #[tokio::test]
+    async fn a_key_with_a_parent_segment_poisons_the_split() {
+        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("secret/a", b"other\n")]).await);
+        let msgs = collect_fetch(store, vec![entry("data/../secret/a", 6, None)], 0, 4, 64).await;
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ChunkMsg::Chunk(_))),
+            "no bytes of secret/a are read for data/../secret/a"
+        );
+        let reason = msgs.iter().find_map(|m| match m {
+            ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::NotFound, reason)) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        });
+        let reason = reason.expect("a key with a parent segment is not_found split poison");
+        assert!(
+            reason.contains("\"data/../secret/a\" is not an object key"),
+            "{reason}"
+        );
     }
 
     #[tokio::test]

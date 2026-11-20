@@ -198,8 +198,8 @@ fn encode(schema: &Schema, value: impl Into<AvroRecordValue>) -> Result<Vec<u8>,
         .write_value_to_vec(value)?)
 }
 
-/// Resolve one datum against a reader schema, the way the deserializer does
-/// internally, reached directly here so a section can assert on one reader
+/// Resolve one datum against a reader schema by the rules the deserializer
+/// applies, reached directly here so a section can assert on one reader
 /// schema at a time without a pipeline around it.
 fn resolve(writer: &str, reader: &str, datum: &[u8]) -> Result<AvroValue, apache_avro::Error> {
     let writer = Schema::parse_str(writer)?;

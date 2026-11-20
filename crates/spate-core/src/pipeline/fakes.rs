@@ -38,6 +38,12 @@ pub(crate) struct SourceLog {
     pub(crate) committed: BTreeMap<PartitionId, i64>,
     pub(crate) pauses: Vec<Vec<LaneId>>,
     pub(crate) resumes: Vec<Vec<LaneId>>,
+    /// Errors the next `pause` calls return, one per call, after recording it.
+    pub(crate) pause_errors: VecDeque<SourceError>,
+    /// Errors the next `resume` calls return, one per call, after recording it.
+    pub(crate) resume_errors: VecDeque<SourceError>,
+    /// The lane of every `release_batch` call, in order.
+    pub(crate) releases: Vec<LaneId>,
     pub(crate) flush_commits: usize,
     pub(crate) opened: bool,
     /// Whether `open` received the framework's source-stage handles. Guards
@@ -330,13 +336,15 @@ impl Source for FakeSource {
     }
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().pauses.push(lanes.to_vec());
-        Ok(())
+        let mut log = self.shared.lock().unwrap();
+        log.pauses.push(lanes.to_vec());
+        log.pause_errors.pop_front().map_or(Ok(()), Err)
     }
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        self.shared.lock().unwrap().resumes.push(lanes.to_vec());
-        Ok(())
+        let mut log = self.shared.lock().unwrap();
+        log.resumes.push(lanes.to_vec());
+        log.resume_errors.pop_front().map_or(Ok(()), Err)
     }
 
     fn renew_held(&mut self) {
@@ -480,6 +488,10 @@ impl SourceLane for FakeLane {
             hook.go.recv().unwrap();
         }
         self.finished
+    }
+
+    fn release_batch(&mut self) {
+        self.log.lock().unwrap().releases.push(self.id);
     }
 }
 

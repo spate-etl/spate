@@ -7,7 +7,7 @@
 //! retrying a blocked batch, and while draining.
 
 use super::runtime::RuntimeOptions;
-use super::{DriverEvent, ThreadControl};
+use super::{DriverEvent, PauseCause, ThreadControl};
 use crate::admin::HealthState;
 use crate::backpressure::{BackpressureParams, InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 static POLL_ERROR_WARN: RateLimit = RateLimit::hot_path();
 static GATE_WARN: RateLimit = RateLimit::hot_path();
+static CEILING_PAUSE_WARN: RateLimit = RateLimit::hot_path();
 
 /// Tuning for one driver thread. Constructed by the runtime; exposed to
 /// tests.
@@ -51,6 +52,9 @@ pub(crate) struct DriverParams {
     /// (`checkpoint.max_pending_batches`). A lane whose partition is at the
     /// ceiling is skipped, not polled, so pending cannot exceed it.
     pub max_pending_batches: usize,
+    /// How long a partition stays at the ceiling before its lanes are paused
+    /// at the source (`backpressure.min_pause`).
+    pub ceiling_pause_after: Duration,
 }
 
 impl DriverParams {
@@ -70,6 +74,7 @@ impl DriverParams {
             blocked_retry: options.blocked_retry,
             queue_low_ratio: backpressure.low_ratio,
             max_pending_batches: checkpoint.max_pending_batches,
+            ceiling_pause_after: backpressure.min_pause,
         }
     }
 }
@@ -232,6 +237,8 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                                         advanced: gate.advanced,
                                         issued: 0,
                                         gated: false,
+                                        closed_at: None,
+                                        paused: false,
                                     },
                                 );
                             }
@@ -387,6 +394,14 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     g.gated = false;
                     tracing::debug!(partition = partition.0, "pending-batch ceiling reopened");
                 }
+                // A gate that is open and was open on the last pass has
+                // nothing to time and nothing to lift.
+                if (at || g.closed_at.is_some())
+                    && let Some(transition) =
+                        g.source_request(at, &*clock, params.ceiling_pause_after)
+                {
+                    request_for_partition(transition, g.epoch, partition, &lanes, &events);
+                }
                 at
             }
             _ => false,
@@ -412,13 +427,14 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
 
         // The poll result borrows the lane's buffers, so the fatal is latched
         // here and acted on once this block ends.
-        let fatal_reported = {
+        let (fatal_reported, polled_batch) = {
             let (lane, owned) = split_for_poll(&mut lanes, lane_idx);
             let poll_started = Stopwatch::start(&SystemClock);
             let polled = lane.poll(params.max_records, lane_timeout);
             source_metrics.poll_duration(poll_started.elapsed(&SystemClock));
 
             let mut fatal_reported = false;
+            let polled_batch = matches!(polled, Ok(Some(_)));
             match polled {
                 Ok(Some(mut batch)) => {
                     empty_polls = 0;
@@ -497,8 +513,13 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     );
                 }
             }
-            fatal_reported
+            (fatal_reported, polled_batch)
         };
+        if polled_batch {
+            // The batch is finished, and the lane's next poll may be a long
+            // way off behind a gate or a pause.
+            lanes[lane_idx].release_batch();
+        }
         if fatal_reported {
             // Dropping the chain closes this thread's shard-queue senders and
             // fails any parked acks (the terminal's Drop contract).
@@ -522,6 +543,72 @@ struct GateState {
     /// Whether the partition is currently at the ceiling, so the WARN on
     /// closing (and the DEBUG on reopening) fire on the edge, not per poll.
     gated: bool,
+    /// When the pass that found the partition at the ceiling ran, for as long
+    /// as it has stayed there.
+    closed_at: Option<Instant>,
+    /// Whether the source was asked to pause the partition's lanes for this
+    /// stay at the ceiling.
+    paused: bool,
+}
+
+impl GateState {
+    /// Record a pass that found the partition at the ceiling (`at`) or below
+    /// it, and return what to ask of the source: a pause once the partition
+    /// has stayed at the ceiling for `pause_after`, and a resume when a paused
+    /// one leaves it. The clock is read only at the ceiling.
+    #[cold]
+    #[inline(never)]
+    fn source_request(
+        &mut self,
+        at: bool,
+        clock: &dyn Clock,
+        pause_after: Duration,
+    ) -> Option<Transition> {
+        if !at {
+            self.closed_at = None;
+            return std::mem::take(&mut self.paused).then_some(Transition::Resume);
+        }
+        if self.paused {
+            return None;
+        }
+        let now = clock.now();
+        let since = *self.closed_at.get_or_insert(now);
+        if now.saturating_duration_since(since) < pause_after {
+            return None;
+        }
+        self.paused = true;
+        Some(Transition::Pause)
+    }
+}
+
+/// Ask the controller to pause or resume this thread's lanes on `partition`
+/// at the source, for the ceiling gate of assignment `epoch`.
+#[cold]
+#[inline(never)]
+fn request_for_partition<L: SourceLane>(
+    transition: Transition,
+    epoch: u32,
+    partition: PartitionId,
+    lanes: &[L],
+    events: &crossbeam_channel::Sender<DriverEvent>,
+) {
+    let lanes: Vec<LaneId> = lanes
+        .iter()
+        .filter(|l| l.partition() == partition)
+        .map(SourceLane::id)
+        .collect();
+    let cause = PauseCause::Ceiling { epoch };
+    let _ = events.send(match transition {
+        Transition::Pause => {
+            crate::rate_limited_warn!(
+                CEILING_PAUSE_WARN,
+                partition = partition.0,
+                "partition held at the pending-batch ceiling; pausing its lanes at the source"
+            );
+            DriverEvent::PauseLanes { lanes, cause }
+        }
+        Transition::Resume => DriverEvent::ResumeLanes { lanes, cause },
+    });
 }
 
 /// Park on the control channel for up to `poll_timeout`. A thread with nothing
@@ -826,7 +913,10 @@ fn apply_transition(
         Transition::Pause => {
             *pause_started = Some(Stopwatch::start(&SystemClock));
             bp_metrics.pause_started();
-            let _ = events.send(DriverEvent::PauseLanes { lanes: owned });
+            let _ = events.send(DriverEvent::PauseLanes {
+                lanes: owned,
+                cause: PauseCause::Backpressure,
+            });
         }
         Transition::Resume => {
             let paused_for = pause_started
@@ -834,7 +924,10 @@ fn apply_transition(
                 .map(|s| s.elapsed(&SystemClock))
                 .unwrap_or_default();
             bp_metrics.pause_ended(paused_for);
-            let _ = events.send(DriverEvent::ResumeLanes { lanes: owned });
+            let _ = events.send(DriverEvent::ResumeLanes {
+                lanes: owned,
+                cause: PauseCause::Backpressure,
+            });
         }
     }
 }
@@ -974,6 +1067,133 @@ mod tests {
         }
     }
 
+    fn gate() -> GateState {
+        GateState {
+            epoch: 4,
+            advanced: AdvanceCounter::new(),
+            issued: 0,
+            gated: false,
+            closed_at: None,
+            paused: false,
+        }
+    }
+
+    /// A partition is paused once it has stayed at the ceiling for the whole
+    /// wait, and not a millisecond sooner. The pause is requested once.
+    #[test]
+    fn a_gate_asks_for_a_pause_once_it_has_stayed_closed_for_the_wait() {
+        const WAIT: Duration = Duration::from_millis(500);
+        let clock = TestClock::frozen();
+        let mut gate = gate();
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        clock.advance(WAIT - Duration::from_millis(1));
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            gate.source_request(true, &*clock, WAIT),
+            Some(Transition::Pause)
+        );
+        clock.advance(WAIT);
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+    }
+
+    /// With no wait configured the pass that finds the partition at the
+    /// ceiling asks for the pause.
+    #[test]
+    fn a_gate_with_no_wait_asks_for_a_pause_on_the_closing_pass() {
+        let clock = TestClock::frozen();
+        assert_eq!(
+            gate().source_request(true, &*clock, Duration::ZERO),
+            Some(Transition::Pause)
+        );
+    }
+
+    /// A paused gate asks for one resume when it reopens, and one that
+    /// reopened before its pause asks for nothing.
+    #[test]
+    fn a_gate_asks_for_a_resume_only_after_its_pause() {
+        let clock = TestClock::frozen();
+        let mut gate = gate();
+        assert_eq!(
+            gate.source_request(true, &*clock, Duration::ZERO),
+            Some(Transition::Pause)
+        );
+        assert_eq!(
+            gate.source_request(false, &*clock, Duration::ZERO),
+            Some(Transition::Resume)
+        );
+        assert_eq!(gate.source_request(false, &*clock, Duration::ZERO), None);
+
+        const WAIT: Duration = Duration::from_millis(500);
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        assert_eq!(gate.source_request(false, &*clock, WAIT), None);
+    }
+
+    /// Each stay at the ceiling is timed from its own start: time spent at
+    /// the ceiling before a reopening does not count toward the next pause.
+    #[test]
+    fn a_reopened_gate_times_its_next_closure_from_the_start() {
+        const WAIT: Duration = Duration::from_millis(500);
+        let clock = TestClock::frozen();
+        let mut gate = gate();
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        clock.advance(WAIT - Duration::from_millis(1));
+        assert_eq!(gate.source_request(false, &*clock, WAIT), None);
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        clock.advance(WAIT - Duration::from_millis(1));
+        assert_eq!(gate.source_request(true, &*clock, WAIT), None);
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            gate.source_request(true, &*clock, WAIT),
+            Some(Transition::Pause)
+        );
+    }
+
+    struct PartitionLane(LaneId, PartitionId);
+
+    impl SourceLane for PartitionLane {
+        type Batch<'a> = crate::source::NoBatch;
+        fn id(&self) -> LaneId {
+            self.0
+        }
+        fn partition(&self) -> PartitionId {
+            self.1
+        }
+        fn poll(
+            &mut self,
+            _max_records: usize,
+            _timeout: Duration,
+        ) -> Result<Option<crate::source::NoBatch>, crate::error::SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// A ceiling request names the thread's lanes on that partition and no
+    /// other lane, with the gate's epoch.
+    #[test]
+    fn a_ceiling_request_names_only_the_partitions_lanes() {
+        let lanes = [
+            PartitionLane(LaneId(0), PartitionId(7)),
+            PartitionLane(LaneId(1), PartitionId(8)),
+            PartitionLane(LaneId(2), PartitionId(7)),
+        ];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        request_for_partition(Transition::Pause, 4, PartitionId(7), &lanes, &tx);
+        request_for_partition(Transition::Resume, 4, PartitionId(7), &lanes, &tx);
+        let cause = PauseCause::Ceiling { epoch: 4 };
+        let named = vec![LaneId(0), LaneId(2)];
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DriverEvent::PauseLanes { lanes, cause: c }) if lanes == named && c == cause
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DriverEvent::ResumeLanes { lanes, cause: c }) if lanes == named && c == cause
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
     /// Each setting reaches the driver field the runtime reads it from. Every
     /// value differs, so a field read from the wrong setting fails.
     #[test]
@@ -1004,6 +1224,7 @@ mod tests {
         assert_eq!(params.blocked_retry, Duration::from_millis(7));
         assert!((params.queue_low_ratio - 0.3).abs() < f64::EPSILON);
         assert_eq!(params.max_pending_batches, 17);
+        assert_eq!(params.ceiling_pause_after, Duration::from_millis(13));
 
         assert_eq!(
             backpressure_params(&backpressure),

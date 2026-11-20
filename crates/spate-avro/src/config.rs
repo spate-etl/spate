@@ -23,6 +23,7 @@
 
 use crate::cache::CompiledSchema;
 use crate::datum::AvroDatumDeserializer;
+use crate::de::ReaderSide;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
 use crate::registry::{Endpoint, Rejection, http_client, registry_url, spawn_fetcher};
 use apache_avro::Schema;
@@ -169,7 +170,10 @@ pub struct AvroSettings {
     pub mode: AvroMode,
     /// Registry connection (required in `confluent` mode).
     pub registry: Option<RegistrySection>,
-    /// Subjects whose latest schemas are fetched at startup.
+    /// Subjects whose latest schemas are fetched at startup. The schema cache
+    /// holds at most 1,024 compiled schemas and an estimated 64 MiB of them,
+    /// so a list above either bound keeps the subjects listed last. An evicted
+    /// schema is fetched again by id on its next record.
     pub prewarm_subjects: Vec<String>,
     /// The longest a failed schema id stays negatively cached before a
     /// refetch is allowed. The cache holds at most 1,024 failed ids and drops
@@ -180,7 +184,9 @@ pub struct AvroSettings {
     #[serde(with = "humantime_serde")]
     pub negative_cache_ttl: Duration,
     /// Optional reader schema pinning the resolved record shape
-    /// (`confluent` and `raw` modes).
+    /// (`confluent` and `raw` modes). One that recurses through a union
+    /// limits how deep a datum may recurse: see
+    /// [`AvroValueDeserializer`](crate::AvroValueDeserializer).
     pub reader_schema: Option<SchemaSource>,
     /// The writer schema (required in `raw` and `single_object` modes).
     pub schema: Option<SchemaSource>,
@@ -325,10 +331,17 @@ impl AvroDeserializerBuilder {
                 ),
             }
         })?;
-        let reader_schema = settings
+        let reader_side = settings
             .reader_schema
             .as_ref()
-            .map(|s| s.load().map(Arc::new))
+            .map(|s| {
+                let schema = Arc::new(s.load()?);
+                ReaderSide::compile(schema)
+                    .map(Arc::new)
+                    .map_err(|e| AvroConfigError::Invalid {
+                        detail: format!("`reader_schema` {e}"),
+                    })
+            })
             .transpose()?;
         let mode = match settings.mode {
             AvroMode::Confluent => {
@@ -438,7 +451,7 @@ impl AvroDeserializerBuilder {
             }
         };
         Ok(AvroDeserializerBuilder {
-            core: DecoderCore::new(mode, reader_schema),
+            core: DecoderCore::new(mode, reader_side),
         })
     }
 
@@ -481,6 +494,7 @@ impl AvroDeserializerBuilder {
     }
 
     /// The dynamically-typed deserializer (emits [`crate::AvroValue`]).
+    /// It refuses a datum past the limits on [`AvroValueDeserializer`].
     ///
     /// # Errors
     ///
@@ -494,7 +508,8 @@ impl AvroDeserializerBuilder {
         Ok(AvroValueDeserializer::new(self.core.clone()))
     }
 
-    /// The serde-typed deserializer (emits `T`).
+    /// The serde-typed deserializer (emits `T`). It refuses a datum past the
+    /// limits on [`AvroValueDeserializer`].
     ///
     /// # Errors
     ///

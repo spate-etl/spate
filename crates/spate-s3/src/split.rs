@@ -178,8 +178,11 @@ impl SplitRange {
 /// reads a descriptor of two or more members whole, member by member in order,
 /// on one lane, and a member named twice is read once per mention. It fails
 /// back a descriptor that names no member or more than [`MAX_UNIT_MEMBERS`],
+/// names a member whose key is outside the prefix of the source's `url`,
 /// carries an ETag `If-Match` cannot send, or names a byte range cut on a
 /// delimiter other than the framer's or of an object the source decompresses.
+/// A key is inside the prefix when it starts with the prefix followed by `/`,
+/// and a `url` that names the whole bucket has every key inside it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitDescriptor {
     /// Encoding version; always [`DESCRIPTOR_VERSION`] at write. Private to

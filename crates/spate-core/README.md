@@ -33,6 +33,8 @@ crate at its root.
   metric handles before the record loop starts. A `Meter` registers a
   connector's own families with the standard labels. The admin server answers
   `/healthz` and `/readyz`, and `/metrics` when the pipeline exports metrics.
+  It has no authentication. Each connection carries one request and closes
+  within 30 seconds, and it serves at most 256 at once.
 - **Pipeline runtime.** `Pipeline` assembles a process from a configuration, a
   source, chains and sinks. Driver threads run the lanes and chains, and a
   controller thread owns the source and the checkpointer. On shutdown the

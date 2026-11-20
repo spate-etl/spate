@@ -54,6 +54,10 @@ pub enum DeserError {
     #[error("malformed payload: {reason}")]
     Malformed {
         /// Human-readable cause, for logs and dead-record metrics.
+        ///
+        /// The chain logs it for a skipped payload and uses it as the
+        /// pipeline's failure reason, so a deserializer keeps the payload's
+        /// content out of it.
         reason: String,
     },
     /// A schema required to decode the payload is not available.

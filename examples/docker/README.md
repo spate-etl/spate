@@ -55,6 +55,11 @@ readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
 livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
 ```
 
+The admin server has no authentication, so keep the port on a network only
+the kubelet and the scraper reach. Each connection carries one request and
+closes within 30 seconds. The server serves at most 256 at once, and a new one
+past that closes the oldest.
+
 ## Resources and threads
 
 - `pipeline.threads` defaults to `available_parallelism` minus the I/O
@@ -72,7 +77,8 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
   the framework) plus librdkafka's prefetch, which is charged **per assigned
   partition** and sits outside the in-flight budget — at the default
   `queued.max.messages.kbytes` (65.5 MB) a 100-partition assignment can hold
-  ~6.6 GB. Size `resources.limits` above the sum with headroom for batches held
+  ~6.6 GB. Aborted transactions on the topic are held outside that cap until
+  the pipeline polls past them. Size `resources.limits` above the sum with headroom for batches held
   during retries, and cap prefetch explicitly if the assignment is wide.
 
 ## Backpressure and batch sizing

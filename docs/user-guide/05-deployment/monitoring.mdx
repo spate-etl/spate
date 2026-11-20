@@ -35,6 +35,11 @@ With `prometheus` (the default), the exposition endpoint mounts at
 `GET /metrics` on the admin server, next to the probes described in
 [Docker](docker.mdx). Scrape it with a PodMonitor or scrape annotations.
 
+Each scrape gets a connection of its own, which the server closes after the
+one response and within 30 seconds. The port has no authentication.
+[Docker](docker.mdx#probes-and-the-admin-server) covers where to put it and
+the limits the server holds on its connections.
+
 The combinations, and what each is for:
 
 | `admin.listen` | `metrics.exporter` | What you get |

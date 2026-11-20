@@ -34,7 +34,9 @@
 //! the decode continues; under `on_error: fail` it surfaces a decode error on
 //! the first bad record, which the chain's deserializer error policy then
 //! either replays (stop the pipeline, at-least-once) or drops as a whole
-//! payload. The connector-owned
+//! payload. The error text holds the kind of failure, and its position where the
+//! parser reports one, with no content from the record, and the `WARN` line for a skipped record carries
+//! its partition and offset. The connector-owned
 //! `spate_json_deser_*` families are minted from a [`Meter`](spate_core::metrics::Meter)
 //! when the builder is given a metrics scope (see
 //! [`JsonDeserializerBuilder::with_metrics`]); they sit alongside the

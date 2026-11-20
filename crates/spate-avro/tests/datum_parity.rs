@@ -5,9 +5,9 @@
 //! semantics come from the reference implementation, not from this suite's
 //! opinion of the spec.
 //!
-//! The known, documented divergences (the per-datum
-//! collection-item budget; skipped-field content validation; the uniform
-//! acceptance superset) are pinned by their own tests at the bottom.
+//! The known, documented divergences (skipped-field content validation; the
+//! uniform acceptance superset; the depth limits) are pinned by their own
+//! tests at the bottom.
 
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 #![expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
@@ -769,10 +769,9 @@ fn invalid_utf8_in_a_skipped_field_diverges_by_design() {
 }
 
 #[test]
-fn zero_width_item_bomb_diverges_by_design() {
-    // A four-byte payload claiming 100 000 null items: the two-pass path
-    // walks it into 100 000 values, the single-pass path errors on the
-    // per-datum collection-item budget.
+fn zero_width_item_bomb_is_refused_on_both_paths() {
+    // A four-byte payload claiming 100 000 null items is over the per-datum
+    // collection-item budget on both paths, before either walks it.
     const SCH: &str = r#"{"type":"array","items":"null"}"#;
     let datum = to_avro_datum(
         &Schema::parse_str(SCH).unwrap(),
@@ -781,26 +780,8 @@ fn zero_width_item_bomb_diverges_by_design() {
     .unwrap();
 
     let b = builder(SCH);
-    let (ack, _rx) = AckRef::test_pair();
-
-    let mut two_pass = EmitCollector::<Vec<()>>::new();
-    b.build_serde::<Vec<()>>()
-        .unwrap()
-        .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
-        .expect("the two-pass path walks the bomb");
-    assert_eq!(two_pass.records[0].payload.len(), 100_000);
-
-    let mut single_pass = EmitCollector::<Vec<()>>::new();
-    let err = b
-        .build_serde_datum::<Vec<()>>()
-        .unwrap()
-        .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
-        .unwrap_err();
-    assert!(
-        matches!(err, spate_core::error::DeserError::Malformed { .. }),
-        "{err}"
-    );
-    assert!(single_pass.records.is_empty());
+    assert_malformed(&mut b.build_serde::<Vec<()>>().unwrap(), &datum);
+    assert_malformed(&mut b.build_serde_datum::<Vec<()>>().unwrap(), &datum);
 }
 
 #[test]

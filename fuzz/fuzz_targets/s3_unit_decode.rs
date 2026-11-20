@@ -6,10 +6,11 @@
 //! the source would read carries a quoted ETag that `If-Match` can send, a
 //! version that is non-empty, not `null`, at most 1,024 bytes and free of
 //! spaces and control bytes, and a key under the source's prefix. One decode
-//! arm takes raw bytes; the other builds a notification record from arbitrary
+//! arm takes raw bytes; another builds a notification record from arbitrary
 //! fields, so every run reaches the record parser, and asserts that a record
 //! read names the version and count it carried, and the key as written when
-//! its `eventSource` is `ceph:s3`. The round-trip arm asserts
+//! its `eventSource` is `ceph:s3`. A third builds a descriptor from arbitrary
+//! keys, so every run reaches the descriptor's checks. The round-trip arm asserts
 //! that a re-enqueued unit's body is ASCII when its ETag is, and that a body
 //! the source reads names the key, the quoted ETag and the count it was
 //! written with, and no version.
@@ -21,6 +22,7 @@ use libfuzzer_sys::fuzz_target;
 use spate_s3::fuzz_seams::{
     DecodedPart, DecodedUnit, decode_unit, notification_body, quoted, re_enqueue_body,
 };
+use spate_s3::{DescriptorObject, SplitDescriptor};
 
 const BUCKET: &str = "bucket";
 const PREFIX: &str = "data";
@@ -30,6 +32,14 @@ struct Input {
     body: Vec<u8>,
     record: Record,
     overwrite: Overwrite,
+    members: Vec<Member>,
+}
+
+/// One member of a descriptor, as a feed publisher names it.
+#[derive(Arbitrary, Debug)]
+struct Member {
+    key: String,
+    size: u64,
 }
 
 /// One notification record's fields, any of which may be absent.
@@ -61,7 +71,27 @@ fuzz_target!(|input: Input| {
     }
     record(&input.record);
     round_trip(&input.overwrite);
+    descriptor(&input.members);
 });
+
+/// Decode a descriptor naming `members`.
+fn descriptor(members: &[Member]) {
+    let objects = members
+        .iter()
+        .map(|member| DescriptorObject {
+            key: member.key.clone(),
+            size: member.size,
+            etag: None,
+            last_modified_ms: 0,
+        })
+        .collect();
+    let Ok(body) = SplitDescriptor::new(objects).encode() else {
+        return;
+    };
+    if let DecodedUnit::Read(parts) = decode_unit(&body, BUCKET, PREFIX) {
+        check(&parts);
+    }
+}
 
 /// Decode a notification built from `record`'s fields.
 fn record(record: &Record) {
@@ -140,12 +170,10 @@ fn check(parts: &[DecodedPart]) {
                 "{version:?}"
             );
         }
-        if part.re_enqueues > 0 || part.version.is_some() {
-            assert!(
-                part.key.starts_with("data/"),
-                "a notification part outside the prefix: {:?}",
-                part.key
-            );
-        }
+        assert!(
+            part.key.starts_with("data/"),
+            "a part outside the prefix: {:?}",
+            part.key
+        );
     }
 }

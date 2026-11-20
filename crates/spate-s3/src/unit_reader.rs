@@ -1789,10 +1789,10 @@ mod tests {
         assert_eq!(named.len(), 1, "{logs:?}");
     }
 
-    /// A unit whose body is a descriptor naming one object, `object-{i}`.
+    /// A unit whose body is a descriptor naming one object, `data/object-{i}`.
     fn descriptor_unit(i: usize) -> Unit {
         let object = DescriptorObject {
-            key: format!("object-{i}"),
+            key: format!("data/object-{i}"),
             size: 1,
             etag: None,
             last_modified_ms: 1,
@@ -1801,11 +1801,11 @@ mod tests {
         Unit::new(format!("unit-{i}"), body)
     }
 
-    /// A whole-object unit over `{name}.ndjson`, which has an ETag and is
+    /// A whole-object unit over `data/{name}.ndjson`, which has an ETag and is
     /// read in `ranges` ranges.
     fn ranged_unit(name: &str, ranges: u64) -> Unit {
         let object = DescriptorObject {
-            key: format!("{name}.ndjson"),
+            key: format!("data/{name}.ndjson"),
             size: ranges * TARGET,
             etag: Some(format!("\"etag-{name}\"")),
             last_modified_ms: 1,
@@ -2062,7 +2062,7 @@ mod tests {
             let (mut reader, script, _rt) = reader_holding(3);
             reader.parts.packing.compression = compression;
             let object = DescriptorObject {
-                key: key.into(),
+                key: format!("data/{key}"),
                 size: 5 * TARGET,
                 etag: Some("\"etag\"".into()),
                 last_modified_ms: 1,
@@ -2334,7 +2334,7 @@ mod tests {
                 let body = b"line\n".repeat(40);
                 let size = body.len() as u64;
                 let put = rt
-                    .block_on(store.put(&Path::from("a.ndjson"), PutPayload::from(body)))
+                    .block_on(store.put(&Path::from("data/a.ndjson"), PutPayload::from(body)))
                     .unwrap();
                 let parts = LaneParts {
                     store: Arc::new(store),
@@ -2357,7 +2357,7 @@ mod tests {
                 let mut reader =
                     UnitReader::new(Arc::new(feed), parts, scope(), NonZeroUsize::new(4), None);
                 let object = DescriptorObject {
-                    key: "a.ndjson".into(),
+                    key: "data/a.ndjson".into(),
                     size,
                     etag: put.e_tag.clone(),
                     last_modified_ms: 1,
@@ -2413,11 +2413,11 @@ mod tests {
         assert!(reader.deliveries.is_empty() && reader.lanes.is_empty());
     }
 
-    /// A unit naming the byte range `[0, TARGET)` of `key`, cut on
+    /// A unit naming the byte range `[0, TARGET)` of `data/{key}`, cut on
     /// `delimiter`.
     fn range_unit(key: &str, delimiter: u8) -> Unit {
         let object = DescriptorObject {
-            key: key.to_owned(),
+            key: format!("data/{key}"),
             size: 2 * TARGET,
             etag: Some("\"etag\"".into()),
             last_modified_ms: 1,
@@ -3140,11 +3140,11 @@ mod tests {
         assert_eq!(run(true), 0.0);
     }
 
-    /// A unit whose descriptor names `members` objects, `object-0` onwards.
+    /// A unit whose descriptor names `members` objects, `data/object-0` onwards.
     fn multi_member_unit(members: usize) -> Unit {
         let objects = (0..members)
             .map(|i| DescriptorObject {
-                key: format!("object-{i}"),
+                key: format!("data/object-{i}"),
                 size: 1,
                 etag: None,
                 last_modified_ms: 1,

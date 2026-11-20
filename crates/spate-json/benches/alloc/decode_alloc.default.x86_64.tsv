@@ -12,7 +12,7 @@ dup_guard_wide	5676	0	876268
 large_string	7	13	1049221
 ndjson_batch50	300	0	6050
 ndjson_clean	12000	0	242000
-ndjson_fail_bad_last	12001	13	455213
+ndjson_fail_bad_last	12001	13	455183
 ndjson_fail_clean	12001	9	454992
 numeric_array	1	14	2097152
 single_typed	8	0	62

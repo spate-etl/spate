@@ -80,7 +80,7 @@ for the parsing caveats.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `interval` | duration | `5s` | How often committable watermarks are flushed to the source, and the cadence at which partial chunk buffers are sealed (while the pipeline is unblocked, a below-target chunk is sealed within ~one interval). Not a durability boundary (the sink write is); shorter intervals narrow the post-crash replay window and tighten worst-case commit lag. From `100ms` to `1day`. |
-| `max_pending_batches` | integer | `1024` | Hard ceiling on unacknowledged batches per partition: at the limit, the partition's lanes are skipped at the poll boundary until acknowledgments retire batches ([Backpressure](../02-concepts/03-backpressure.mdx#the-checkpoint-ceiling)). Must be ≥ 1. |
+| `max_pending_batches` | integer | `1024` | Hard ceiling on unacknowledged batches per partition: at the limit, the partition's lanes are skipped at the poll boundary until acknowledgments retire batches, and are paused at the source once the partition has stayed there for `backpressure.min_pause` ([Backpressure](../02-concepts/03-backpressure.mdx#the-checkpoint-ceiling)). Must be ≥ 1. |
 | `drain_timeout` | duration | `25s` | Shutdown/rebalance drain budget for in-flight sink batches. Keep comfortably below `terminationGracePeriodSeconds` ([Docker](../05-deployment/docker.mdx)). Above `0s` and at most `1day`, and more than `5s` with a feed that hands back ([Graceful shutdown](../03-guides/graceful-shutdown.mdx#the-drain-choreography)). |
 | `stalled_fail_after` | duration | `120s` | A partition watermark stalled behind a *failed* batch this long fails the pipeline, so a permanent sink failure becomes restart-and-replay instead of consuming while committing nothing. The check runs on each commit tick, and a stall fails the pipeline no earlier than the second tick that finds it. A [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed) fails each unit in the batch back to its feed first. Must be `> 0`. |
 
@@ -95,7 +95,7 @@ sink batch settings.
 | `max_inflight_bytes` | bytes | `256MiB` | Global cap on bytes admitted into the pipeline but not yet durably written. Must be `> 0`. |
 | `high_ratio` | float | `0.8` | Fraction of the budget at which sources are paused. |
 | `low_ratio` | float | `0.5` | Fraction of the budget below which sources may resume. Ratios must satisfy `0 < low_ratio < high_ratio <= 1`. |
-| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. |
+| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. Also how long a partition stays at `checkpoint.max_pending_batches` before its lanes are paused at the source: `0s` pauses them at once, and a longer value leaves the source fetching for that long. |
 
 ## `admin:`
 
@@ -106,7 +106,7 @@ semantics.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `listen` | socket address \| `none` | `0.0.0.0:9090` | Bind address. `none` runs no server: no probes, no scrape endpoint, and the port stays free. An address the process cannot take fails the start, naming that address. A port of `0` asks the kernel to pick a free one, and the start logs the address the server bound. |
+| `listen` | socket address \| `none` | `0.0.0.0:9090` | Bind address. `none` runs no server: no probes, no scrape endpoint, and the port stays free. An address the process cannot take fails the start, naming that address. A port of `0` asks the kernel to pick a free one, and the start logs the address the server bound. The server has no authentication. It closes each connection after one request or 30 seconds, and serves at most 256 connections at once across all clients ([Docker](../05-deployment/docker.mdx#probes-and-the-admin-server)). |
 
 ## `metrics:`
 

@@ -1,8 +1,8 @@
 //! The registry fetcher: the only place that talks HTTP.
 //!
 //! Pipeline threads never touch the network. On a cache miss the
-//! deserializer sends the schema id here (an unbounded, non-blocking send)
-//! and returns [`DeserError::NotReady`](spate_core::error::DeserError); this
+//! deserializer asks for the schema id here (a non-blocking send on a
+//! bounded queue) and returns [`DeserError::NotReady`](spate_core::error::DeserError); this
 //! task fetches, parses, and publishes the schema into the shared cache,
 //! and the driver's blocked-batch retry picks it up.
 //!
@@ -26,9 +26,10 @@
 //! # Concurrency
 //!
 //! Fetches run concurrently (up to [`MAX_CONCURRENT_FETCHES`]) so one slow
-//! or black-holed id cannot head-of-line-block every other id. Per-id
-//! dedup (a fetch already in flight is never started twice) and per-id
-//! backoff are preserved across the concurrency.
+//! or black-holed id cannot head-of-line-block every other id. The handle
+//! queues an id once from its request until the fetcher settles or declines
+//! it, so a fetch in flight is never started twice, and per-id backoff is
+//! preserved across the concurrency.
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
@@ -40,10 +41,10 @@ use spate_core::clock::SyncClock;
 use spate_core::config::UrlRule;
 use spate_core::error::chain;
 use spate_core::hash::{QualityMap, QualitySet};
-use spate_core::telemetry::RateLimit;
+use spate_core::telemetry::{Decision, RateLimit};
 use spate_core::tls::{CertificateDer, ClientRoots, SystemRoots, TrustError, client_roots};
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -63,6 +64,10 @@ const ERROR_BODY_LIMIT: usize = 256;
 /// Bound on one registry request, from connect to the end of the body. A
 /// fetch holds a slot in [`MAX_CONCURRENT_FETCHES`] until it ends.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Most schema ids waiting on the fetcher at once, queued or being fetched.
+/// Schema ids are wire data, and a registry that holds its requests open
+/// keeps every waiting id here.
+const MAX_PENDING: usize = 1024;
 
 /// Why the registry rejected this client, set at most once.
 pub(crate) type Rejection = Arc<OnceLock<String>>;
@@ -70,18 +75,70 @@ pub(crate) type Rejection = Arc<OnceLock<String>>;
 /// Cloneable handle held by deserializers: request a fetch, read the cache.
 #[derive(Clone, Debug)]
 pub(crate) struct RegistryHandle {
-    tx: mpsc::UnboundedSender<u32>,
+    tx: mpsc::Sender<u32>,
+    pending: Pending,
     pub(crate) cache: Arc<SchemaCache>,
     pub(crate) rejection: Rejection,
 }
 
 impl RegistryHandle {
-    /// Request an asynchronous fetch of `id`. Never blocks; duplicate
-    /// requests are deduplicated by the fetcher. Once the fetcher has ended,
-    /// because the I/O runtime shut down or the fetcher panicked, this is a
-    /// no-op.
+    /// A handle over `cache` with no fetcher behind it: a request goes
+    /// nowhere.
+    #[cfg(test)]
+    pub(crate) fn detached(cache: Arc<SchemaCache>) -> Self {
+        let (tx, _rx) = mpsc::channel(MAX_PENDING);
+        RegistryHandle {
+            tx,
+            pending: Pending::default(),
+            cache,
+            rejection: Rejection::default(),
+        }
+    }
+
+    /// Request an asynchronous fetch of `id`. Never blocks. A request for an
+    /// id already pending, or made while [`MAX_PENDING`] ids are pending,
+    /// does nothing: the payload's next replay asks again. Once the fetcher
+    /// has ended, because the I/O runtime shut down or the fetcher panicked,
+    /// this is a no-op.
     pub(crate) fn request(&self, id: u32) {
-        let _ = self.tx.send(id);
+        let mut pending = self.pending.0.lock().expect("pending lock");
+        if pending.len() >= MAX_PENDING || !pending.insert(id) {
+            return;
+        }
+        if self.tx.try_send(id).is_err() {
+            pending.remove(&id);
+        }
+    }
+
+    /// How many ids are pending.
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.pending.0.lock().expect("pending lock").len()
+    }
+
+    /// Whether `id` is pending.
+    #[cfg(test)]
+    fn is_pending(&self, id: u32) -> bool {
+        self.pending.0.lock().expect("pending lock").contains(&id)
+    }
+
+    /// How many requests the fetcher has not received yet.
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        self.tx.max_capacity() - self.tx.capacity()
+    }
+}
+
+/// The schema ids queued for the fetcher or being fetched. An id enters on
+/// its request and leaves when the fetcher settles or declines it, so the
+/// queue holds each id at most once.
+#[derive(Clone, Debug, Default)]
+struct Pending(Arc<Mutex<QualitySet<u32>>>);
+
+impl Pending {
+    /// Lets `id` be requested again.
+    fn forget(&self, id: u32) {
+        self.0.lock().expect("pending lock").remove(&id);
     }
 }
 
@@ -335,6 +392,16 @@ fn root_ca_error(e: TrustError) -> AvroConfigError {
     }
 }
 
+/// The limits on the fetcher's per-id log lines, on the fetcher's clock.
+/// Schema ids are wire data, and an id evicted from the cache is fetched
+/// again, so either line can recur per record.
+struct FetchLogs {
+    /// The warning for an id the registry does not know.
+    unknown_id: RateLimit,
+    /// The line for a schema fetched and compiled.
+    fetched: RateLimit,
+}
+
 /// What a single fetch resolved to, used to drive per-id backoff.
 enum FetchOutcome {
     /// A definitive verdict was written to the cache: a compiled schema, or
@@ -406,16 +473,16 @@ pub(crate) fn spawn_fetcher(
     runtime: &tokio::runtime::Handle,
 ) -> RegistryHandle {
     let cache = Arc::new(SchemaCache::new(negative_cache_ttl, clock.clone()));
-    let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
+    let (tx, mut rx) = mpsc::channel::<u32>(MAX_PENDING);
+    let pending = Pending::default();
+    let task_pending = pending.clone();
     let task_cache = Arc::clone(&cache);
     let task_rejection = Arc::clone(&rejection);
-    // Bounds the per-404 warning on the fetcher's clock. Schema ids are wire
-    // data, and an id evicted from the negative cache is fetched again, so a
-    // 404 can recur per record.
-    let unknown_id_warn = Arc::new(RateLimit::hot_path());
+    let logs = Arc::new(FetchLogs {
+        unknown_id: RateLimit::hot_path(),
+        fetched: RateLimit::new(100, Duration::from_secs(10)),
+    });
     let fetcher = async move {
-        // Ids with a fetch currently running: dedup across the concurrency.
-        let mut in_flight: QualitySet<u32> = QualitySet::default();
         // Per-id backoff after transient failures.
         let mut backoff: QualityMap<u32, IdBackoff> = QualityMap::default();
         let mut tasks: JoinSet<(u32, FetchOutcome)> = JoinSet::new();
@@ -430,7 +497,7 @@ pub(crate) fn spawn_fetcher(
                             // The known panic source, apache-avro's
                             // `Schema::parse_str`, is caught in `fetch_one`. A
                             // `JoinError` carries no schema id, so that id stays
-                            // in `in_flight` and is never refetched.
+                            // pending and is never refetched.
                             if let Ok(payload) = err.try_into_panic() {
                                 tracing::error!(
                                     panic = spate_core::task::panic_text(&*payload),
@@ -440,32 +507,29 @@ pub(crate) fn spawn_fetcher(
                             continue;
                         }
                     };
-                    in_flight.remove(&id);
+                    // The backoff is recorded before the id can be asked
+                    // for again.
                     settle(&mut backoff, id, outcome, &clock);
+                    task_pending.forget(id);
                 }
                 maybe_id = rx.recv(), if tasks.len() < MAX_CONCURRENT_FETCHES => {
                     let Some(id) = maybe_id else {
                         // All deserializers dropped: the pipeline is draining.
                         break;
                     };
-                    // Dedup: several pipeline threads may request the id before
-                    // the first fetch lands, or it may already be cached.
-                    if in_flight.contains(&id) {
+                    // Declined: the id was cached while it waited, or its
+                    // backoff after a transient failure still holds.
+                    if !matches!(task_cache.get(id), Lookup::Missing)
+                        || backoff.get(&id).is_some_and(|b| !b.admits(clock.now()))
+                    {
+                        task_pending.forget(id);
                         continue;
                     }
-                    if !matches!(task_cache.get(id), Lookup::Missing) {
-                        continue;
-                    }
-                    // Honor per-id backoff after a transient failure.
-                    if backoff.get(&id).is_some_and(|b| !b.admits(clock.now())) {
-                        continue;
-                    }
-                    in_flight.insert(id);
                     let cache = Arc::clone(&task_cache);
                     let http = http.clone();
                     let endpoint = Arc::clone(&endpoint);
                     let rejection = Arc::clone(&task_rejection);
-                    let unknown_id_warn = Arc::clone(&unknown_id_warn);
+                    let logs = Arc::clone(&logs);
                     let clock = clock.clone();
                     #[expect(
                         clippy::disallowed_methods,
@@ -478,7 +542,7 @@ pub(crate) fn spawn_fetcher(
                             &endpoint,
                             &cache,
                             &rejection,
-                            &unknown_id_warn,
+                            &logs,
                             &clock,
                         )
                         .await;
@@ -493,6 +557,7 @@ pub(crate) fn spawn_fetcher(
     spate_core::task::spawn_on("avro-registry-fetcher", fetcher, runtime).detach();
     RegistryHandle {
         tx,
+        pending,
         cache,
         rejection,
     }
@@ -508,7 +573,7 @@ async fn fetch_one(
     endpoint: &Endpoint,
     cache: &SchemaCache,
     rejection: &Rejection,
-    unknown_id_warn: &RateLimit,
+    logs: &FetchLogs,
     clock: &SyncClock,
 ) -> FetchOutcome {
     let registry = endpoint.registry();
@@ -518,11 +583,21 @@ async fn fetch_one(
                 cache.insert_failed(id, reason);
                 return FetchOutcome::Resolved;
             }
-            let compiled = CompiledSchema::compile(id, &registered.schema);
+            let compiled = CompiledSchema::compile_for_cache(id, &registered.schema);
             match compiled.unusable_reason() {
                 None => {
-                    tracing::info!(schema_id = id, "schema fetched and compiled");
-                    cache.insert_ready(compiled);
+                    match logs.fetched.check_at(clock.now()) {
+                        Decision::Allow {
+                            suppressed_before: 0,
+                        } => tracing::info!(schema_id = id, "schema fetched and compiled"),
+                        Decision::Allow { suppressed_before } => tracing::info!(
+                            schema_id = id,
+                            suppressed = suppressed_before,
+                            "schema fetched and compiled"
+                        ),
+                        Decision::Suppress => {}
+                    }
+                    cache.publish(compiled);
                 }
                 Some(reason) => {
                     cache.insert_failed(id, reason);
@@ -539,7 +614,7 @@ async fn fetch_one(
             // Negative-cache the unknown id; the deserializer applies its
             // ErrorPolicy to the poison payload.
             spate_core::rate_limited_warn!(
-                unknown_id_warn,
+                logs.unknown_id,
                 at: clock.now(),
                 schema_id = id,
                 error = %failure,
@@ -618,11 +693,11 @@ pub(crate) async fn prewarm(
                 // Per-backend compile with the parse-panic guard inside (see
                 // `fetch_one`), so one poison schema cannot kill this detached
                 // task mid-list and skip the remaining pre-warm.
-                let compiled = CompiledSchema::compile(id, &registered.schema);
+                let compiled = CompiledSchema::compile_for_cache(id, &registered.schema);
                 match compiled.unusable_reason() {
                     None => {
                         tracing::info!(subject, schema_id = id, "pre-warmed schema");
-                        cache.insert_ready(compiled);
+                        cache.publish(compiled);
                     }
                     Some(reason) => {
                         tracing::warn!(subject, %reason, "pre-warm parse failed; skipping subject");
@@ -993,6 +1068,195 @@ mod tests {
     }
 
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A handle with no fetcher, and the receiver its requests queue on.
+    fn unserved() -> (RegistryHandle, mpsc::Receiver<u32>) {
+        let (tx, rx) = mpsc::channel(MAX_PENDING);
+        let cache = SchemaCache::new(Duration::from_secs(60), SyncClock::system());
+        let handle = RegistryHandle {
+            tx,
+            pending: Pending::default(),
+            cache: Arc::new(cache),
+            rejection: Rejection::default(),
+        };
+        (handle, rx)
+    }
+
+    /// A fetcher on the current runtime against a registry at `addr`, with
+    /// its backoff and negative cache on `clock`.
+    fn fetcher_at(addr: std::net::SocketAddr, clock: &Arc<TestClock>) -> RegistryHandle {
+        spawn_fetcher(
+            http_client(None, "http").unwrap(),
+            Arc::new(endpoint(&format!("http://{addr}"))),
+            Rejection::default(),
+            Duration::from_secs(600),
+            SyncClock::new(Arc::clone(clock) as _),
+            &tokio::runtime::Handle::current(),
+        )
+    }
+
+    /// Runs the fetcher until it has received every queued request it can.
+    async fn until_queued(handle: &RegistryHandle, queued: usize) {
+        for _ in 0..1_000 {
+            if handle.queued() == queued {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "{} requests stay queued, expected {queued}",
+            handle.queued()
+        );
+    }
+
+    /// Replays of one payload queue its id once.
+    #[test]
+    fn a_repeated_request_queues_the_id_once() {
+        let (handle, _rx) = unserved();
+        for _ in 0..1_000 {
+            handle.request(7);
+        }
+        assert_eq!((handle.pending(), handle.queued()), (1, 1));
+    }
+
+    /// The set takes ids up to [`MAX_PENDING`] and drops a request past it.
+    #[test]
+    fn requests_past_the_bound_are_dropped() {
+        let (handle, _rx) = unserved();
+        let bound = u32::try_from(MAX_PENDING).unwrap();
+        for id in 1..bound {
+            handle.request(id);
+        }
+        assert_eq!(handle.pending(), MAX_PENDING - 1);
+        handle.request(bound);
+        assert_eq!(
+            (handle.pending(), handle.queued()),
+            (MAX_PENDING, MAX_PENDING)
+        );
+        handle.request(bound + 1);
+        assert_eq!(
+            (handle.pending(), handle.queued()),
+            (MAX_PENDING, MAX_PENDING)
+        );
+        assert!(!handle.is_pending(bound + 1));
+    }
+
+    /// A request made after the fetcher ended holds nothing.
+    #[test]
+    fn a_request_after_the_fetcher_ended_leaves_nothing_pending() {
+        let (handle, rx) = unserved();
+        drop(rx);
+        handle.request(7);
+        assert_eq!(handle.pending(), 0);
+    }
+
+    /// An id that gains a cache entry while it waits behind four running
+    /// fetches is declined when the fetcher reaches it, and can then be
+    /// requested again.
+    #[tokio::test(start_paused = true)]
+    async fn an_id_cached_while_queued_leaves_the_set() {
+        let clock = TestClock::frozen();
+        let handle = fetcher_at(spate_test_support::silent_server(), &clock);
+        for id in 1..=4 {
+            handle.request(id);
+        }
+        until_queued(&handle, 0).await;
+        handle.request(5);
+        until_queued(&handle, 1).await;
+        handle.cache.insert_failed(5, "unknown".into());
+
+        // The four fetches end at the request timeout, and the fetcher then
+        // receives id 5.
+        tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        until_queued(&handle, 0).await;
+        assert_eq!(handle.pending(), 0);
+    }
+
+    /// An id requested inside its backoff is declined, and can then be
+    /// requested again.
+    #[test]
+    fn an_id_declined_in_backoff_leaves_the_set() {
+        let stub = spate_test_support::RegistryStub::start();
+        stub.script("/schemas/ids/7", 500, "{}", 0);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let clock = TestClock::frozen();
+        let handle = {
+            let _on = runtime.enter();
+            fetcher_at(stub.addr(), &clock)
+        };
+        handle.request(7);
+        spate_test::wait_until(spate_test::HANG, "the failed fetch settles", || {
+            stub.path_hits("/schemas/ids/7") == 1 && handle.pending() == 0
+        });
+
+        handle.request(7);
+        spate_test::wait_until(spate_test::HANG, "the fetcher declines the id", || {
+            handle.pending() == 0
+        });
+        assert_eq!(stub.path_hits("/schemas/ids/7"), 1);
+    }
+
+    /// A request dropped at the bound is taken once a fetch has settled.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_request_is_taken_once_the_set_has_room() {
+        let clock = TestClock::frozen();
+        let handle = fetcher_at(spate_test_support::silent_server(), &clock);
+        let bound = u32::try_from(MAX_PENDING).unwrap();
+        for id in 1..=bound {
+            handle.request(id);
+        }
+        handle.request(bound + 1);
+        assert!(!handle.is_pending(bound + 1));
+        // Four ids are being fetched, so the queue has room and the set
+        // has none.
+        until_queued(&handle, MAX_PENDING - MAX_CONCURRENT_FETCHES).await;
+        handle.request(bound + 1);
+        assert!(!handle.is_pending(bound + 1));
+
+        tokio::time::sleep(REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        assert_eq!(handle.pending(), MAX_PENDING - MAX_CONCURRENT_FETCHES);
+        handle.request(bound + 1);
+        assert!(handle.is_pending(bound + 1));
+    }
+
+    /// Eight ids replayed every 2 ms against a registry that never answers
+    /// stay eight pending ids across five request timeouts, while their
+    /// fetches keep being retried.
+    #[tokio::test(start_paused = true)]
+    async fn ids_keep_cycling_through_timeouts_within_the_bound() {
+        use std::sync::atomic::AtomicUsize;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        let registry = spate_test_support::serve_each(move |mut stream| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
+        });
+        let clock = TestClock::frozen();
+        let handle = fetcher_at(registry, &clock);
+        let replay = Duration::from_millis(2);
+        let replays = (REQUEST_TIMEOUT * 5).as_millis() / replay.as_millis();
+        for _ in 0..replays {
+            for id in 1..=8 {
+                handle.request(id);
+            }
+            assert!(
+                handle.pending() <= 8 && handle.queued() <= 8,
+                "{} pending, {} queued",
+                handle.pending(),
+                handle.queued()
+            );
+            clock.advance(replay);
+            tokio::time::sleep(replay).await;
+        }
+        assert!(
+            accepted.load(Ordering::SeqCst) > 8,
+            "the fetches were retried: {accepted:?}"
+        );
+    }
 
     /// A clock that records its first read and then panics.
     struct FlaggingPanicClock(Arc<AtomicBool>);

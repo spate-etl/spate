@@ -350,12 +350,18 @@ pub const RESERVED_ROOTS: &[&str] = &[
 /// families in separate buckets.
 pub const CUSTOM_NAMESPACE: &str = "custom";
 
-/// The role segments the runtime injects between a component's namespace and
-/// its metric names (`spate_<ns>_source_*`, `_sink_*`, `_feed_*`) to separate a
-/// connector's families by role. Reserved as the leading segment of a `Meter`
-/// local name, so a hand-written name with one cannot alias a role-scoped
-/// family. Must stay in sync with `MetricRole::segment`.
-pub const ROLE_SEGMENTS: &[&str] = &["source", "sink", "feed"];
+/// The `component_type` a deserializer reports when it declares none, and the
+/// `component_type` label on its stage's `spate_deser_*` series. A
+/// deserializer with this type receives no `Meter`, as a source left at its
+/// reserved `"source"` does.
+pub const DESERIALIZER_DEFAULT: &str = "deserializer";
+
+/// The role segments the framework injects between a component's namespace and
+/// its metric names (`spate_<ns>_source_*`, `_sink_*`, `_feed_*`, `_deser_*`)
+/// to separate a connector's families by role. Reserved as the leading segment
+/// of a `Meter` local name, so a hand-written name with one cannot alias a
+/// role-scoped family.
+pub const ROLE_SEGMENTS: &[&str] = super::MetricRole::SEGMENTS;
 
 #[cfg(test)]
 mod tests {

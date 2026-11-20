@@ -2378,6 +2378,89 @@ fn split_one_branch_failure_fails_the_whole_batch() {
 
 // ---- metrics ------------------------------------------------------------------
 
+/// Declares `ty` as its component type, records whether `attach_metrics`
+/// carried a `Meter`, and counts one hit on the `Meter` it receives.
+struct TypedDeser {
+    ty: &'static str,
+    received: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl Deserializer<Owned<Vec<u8>>> for TypedDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        _raw: &RawPayload<'buf>,
+        _ack: &AckRef,
+        _out: &mut dyn EmitRecord<'buf, Vec<u8>>,
+    ) -> Result<(), DeserError> {
+        Ok(())
+    }
+
+    fn component_type(&self) -> &str {
+        self.ty
+    }
+
+    fn attach_metrics(&mut self, cx: crate::deser::DeserMetricsCtx) {
+        *self.received.lock().expect("unpoisoned") = Some(cx.meter.is_some());
+        if let Some(meter) = cx.meter {
+            meter.counter("hits_total", &[]).increment(1);
+        }
+    }
+}
+
+/// Builds a chain with `with_metrics(pipeline, "main")` over a `TypedDeser`
+/// of type `ty`, and returns what it received and the rendered exposition.
+fn chain_with_typed_deser(pipeline: &'static str, ty: &'static str) -> (Option<bool>, String) {
+    let received = Arc::new(std::sync::Mutex::new(None));
+    let deser = TypedDeser {
+        ty,
+        received: Arc::clone(&received),
+    };
+    let rendered = crate::metrics::render_local(|| {
+        let _chain = chain_owned::<Vec<u8>, _>(deser).with_metrics(pipeline, "main");
+    });
+    let got = *received.lock().expect("unpoisoned");
+    (got, rendered)
+}
+
+#[test]
+fn a_deserializer_receives_a_meter_scoped_and_labeled_like_its_stage() {
+    let (received, rendered) = chain_with_typed_deser("deser-meter", "probe");
+    assert_eq!(received, Some(true), "{rendered}");
+    let labels = [
+        ("pipeline", "deser-meter"),
+        ("component", "main.deserializer"),
+        ("component_type", "probe"),
+    ];
+    assert_eq!(
+        spate_test::metric_value(&rendered, "spate_probe_deser_hits_total", &labels),
+        Some(1.0),
+        "{rendered}"
+    );
+    assert!(
+        !spate_test::metric_series(&rendered, names::DESER_RECORDS_TOTAL, &labels).is_empty(),
+        "the stage carries the deserializer's labels: {rendered}"
+    );
+}
+
+#[test]
+fn an_undeclared_deserializer_gets_no_meter_and_keeps_the_default_label() {
+    let (received, rendered) = chain_with_typed_deser("deser-default", names::DESERIALIZER_DEFAULT);
+    assert_eq!(received, Some(false), "{rendered}");
+    assert!(
+        !spate_test::metric_series(
+            &rendered,
+            names::DESER_RECORDS_TOTAL,
+            &[
+                ("pipeline", "deser-default"),
+                ("component", "main.deserializer"),
+                ("component_type", "deserializer"),
+            ],
+        )
+        .is_empty(),
+        "{rendered}"
+    );
+}
+
 #[test]
 fn stages_flush_batch_metrics() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

@@ -121,7 +121,9 @@ metrics handle. See [Custom sinks](custom-sink.mdx).
 Every framework series carries three standard labels (`pipeline`, `component`,
 `component_type`), plus stage-specific ones (`shard`, `replica`, `partition`).
 `component` and `pipeline` come from `with_metrics(pipeline, component)` at
-assembly. The ones you set as a connector author are on the sink builder:
+assembly. A source or a deserializer sets `component_type` by overriding its
+trait's `component_type` method. The ones you set as a sink author are on the
+sink builder:
 
 - `SinkParts::with_component_type("...")` sets `component_type`
   (default `"custom"`) on every sink series. Every shipped sink sets it to the
@@ -183,8 +185,9 @@ component's `Meter` it derives the end from the source-vs-sink position and
 scopes the family `spate_<namespace>_source_*` / `spate_<namespace>_sink_*`, so
 its source `bytes_total` and its sink `bytes_total` land under distinct names.
 Your connector code is identical at either end. You never name the role, and a
-`Meter` local name may not itself begin with a role segment, such as `source_`
-or `feed_`, which the runtime reserves for scoping a component by role.
+`Meter` local name may not itself begin with a role segment, such as `source_`,
+`feed_` or `deser_`, which the framework reserves for scoping a component by
+role.
 Instance identity, such as two sinks of the same type, stays in the `component`
 label, where same-meaning series belong.
 
@@ -289,12 +292,13 @@ it. Distinct labels per test avoid the collision entirely, and
 `spate_test::unique_name("orders_in")` returns a name no other call in the
 process returns.
 
-## From a built-in source, sink or feed backend
+## From a built-in source, sink, feed backend or deserializer
 
 A `Meter` you construct with `Meter::new(...)`, or take from `ChainCtx`, covers
-pipeline authors. A **built-in `Source`, sink `ShardWriter` or `Feed` backend**
-doesn't construct one: the runtime hands it a pre-scoped `Meter`, so a
-connector never wires the pipeline name, the labels, or the prefix.
+pipeline authors. A **built-in `Source`, sink `ShardWriter`, `Feed` backend or
+`Deserializer`** doesn't construct one: the framework hands it a pre-scoped
+`Meter`, so a connector never wires the pipeline name, the labels, or the
+prefix.
 
 - **Declare a `component_type`.** A source overrides
   [`Source::component_type`](../07-reference/README.mdx) (default `"source"`); a
@@ -320,6 +324,14 @@ connector never wires the pipeline name, the labels, or the prefix.
   for the same feed. The backend's own tasks and calls go without the `Meter`
   until it arrives, and a feed handed to a source directly never receives one,
   so treat the handles as optional.
+- **A deserializer** overrides
+  [`Deserializer::component_type`](../07-reference/README.mdx) (default
+  `"deserializer"`) and `Deserializer::attach_metrics`, which a chain's
+  `with_metrics` calls with a `DeserMetricsCtx` holding the `Meter`. Its
+  families land under `spate_<component_type>_deser_*` with
+  `component="<component>.deserializer"`, the labels of the chain's own
+  `spate_deser_*` stage, so the two join. A deserializer that wraps another
+  forwards both methods to the inner one.
 
 The source's two methods below are a shape rather than a program: the
 `impl Source for` header is left out and the rest of `open` is elided at the
@@ -344,8 +356,9 @@ families and the framework's `spate_checkpoint_*` detail; it does **not** gate
 `spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
-root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`
-(a sink's default) opts out silently, and a value that is a legal label but an
+root (an undeclared source keeps `"source"`), the author-reserved `"custom"`
+(a sink's default) or an undeclared deserializer's `"deserializer"` opts out
+silently, and a value that is a legal label but an
 illegal metric-name segment (a hyphen, say) is logged at `warn` and
 also yields `None`. A component gets a scope only once it declares a
 distinct, well-formed `component_type`. A feed backend's `Meter` follows the

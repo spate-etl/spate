@@ -9,6 +9,8 @@
 
 use crate::checkpoint::AckRef;
 use crate::error::DeserError;
+use crate::metrics::Meter;
+use crate::metrics::names::DESERIALIZER_DEFAULT;
 use crate::record::{Flow, RawPayload, Record};
 
 /// Maps a payload-buffer lifetime to the deserialized record type.
@@ -53,6 +55,64 @@ pub trait Deserializer<F: RecFamily>: Send {
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>,
     ) -> Result<(), DeserError>;
+
+    /// The implementation label (`"json"`, `"avro"`) on this deserializer's
+    /// stage series and on the `Meter` it receives, which is scoped
+    /// `spate_<component_type>_deser_*`. The default,
+    /// [`DESERIALIZER_DEFAULT`](crate::metrics::names::DESERIALIZER_DEFAULT),
+    /// receives no `Meter`.
+    ///
+    /// A deserializer that wraps another returns the inner one's type.
+    fn component_type(&self) -> &str {
+        DESERIALIZER_DEFAULT
+    }
+
+    /// Receive the [`DeserMetricsCtx`] for this deserializer's own metric
+    /// families. A chain's
+    /// [`with_metrics`](crate::ops::ChainBuilder::with_metrics) calls it once
+    /// per chain; resolve handles here, never on the per-record path. The
+    /// default ignores it.
+    ///
+    /// A deserializer that wraps another passes it on.
+    fn attach_metrics(&mut self, _cx: DeserMetricsCtx) {}
+}
+
+/// What a chain hands its deserializer for the deserializer's own metric
+/// families, through [`Deserializer::attach_metrics`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DeserMetricsCtx {
+    /// Scoped `spate_<component_type>_deser_*` and pre-labeled with the
+    /// pipeline, the chain's `<component>.deserializer` and the deserializer's
+    /// [`component_type`](Deserializer::component_type). `None` when that type
+    /// cannot scope a family: the default `"deserializer"` or a reserved root
+    /// opts out silently, and a malformed value is logged and also yields
+    /// `None`.
+    pub meter: Option<Meter>,
+}
+
+impl DeserMetricsCtx {
+    /// Context carrying `meter`. Deserializers outside this crate construct it
+    /// here, as the struct is `#[non_exhaustive]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::deser::DeserMetricsCtx;
+    /// use spate_core::metrics::{Meter, render_local};
+    ///
+    /// let meter = Meter::with_namespace("probe", "orders", "main.deserializer", "probe");
+    /// let cx = DeserMetricsCtx::new(Some(meter));
+    /// let meter = cx.meter.expect("a scoped Meter");
+    /// let text = render_local(|| meter.counter("drops_total", &[]).increment(1));
+    /// assert!(text.lines().any(|l| {
+    ///     l == r#"spate_probe_drops_total{pipeline="orders",component="main.deserializer",component_type="probe"} 1"#
+    /// }));
+    /// ```
+    #[must_use]
+    pub fn new(meter: Option<Meter>) -> Self {
+        DeserMetricsCtx { meter }
+    }
 }
 
 /// Passthrough deserializer: yields the raw bytes as owned `Vec<u8>`

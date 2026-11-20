@@ -15,9 +15,9 @@ use super::split::{
 };
 use super::{Collector, Emitter, RunnableChain};
 use crate::backpressure::InflightBudget;
-use crate::deser::{Deserializer, Owned, RecFamily};
+use crate::deser::{DeserMetricsCtx, Deserializer, Owned, RecFamily};
 use crate::error::ErrorPolicy;
-use crate::metrics::{ComponentLabels, DeserMetrics, OperatorMetrics};
+use crate::metrics::{ComponentLabels, DeserMetrics, Meter, MetricRole, OperatorMetrics};
 use crate::sink::{RecordRouter, RowEncoder, ShardQueues};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -295,26 +295,35 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
     /// Enable framework metrics for every stage of this chain. Must be
     /// called before any stage is added so all stages get handles.
     ///
+    /// The deserializer stage is labeled `<component>.deserializer` with the
+    /// deserializer's [`component_type`](Deserializer::component_type), and the
+    /// deserializer receives a `Meter` under the same labels through
+    /// [`attach_metrics`](Deserializer::attach_metrics).
+    ///
     /// # Panics
     ///
     /// Panics if stages were already added.
     #[must_use]
-    pub fn with_metrics(
-        mut self,
-        pipeline: impl Into<String>,
-        component: impl Into<String>,
-    ) -> Self {
+    pub fn with_metrics(mut self, pipeline: impl Into<String>, component: impl Into<String>) -> Self
+    where
+        D: Deserializer<DF>,
+    {
         assert_eq!(
             self.stage_idx, 0,
             "with_metrics must be called before stages are added"
         );
         let pipeline = pipeline.into();
         let component = component.into();
-        let deser_labels = ComponentLabels::new(
+        let deser_component = format!("{component}.deserializer");
+        let component_type = self.deser.component_type().to_owned();
+        let meter = Meter::for_component(
+            &component_type,
+            MetricRole::Deser,
             pipeline.clone(),
-            format!("{component}.deserializer"),
-            "deserializer",
+            deser_component.clone(),
         );
+        self.deser.attach_metrics(DeserMetricsCtx::new(meter));
+        let deser_labels = ComponentLabels::new(pipeline.clone(), deser_component, component_type);
         self.metrics = Some(MetricsSpec {
             pipeline,
             component,

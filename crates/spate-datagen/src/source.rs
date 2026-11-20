@@ -560,9 +560,12 @@ mod tests {
         // out, so everything counted here belongs to the first.
         let mut released = 0;
         while let Some(mut batch) = lanes[0].poll(8, POLL).unwrap() {
+            let before = released;
             while batch.next_payload().is_some() {
                 released += 1;
             }
+            // An empty batch would keep this loop polling forever.
+            assert!(released > before, "an empty batch after {released} events");
         }
         assert_eq!(released, 50, "the whole quota, not one max_records batch");
     }

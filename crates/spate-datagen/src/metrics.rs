@@ -216,13 +216,19 @@ mod tests {
             let want = format!(
                 r#"spate_datagen_events_generated_total{{pipeline="orders",component="events",component_type="datagen",event_type="{event}"}} {count}"#
             );
-            assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
+            assert!(
+                rendered.lines().any(|line| line == want),
+                "missing {want} in:\n{rendered}"
+            );
         }
         for (name, count) in [("ticks_total", 4), ("tick_overruns_total", 1)] {
             let want = format!(
                 r#"spate_datagen_{name}{{pipeline="orders",component="events",component_type="datagen"}} {count}"#
             );
-            assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
+            assert!(
+                rendered.lines().any(|line| line == want),
+                "missing {want} in:\n{rendered}"
+            );
         }
     }
 
@@ -235,7 +241,10 @@ mod tests {
             let want = format!(
                 r#"spate_datagen_{name}{{pipeline="orders",component="gauges",component_type="datagen"}} {value}"#
             );
-            assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
+            assert!(
+                rendered.lines().any(|line| line == want),
+                "missing {want} in:\n{rendered}"
+            );
         }
         // The one series this source does not publish at all.
         assert!(!rendered.contains("lag"), "{rendered}");

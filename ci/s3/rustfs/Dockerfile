@@ -5,4 +5,4 @@
 # No Dependabot `ignore` applies, so this lane follows every release.
 # ../README.md has the account.
 
-FROM rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
+FROM rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74

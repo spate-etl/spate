@@ -21,8 +21,8 @@ That example is
 one payload of four lines, one of them malformed, over the in-memory
 connectors, so it needs nothing running:
 `cargo run -p spate --features json --example json_skip_bad_records`.
-`from_component` yields that same builder behind a `Result`, and `with_metrics`
-scopes the families under [Metrics](#metrics).
+`from_component` yields that same builder behind a `Result`, and the chain's
+`with_metrics` scopes the families under [Metrics](#metrics).
 
 ## Configuration
 
@@ -41,7 +41,7 @@ deserializer:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `framing` | string | `single` | How a payload is split into documents: `single`, `ndjson`, or `array`. |
-| `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop + count) or `fail` (surface a decode error). |
+| `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop, and count on a chain built with `with_metrics`) or `fail` (surface a decode error). |
 | `reject_duplicate_keys` | bool | `false` | Reject (rather than silently keep the last value of) any JSON object with a duplicate key, at any depth. Parses each document a second time for the check. |
 
 ## The three framings
@@ -76,7 +76,8 @@ A document that does not parse (or does not match the target type) is a
 record-level error, handled by `on_error`:
 
 - **`skip`** (default) — drop the record, count it in
-  `spate_json_deser_records_dropped_total{reason}`, and continue. Under `ndjson`
+  `spate_json_deser_records_dropped_total{reason}` on a chain built with
+  `with_metrics` (see [Metrics](#metrics)), and continue. Under `ndjson`
   the good lines around a bad one still flow.
 - **`fail`** — surface a decode error on the first bad record.
 
@@ -196,9 +197,9 @@ against real data before switching.
 
 ## Metrics
 
-Registered through a `Meter` under the `json_deser` namespace, and minted only
-when the builder is given a metrics scope with
-`.with_metrics(pipeline, component)`.
+Registered through the `Meter` the chain hands the deserializer (component type
+`json`, role `deser`), so every family is prefixed `spate_json_deser_`. The
+families exist only on a chain built with `.with_metrics(pipeline, component)`.
 
 The family exists because the framework's payload-granular `spate_deser_*` stage
 metrics cannot see it: under `ndjson` (or `array`) with `on_error: skip`, an
@@ -206,10 +207,10 @@ individual bad record is dropped while the good records around it are emitted,
 so the `deserialize` call returns `Ok` and no
 `spate_deser_records_total{outcome="error"}` is counted.
 
-The family carries the standard labels (`pipeline`, `component`,
-`component_type="deserializer"`), the first two from that call and the third
-fixed by the crate, which is what makes it join against the generic
-families. Extras are noted per family.
+The family carries the standard labels with the values of the chain's
+`spate_deser_*` series: `pipeline` from that call,
+`component="<component>.deserializer"` and `component_type="json"`, so the two
+join. Extras are noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|

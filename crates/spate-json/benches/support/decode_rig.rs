@@ -28,7 +28,8 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use spate_core::checkpoint::AckRef;
-use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
+use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, Owned, RecFamily};
+use spate_core::metrics::Meter;
 use spate_core::record::{Flow, RawPayload, Record};
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
 use std::hint::black_box;
@@ -255,7 +256,8 @@ pub(crate) fn install_recorder() {
 /// a pipeline is in, and is why a wall case and its counted twin can differ
 /// here without either being wrong.
 ///
-/// `labels` names the pipeline and component the drop counters carry. The
+/// `labels` names the pipeline and component the drop counters carry, on a
+/// `Meter` built here in place of the one a chain hands its deserializer. The
 /// wall harness runs one process per case, so nothing there could collide;
 /// they are a parameter because `tests/bench_fixtures.rs` builds several rigs
 /// in one process, and distinct label sets are what keep one rig's counters
@@ -272,8 +274,11 @@ where
     D: Deserializer<F>,
 {
     install_recorder();
-    let builder = JsonDeserializerBuilder::from_settings(settings).with_metrics(labels.0, labels.1);
-    let deser = build(&builder);
+    let builder = JsonDeserializerBuilder::from_settings(settings);
+    let mut deser = build(&builder);
+    let component_type = deser.component_type().to_owned();
+    let meter = Meter::with_namespace("json_bench", labels.0, labels.1, component_type);
+    deser.attach_metrics(DeserMetricsCtx::new(Some(meter)));
     // The receiver is dropped here, so when the last `AckRef` goes with the rig
     // the batch resolves into a disconnected channel and the send is discarded.
     // That happens in teardown, outside the collected region.

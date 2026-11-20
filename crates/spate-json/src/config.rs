@@ -13,12 +13,10 @@
 //! ```
 
 use crate::deser::{DecoderCore, JsonSerdeDeserializer, JsonValueDeserializer};
-use crate::metrics::JsonDeserMetrics;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use spate_core::config::ComponentConfig;
 use spate_core::framing::FramingContract;
-use spate_core::metrics::{Meter, SharedString};
 
 /// How one payload is split into JSON documents.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -41,8 +39,8 @@ pub enum JsonFraming {
 #[serde(rename_all = "snake_case")]
 pub enum OnError {
     /// Drop the record, count it in
-    /// `spate_json_deser_records_dropped_total{reason}`, and continue. The
-    /// default for deserializers.
+    /// `spate_json_deser_records_dropped_total{reason}` on a chain built with
+    /// `with_metrics`, and continue. The default for deserializers.
     #[default]
     Skip,
     /// Surface a decode error on the first bad record. What that error then
@@ -88,12 +86,14 @@ pub enum JsonConfigError {
     },
 }
 
+/// The deserializer's component type, and the tag its section sits under.
+pub(crate) const TAG: &str = "json";
+
 /// Builder produced from the opaque config section; hands out either the
 /// typed or the dynamically-typed deserializer.
 #[derive(Clone, Debug)]
 pub struct JsonDeserializerBuilder {
     settings: JsonSettings,
-    metrics: Option<JsonDeserMetrics>,
 }
 
 impl JsonDeserializerBuilder {
@@ -110,10 +110,7 @@ impl JsonDeserializerBuilder {
     /// Build from already-parsed settings.
     #[must_use]
     pub fn from_settings(settings: JsonSettings) -> Self {
-        JsonDeserializerBuilder {
-            settings,
-            metrics: None,
-        }
+        JsonDeserializerBuilder { settings }
     }
 
     /// Derive and validate framing against the source's
@@ -145,21 +142,6 @@ impl JsonDeserializerBuilder {
         }
     }
 
-    /// Scope the connector-owned `spate_json_deser_*` metrics to this component.
-    /// Reuse the `pipeline` / `component` values the framework was given so the
-    /// families join against the generic `spate_deser_*` stage metrics. Without
-    /// this, per-record skips are logged (rate-limited) but not counted.
-    #[must_use]
-    pub fn with_metrics(
-        mut self,
-        pipeline: impl Into<SharedString>,
-        component: impl Into<SharedString>,
-    ) -> Self {
-        let meter = Meter::with_namespace("json_deser", pipeline, component, "deserializer");
-        self.metrics = Some(JsonDeserMetrics::new(&meter));
-        self
-    }
-
     /// Decode each document into your own `T: serde::de::DeserializeOwned`.
     #[must_use]
     pub fn build_serde<T>(&self) -> JsonSerdeDeserializer<T>
@@ -180,7 +162,7 @@ impl JsonDeserializerBuilder {
             framing: self.settings.framing,
             on_error: self.settings.on_error,
             reject_duplicate_keys: self.settings.reject_duplicate_keys,
-            metrics: self.metrics.clone(),
+            metrics: None,
         }
     }
 }

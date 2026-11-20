@@ -109,11 +109,10 @@ Drops under `on_error: skip` log a rate-limited `WARN`. The line carries the
 record's partition and offset, and an error text that holds the kind of failure,
 with no content from the record. The text gives a position where the parser
 reports one, counted within the refused line under `ndjson`. The crate also counts
-each drop, when the builder is given `JsonDeserializerBuilder::with_metrics`,
-and the chain's `with_metrics` does not affect that count. A dropped array
-counts once. The framework's deserializer metrics count each payload that the
-chain's `Skip` policy drops, on a chain built with its own `with_metrics`, and
-never see these drops, because the decode call succeeds.
+each drop, on a chain built with `with_metrics`. A dropped array counts once.
+The framework's deserializer metrics on the same chain count each payload that
+the chain's `Skip` policy drops, and never see these drops, because the decode
+call succeeds.
 
 The
 [Error handling section of the JSON format page](https://spate.kainth.dev/docs/user-guide/connectors/formats/json#error-handling)

@@ -113,7 +113,6 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             let deser = JsonDeserializerBuilder::from_component(&deser_section)
                 .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
-                .with_metrics(ctx.pipeline.clone(), "main")
                 .build_serde::<PaymentCaptured>();
             // ANCHOR_END: deserializer
             chain_owned::<PaymentCaptured, _>(deser)

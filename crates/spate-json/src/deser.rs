@@ -12,19 +12,20 @@
 //! downstream is full.
 
 use crate::backend;
-use crate::config::{JsonFraming, OnError};
+use crate::config::{JsonFraming, OnError, TAG};
 use crate::metrics::JsonDeserMetrics;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use spate_core::checkpoint::AckRef;
-use spate_core::deser::{Deserializer, EmitRecord, Owned};
+use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
 use spate_core::record::{RawPayload, Record, RecordMeta};
 use spate_core::telemetry::RateLimit;
 use std::marker::PhantomData;
 
 /// Rate-limits the per-record skip warning so a poison storm can't flood the
-/// logs; the exact drop count is always in `spate_json_deser_records_dropped_total`.
+/// logs. A chain built with `with_metrics` counts every drop in
+/// `spate_json_deser_records_dropped_total`.
 static SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// Why a record was dropped, for the metric label and log field.
@@ -66,6 +67,12 @@ pub(crate) struct DecoderCore {
 }
 
 impl DecoderCore {
+    /// Resolve the drop counters from the chain's `Meter`, or count nothing
+    /// when it hands none.
+    fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
+        self.metrics = cx.meter.as_ref().map(JsonDeserMetrics::new);
+    }
+
     /// Decode `raw` into 0..N records of type `P` and emit them.
     fn run<'buf, P>(
         &self,
@@ -307,6 +314,14 @@ where
     ) -> Result<(), DeserError> {
         self.core.run::<T>(raw, ack, out)
     }
+
+    fn component_type(&self) -> &str {
+        TAG
+    }
+
+    fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
+        self.core.attach_metrics(cx);
+    }
 }
 
 /// Dynamically-typed deserializer: emits [`serde_json::Value`] records, for
@@ -331,6 +346,14 @@ impl Deserializer<Owned<Value>> for JsonValueDeserializer {
     ) -> Result<(), DeserError> {
         self.core.run::<Value>(raw, ack, out)
     }
+
+    fn component_type(&self) -> &str {
+        TAG
+    }
+
+    fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
+        self.core.attach_metrics(cx);
+    }
 }
 
 #[cfg(test)]
@@ -340,8 +363,19 @@ mod tests {
     use crate::framing::tests::arb_stream;
     use proptest::prelude::*;
     use serde::Deserialize;
+    use spate_core::metrics::Meter;
     use spate_core::record::{PartitionId, stable_key_hash};
     use spate_test::{EmitCollector, render_metrics};
+
+    /// The namespace of the `Meter` these tests hand a deserializer in place of
+    /// a chain's.
+    const TEST_NS: &str = "json_probe";
+
+    /// A `Meter` like the one a chain hands its deserializer, under [`TEST_NS`].
+    fn test_metrics(pipeline: &str) -> DeserMetricsCtx {
+        let meter = Meter::with_namespace(TEST_NS, pipeline.to_owned(), "main.deserializer", TAG);
+        DeserMetricsCtx::new(Some(meter))
+    }
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Ev {
@@ -479,9 +513,8 @@ mod tests {
         let rendered = render_metrics(|| {
             for framing in [JsonFraming::Single, JsonFraming::Ndjson, JsonFraming::Array] {
                 for on_error in [OnError::Skip, OnError::Fail] {
-                    let mut d = builder(framing, on_error, false)
-                        .with_metrics(PIPELINE, "main")
-                        .build_value();
+                    let mut d = builder(framing, on_error, false).build_value();
+                    d.attach_metrics(test_metrics(PIPELINE));
                     for bytes in [&b""[..], b"  \n  "] {
                         let payload = RawPayload {
                             key: Some(b"user-7"),
@@ -495,9 +528,10 @@ mod tests {
                 }
             }
         });
+        let family = format!("spate_{TEST_NS}_records_dropped_total");
         let dropped: Vec<&str> = rendered
             .lines()
-            .filter(|l| l.contains("spate_json_deser_records_dropped_total"))
+            .filter(|l| l.contains(&family))
             .filter(|l| l.contains(PIPELINE))
             .filter(|l| !l.ends_with(" 0"))
             .collect();
@@ -619,11 +653,11 @@ mod tests {
 
     #[test]
     fn skipped_records_are_counted_in_metrics() {
-        const STD: &str = r#"pipeline="orders",component="main",component_type="deserializer""#;
+        const STD: &str =
+            r#"pipeline="orders",component="main.deserializer",component_type="json""#;
         let rendered = render_metrics(|| {
-            let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false)
-                .with_metrics("orders", "main")
-                .build_serde::<Ev>();
+            let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
+            d.attach_metrics(test_metrics("orders"));
             let mut out = EmitCollector::new();
             let payload =
                 b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\nALSO BAD\n{\"id\":4,\"name\":\"d\"}";
@@ -631,7 +665,7 @@ mod tests {
             assert_eq!(out.records.len(), 2);
         });
         let needle =
-            format!(r#"spate_json_deser_records_dropped_total{{{STD},reason="malformed"}} 2"#);
+            format!(r#"spate_{TEST_NS}_records_dropped_total{{{STD},reason="malformed"}} 2"#);
         assert!(
             rendered.contains(&needle),
             "missing `{needle}`:\n{rendered}"

@@ -597,7 +597,7 @@ mod tests {
         });
         for want in [
             r#"spate_datagen_ticks_total{pipeline="orders",component="overrun",component_type="datagen"} 3"#,
-            r#"spate_datagen_tick_overrun_total{pipeline="orders",component="overrun",component_type="datagen"} 1"#,
+            r#"spate_datagen_tick_overruns_total{pipeline="orders",component="overrun",component_type="datagen"} 1"#,
         ] {
             assert!(
                 rendered.lines().any(|line| line == want),
@@ -629,11 +629,11 @@ mod tests {
         );
     }
 
-    /// `events_remaining` answers for a bounded run from the moment the lanes
+    /// `remaining_events` answers for a bounded run from the moment the lanes
     /// exist, before any of them has generated anything, when a scrape would
     /// otherwise read the finished value.
     #[test]
-    fn events_remaining_reads_the_budget_before_the_first_fill() {
+    fn remaining_events_reads_the_budget_before_the_first_fill() {
         let (source, _cp, _lanes) = start(config(4, Some(1_000)));
         let state = source.state.as_ref().expect("opened");
         let remaining: u64 = state

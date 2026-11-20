@@ -81,9 +81,10 @@
 //!
 //! # Metrics
 //!
-//! Families under `spate_datagen_source_*`: `events_generated_total{event}`,
-//! `ticks_total` and `tick_overrun_total` are counted by the lanes;
-//! `events_remaining`, `open_orders` and (with `metrics.per_partition_detail`)
+//! Families under `spate_datagen_source_*`:
+//! `events_generated_total{event_type}`, `ticks_total` and
+//! `tick_overruns_total` are counted by the lanes;
+//! `remaining_events`, `open_orders` and (with `metrics.per_partition_detail`)
 //! `committed_offset{partition}` are published by the control plane.
 //!
 //! There is deliberately no `spate_source_lag_records`. For an unbounded

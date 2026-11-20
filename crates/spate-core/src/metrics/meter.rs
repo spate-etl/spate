@@ -26,8 +26,9 @@
 //! - [`Meter::with_namespace`] takes a segment a connector owns (`"kafka"` →
 //!   `spate_kafka_*`). The runtime keeps a connector's roles apart when it
 //!   injects a component's `Meter`, under `spate_kafka_source_*`,
-//!   `spate_kafka_sink_*` and `spate_kafka_feed_*`. The role is derived from
-//!   the wiring position, not set by hand.
+//!   `spate_kafka_sink_*` and `spate_kafka_feed_*`, and a chain hands its
+//!   deserializer one under `spate_<component_type>_deser_*`. The role is
+//!   derived from the wiring position, not set by hand.
 //!
 //! The namespace is validated once, at construction. It must be a lowercase
 //! `[a-z][a-z0-9_]*` segment and must not be one of the framework's reserved
@@ -40,7 +41,8 @@
 //!   namespace) and close the resolved handle over an operator closure
 //!   (`.inspect` / `.map`).
 //! - **A source, sink or feed backend** receives one from the runtime, scoped
-//!   by its role.
+//!   by its role. **A deserializer** receives one from the chain's
+//!   [`with_metrics`](crate::ops::ChainBuilder::with_metrics).
 //! - **Standalone** (a tool, a test, an example) constructs one with
 //!   [`Meter::new`] / [`Meter::with_namespace`].
 //!
@@ -57,27 +59,40 @@
 use super::labels::{ComponentLabels, NamespaceRejection, classify_namespace, validate_namespace};
 use metrics::{Counter, Gauge, Histogram, SharedString};
 
-/// The part a component plays in the pipeline, appended to its namespace so a
-/// connector that is a source, a sink and a feed backend keeps its families
-/// apart (`spate_kafka_source_*`, `spate_kafka_sink_*`, `spate_kafka_feed_*`).
-/// The runtime derives it from the wiring position when it builds a
-/// component's [`Meter`](Meter::for_component), so connector code never names
-/// a role.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MetricRole {
-    Source,
-    Sink,
-    Feed,
+// Declares each role with its segment once, and builds `MetricRole::SEGMENTS`
+// from the same entries.
+macro_rules! metric_roles {
+    ($(#[$enum_doc:meta])* $( $role:ident => $segment:literal, )+) => {
+        $(#[$enum_doc])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum MetricRole {
+            $( $role, )+
+        }
+
+        impl MetricRole {
+            /// Every role's segment, in declaration order.
+            pub(crate) const SEGMENTS: &'static [&'static str] = &[$($segment),+];
+
+            fn segment(self) -> &'static str {
+                match self {
+                    $( MetricRole::$role => $segment, )+
+                }
+            }
+        }
+    };
 }
 
-impl MetricRole {
-    fn segment(self) -> &'static str {
-        match self {
-            MetricRole::Source => "source",
-            MetricRole::Sink => "sink",
-            MetricRole::Feed => "feed",
-        }
-    }
+metric_roles! {
+    /// The part a component plays in the pipeline, appended to its namespace so
+    /// a connector that plays several roles keeps its families apart
+    /// (`spate_kafka_source_*`, `spate_kafka_sink_*`, `spate_kafka_feed_*`).
+    /// The framework derives it from the wiring position when it builds a
+    /// component's [`Meter`](Meter::for_component), so connector code never
+    /// names a role.
+    Source => "source",
+    Sink => "sink",
+    Feed => "feed",
+    Deser => "deser",
 }
 
 /// An instrumentation scope: one component's three standard labels plus an
@@ -145,9 +160,10 @@ impl Meter {
         }
     }
 
-    /// The scope the runtime hands a built-in component (a `Source`, a sink
-    /// `ShardWriter` or a `Feed` backend). The namespace is the component's
-    /// `component_type`, which for a feed backend is its `Feed::backend` key, and
+    /// The scope the framework hands a component (a `Source`, a sink
+    /// `ShardWriter`, a `Feed` backend or a chain's `Deserializer`). The
+    /// namespace is the component's `component_type`, which for a feed backend
+    /// is its `Feed::backend` key, and
     /// `role` (derived from the wiring position) is appended, giving
     /// `spate_<component_type>_<role>_*`. The `component_type` is also the
     /// standard `component_type` label, so a family joins the component's stage
@@ -162,6 +178,11 @@ impl Meter {
     ///   no custom `Meter`. `custom` is reserved for pipeline-author
     ///   metrics ([`Meter::new`]); a component keeps its families out of that
     ///   shared bucket by declaring a distinct `component_type`.
+    /// - a deserializer's default `"deserializer"`
+    ///   ([`DESERIALIZER_DEFAULT`](super::names::DESERIALIZER_DEFAULT)), under
+    ///   the deserializer role only. A silent opt-out, so an undeclared
+    ///   deserializer gets no `Meter`. The same string in another role scopes a
+    ///   family as usual.
     /// - a **malformed** string (not a `[a-z][a-z0-9_]*` segment). The same
     ///   `None`, but logged at `warn`. A `component_type` that is a legal label
     ///   yet an illegal metric-name segment (e.g. `"clickhouse-v2"`) is almost
@@ -177,6 +198,11 @@ impl Meter {
         // component's families never share the `spate_custom_` space with a
         // pipeline author's. A silent opt-out, like a reserved root.
         if component_type == super::names::CUSTOM_NAMESPACE {
+            return None;
+        }
+        // An undeclared deserializer's default type, like a source's reserved
+        // `"source"`, is no declaration of a family.
+        if role == MetricRole::Deser && component_type == super::names::DESERIALIZER_DEFAULT {
             return None;
         }
         match classify_namespace(component_type) {
@@ -248,7 +274,7 @@ impl Meter {
     /// Panics if `name` starts with `spate_`, or if its first `_`-separated
     /// segment is a role segment in
     /// [`ROLE_SEGMENTS`](super::names::ROLE_SEGMENTS) (`source`, `sink`,
-    /// `feed`), in every namespace. Panics if `extra` shadows a standard label
+    /// `feed`, `deser`), in every namespace. Panics if `extra` shadows a standard label
     /// or repeats a key.
     pub fn counter(&self, name: &str, extra: &[(&'static str, SharedString)]) -> Counter {
         self.labels.register_counter(self.qualify(name), extra)
@@ -262,7 +288,7 @@ impl Meter {
     /// Panics if `name` starts with `spate_`, or if its first `_`-separated
     /// segment is a role segment in
     /// [`ROLE_SEGMENTS`](super::names::ROLE_SEGMENTS) (`source`, `sink`,
-    /// `feed`), in every namespace. Panics if `extra` shadows a standard label
+    /// `feed`, `deser`), in every namespace. Panics if `extra` shadows a standard label
     /// or repeats a key.
     pub fn gauge(&self, name: &str, extra: &[(&'static str, SharedString)]) -> Gauge {
         self.labels.register_gauge(self.qualify(name), extra)
@@ -277,7 +303,7 @@ impl Meter {
     /// Panics if `name` starts with `spate_`, or if its first `_`-separated
     /// segment is a role segment in
     /// [`ROLE_SEGMENTS`](super::names::ROLE_SEGMENTS) (`source`, `sink`,
-    /// `feed`), in every namespace. Panics if `extra` shadows a standard label
+    /// `feed`, `deser`), in every namespace. Panics if `extra` shadows a standard label
     /// or repeats a key.
     pub fn histogram(&self, name: &str, extra: &[(&'static str, SharedString)]) -> Histogram {
         self.labels.register_histogram(self.qualify(name), extra)
@@ -289,26 +315,5 @@ impl Meter {
     #[must_use]
     pub fn labels(&self) -> &ComponentLabels {
         &self.labels
-    }
-}
-
-#[cfg(all(test, not(loom)))]
-mod tests {
-    use super::*;
-    use crate::metrics::names::ROLE_SEGMENTS;
-
-    /// Pins that every role's segment is reserved as a local name's lead.
-    #[test]
-    fn every_role_segment_is_reserved() {
-        let roles = [MetricRole::Source, MetricRole::Sink, MetricRole::Feed];
-        for role in roles {
-            // No wildcard arm, so a new role fails to compile here until it
-            // joins `roles`.
-            match role {
-                MetricRole::Source | MetricRole::Sink | MetricRole::Feed => {}
-            }
-        }
-        let segments: Vec<&str> = roles.into_iter().map(MetricRole::segment).collect();
-        assert_eq!(segments, ROLE_SEGMENTS);
     }
 }

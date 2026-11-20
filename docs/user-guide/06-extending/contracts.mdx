@@ -75,12 +75,22 @@ projection, this is usually why.
 pub trait Deserializer<F: RecFamily>: Send {
     fn deserialize<'buf>(&mut self, raw: &RawPayload<'buf>, ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>) -> Result<(), DeserError>;
+    /// The `component_type` label; defaults to "deserializer".
+    fn component_type(&self) -> &str { "deserializer" }
+    /// Receives the deserializer's own `Meter`; the default ignores it.
+    fn attach_metrics(&mut self, _cx: DeserMetricsCtx) {}
 }
 ```
 
 Records go out through the emitter rather than back through a return value, so
 a payload that contains a thousand records does not allocate a collection to
 hand them over.
+
+The two defaulted methods label the deserializer's metrics. A chain built with
+`with_metrics` reads `component_type` for its deserializer stage and passes the
+deserializer a `Meter` through `attach_metrics`.
+[Instrumenting connectors](instrumenting-connectors.mdx#from-a-built-in-source-sink-feed-backend-or-deserializer)
+covers both.
 
 Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload
 and uses it as the pipeline's failure reason. Keep the payload's content out of

@@ -907,6 +907,29 @@ mod tests {
         let _ = Meter::new("p", "c", "t").counter("feed_items_total", &[]);
     }
 
+    /// `deser_` is reserved to the deserializer role's scoping in the
+    /// pipeline-author `custom` namespace.
+    #[test]
+    #[should_panic(expected = "the role segment `deser_`")]
+    fn a_local_name_may_not_lead_with_the_deser_role() {
+        let _ = Meter::new("p", "c", "t").counter("deser_items_total", &[]);
+    }
+
+    /// The deserializer default opts out under the deserializer role only.
+    #[test]
+    fn the_deserializer_default_scopes_a_family_in_other_roles() {
+        assert!(
+            Meter::for_component(names::DESERIALIZER_DEFAULT, MetricRole::Deser, "p", "c")
+                .is_none()
+        );
+        for role in [MetricRole::Source, MetricRole::Sink, MetricRole::Feed] {
+            assert!(
+                Meter::for_component(names::DESERIALIZER_DEFAULT, role, "p", "c").is_some(),
+                "{role:?}"
+            );
+        }
+    }
+
     /// Pins the `# Panics` section of `counter`, `gauge` and `histogram`, in a
     /// namespace of each kind.
     #[test]

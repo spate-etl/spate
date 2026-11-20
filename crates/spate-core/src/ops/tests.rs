@@ -2443,6 +2443,27 @@ fn a_deserializer_receives_a_meter_scoped_and_labeled_like_its_stage() {
 }
 
 #[test]
+fn a_deserializer_that_declares_no_type_labels_its_stage_deserializer() {
+    let rendered = crate::metrics::render_local(|| {
+        let _chain =
+            chain_owned::<Vec<u8>, _>(OwnedPassthrough).with_metrics("deser-untyped", "main");
+    });
+    assert!(
+        !spate_test::metric_series(
+            &rendered,
+            names::DESER_RECORDS_TOTAL,
+            &[
+                ("pipeline", "deser-untyped"),
+                ("component", "main.deserializer"),
+                ("component_type", "deserializer"),
+            ],
+        )
+        .is_empty(),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn an_undeclared_deserializer_gets_no_meter_and_keeps_the_default_label() {
     let (received, rendered) = chain_with_typed_deser("deser-default", names::DESERIALIZER_DEFAULT);
     assert_eq!(received, Some(false), "{rendered}");

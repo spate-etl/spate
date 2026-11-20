@@ -181,7 +181,7 @@ impl DatagenLane {
             // A whole interval was already gone by the time we were polled.
             // Re-anchor; missed ticks are not replayed.
             if let Some(counters) = &self.counters {
-                counters.tick_overruns.increment(1);
+                counters.tick_overrun();
             }
             next = now.checked_add(self.tick_interval);
         }
@@ -194,7 +194,7 @@ impl DatagenLane {
         };
         self.next_tick = next;
         if let Some(counters) = &self.counters {
-            counters.ticks.increment(1);
+            counters.tick();
         }
         self.tick_budget = self.events_per_tick;
         Some(self.tick_budget)

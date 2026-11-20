@@ -22,6 +22,14 @@ use crate::events::StorefrontEvent;
 use spate_core::metrics::names::L_PARTITION;
 use spate_core::metrics::{Counter, Gauge, Meter};
 
+const EVENTS_GENERATED_TOTAL: &str = "events_generated_total";
+const TICKS_TOTAL: &str = "ticks_total";
+const TICK_OVERRUNS_TOTAL: &str = "tick_overruns_total";
+const REMAINING_EVENTS: &str = "remaining_events";
+const OPEN_ORDERS: &str = "open_orders";
+const COMMITTED_OFFSET: &str = "committed_offset";
+const L_EVENT_TYPE: &str = "event_type";
+
 /// The counters a lane increments. Cloned into every lane; `metrics` handles
 /// are `Arc`-backed, so every clone feeds the same series.
 #[derive(Clone, Debug)]
@@ -30,9 +38,9 @@ pub(crate) struct LaneCounters {
     payment_captured: Counter,
     refund_issued: Counter,
     /// Release cadences that fired.
-    pub(crate) ticks: Counter,
+    ticks: Counter,
     /// Cadences that fired late enough to have missed a whole interval.
-    pub(crate) tick_overruns: Counter,
+    tick_overruns: Counter,
 }
 
 /// `event`'s position in a per-kind tally, matching the order
@@ -63,11 +71,21 @@ impl LaneCounters {
             }
         }
     }
+
+    /// Count one release cadence that fired.
+    pub(crate) fn tick(&self) {
+        self.ticks.increment(1);
+    }
+
+    /// Count one cadence that fired after a whole interval had passed.
+    pub(crate) fn tick_overrun(&self) {
+        self.tick_overruns.increment(1);
+    }
 }
 
 /// Every `spate_datagen_source_*` handle, resolved once.
 #[derive(Debug)]
-pub(crate) struct DatagenMetrics {
+pub(crate) struct DatagenSourceMetrics {
     /// The lane half, handed out by cloning.
     counters: LaneCounters,
     /// Events left to generate across every lane; 0 for an unbounded stream.
@@ -80,30 +98,30 @@ pub(crate) struct DatagenMetrics {
     committed_offset: Vec<Gauge>,
 }
 
-impl DatagenMetrics {
+impl DatagenSourceMetrics {
     /// Resolve every family under the runtime-minted scope. Build-time only.
     pub(crate) fn new(
         meter: &Meter,
         partitions: u32,
         per_partition_detail: bool,
-    ) -> DatagenMetrics {
+    ) -> DatagenSourceMetrics {
         let generated = |event: &'static str| {
-            meter.counter("events_generated_total", &[("event_type", event.into())])
+            meter.counter(EVENTS_GENERATED_TOTAL, &[(L_EVENT_TYPE, event.into())])
         };
-        DatagenMetrics {
+        DatagenSourceMetrics {
             counters: LaneCounters {
                 order_placed: generated("order_placed"),
                 payment_captured: generated("payment_captured"),
                 refund_issued: generated("refund_issued"),
-                ticks: meter.counter("ticks_total", &[]),
-                tick_overruns: meter.counter("tick_overruns_total", &[]),
+                ticks: meter.counter(TICKS_TOTAL, &[]),
+                tick_overruns: meter.counter(TICK_OVERRUNS_TOTAL, &[]),
             },
-            remaining_events: meter.gauge("remaining_events", &[]),
-            open_orders: meter.gauge("open_orders", &[]),
+            remaining_events: meter.gauge(REMAINING_EVENTS, &[]),
+            open_orders: meter.gauge(OPEN_ORDERS, &[]),
             committed_offset: if per_partition_detail {
                 (0..partitions)
                     .map(|p| {
-                        meter.gauge("committed_offset", &[(L_PARTITION, p.to_string().into())])
+                        meter.gauge(COMMITTED_OFFSET, &[(L_PARTITION, p.to_string().into())])
                     })
                     .collect()
             } else {
@@ -117,9 +135,9 @@ impl DatagenMetrics {
         self.counters.clone()
     }
 
-    /// Publish the run-progress gauges. Called once per `poll_events`, from
-    /// the controller thread and nowhere else.
-    pub(crate) fn publish(&self, remaining_events: u64, open_orders: u64) {
+    /// Set the run-progress gauges. Called once per `poll_events`, from the
+    /// controller thread and nowhere else.
+    pub(crate) fn set_progress(&self, remaining_events: u64, open_orders: u64) {
         self.remaining_events.set(remaining_events as f64);
         self.open_orders.set(open_orders as f64);
     }
@@ -180,15 +198,17 @@ mod tests {
     #[test]
     fn every_event_kind_counts_against_its_own_pre_registered_handle() {
         let rendered = render_metrics(|| {
-            let metrics = DatagenMetrics::new(&meter("events"), 2, false);
+            let metrics = DatagenSourceMetrics::new(&meter("events"), 2, false);
             let counters = metrics.counters();
             let mut tally = [0u64; 3];
             for (repeats, event) in one_of_each().iter().enumerate() {
                 tally[kind(event)] += repeats as u64 + 1;
             }
             counters.add_generated(tally);
-            counters.ticks.increment(4);
-            counters.tick_overruns.increment(1);
+            for _ in 0..4 {
+                counters.tick();
+            }
+            counters.tick_overrun();
         });
         for (event, count) in [
             ("order_placed", 1),
@@ -200,26 +220,25 @@ mod tests {
             );
             assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
         }
-        assert!(rendered.contains("spate_datagen_ticks_total"), "{rendered}");
-        assert!(
-            rendered.contains("spate_datagen_tick_overruns_total"),
-            "{rendered}"
-        );
+        for (name, count) in [("ticks_total", 4), ("tick_overruns_total", 1)] {
+            let want = format!(
+                r#"spate_datagen_{name}{{pipeline="orders",component="events",component_type="datagen"}} {count}"#
+            );
+            assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
+        }
     }
 
     #[test]
     fn the_control_plane_gauges_publish_what_it_was_given() {
         let rendered = render_metrics(|| {
-            DatagenMetrics::new(&meter("gauges"), 2, false).publish(97, 12);
+            DatagenSourceMetrics::new(&meter("gauges"), 2, false).set_progress(97, 12);
         });
-        assert!(
-            rendered.contains("spate_datagen_remaining_events{") && rendered.contains("} 97"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("spate_datagen_open_orders{") && rendered.contains("} 12"),
-            "{rendered}"
-        );
+        for (name, value) in [("remaining_events", 97), ("open_orders", 12)] {
+            let want = format!(
+                r#"spate_datagen_{name}{{pipeline="orders",component="gauges",component_type="datagen"}} {value}"#
+            );
+            assert!(rendered.contains(&want), "missing {want} in:\n{rendered}");
+        }
         // The one series this source does not publish at all.
         assert!(!rendered.contains("lag"), "{rendered}");
     }
@@ -229,12 +248,12 @@ mod tests {
     #[test]
     fn committed_offset_is_gated_on_per_partition_detail() {
         let off = render_metrics(|| {
-            DatagenMetrics::new(&meter("detail-off"), 2, false).set_committed(1, 9)
+            DatagenSourceMetrics::new(&meter("detail-off"), 2, false).set_committed(1, 9)
         });
         assert!(!off.contains("committed_offset"), "{off}");
 
         let on = render_metrics(|| {
-            let metrics = DatagenMetrics::new(&meter("detail-on"), 2, true);
+            let metrics = DatagenSourceMetrics::new(&meter("detail-on"), 2, true);
             metrics.set_committed(0, 5);
             metrics.set_committed(1, 9);
             // Out of range: a partition this source never assigned.

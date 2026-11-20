@@ -257,10 +257,14 @@ handle method shapes exist to make them the path of least resistance:
     specifically: the exporter's default bucket layout is matched by that
     suffix, so a bare `*_seconds` histogram renders as a summary instead (see
     [Metrics § Histogram buckets](../../METRICS.md)).
+  - The one exception in the framework is
+    `spate_backpressure_paused_seconds_total`, a gauge that only rises and
+    ends in `_total` after its unit.
   - A label key names one dimension, with one meaning in the framework and
-    every connector. Its values may differ per family: `error_type` is always
-    the kind of error, and each family that carries it has its own set of
-    kinds.
+    every connector: `partition` is always a source partition, and `shard` is
+    always a sink shard. A key's values may differ per family: `error_type`
+    classifies an error, and each family that carries it states its own
+    classes.
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
   `metrics.per_partition_detail` (default off) because it is unbounded.

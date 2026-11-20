@@ -1,5 +1,5 @@
-//! `bytes_read_total` for a ranged unit. Its own test binary because it
-//! installs the process-wide metrics recorder.
+//! `bytes_read_total` and `bytes_decoded_total` for a ranged unit. Its own
+//! test binary because it installs the process-wide metrics recorder.
 
 mod support;
 
@@ -16,7 +16,8 @@ use support::{
 };
 
 /// A ranged unit's `bytes_read_total` equals the bytes of every window it
-/// fetched from the store, trimmed bytes included.
+/// fetched from the store, trimmed bytes included. Its `bytes_decoded_total`
+/// counts only the bytes the range owns, and the range completes once.
 #[test]
 fn a_ranged_split_counts_every_fetched_byte_as_read() {
     let handle = install(&MetricsSettings {
@@ -68,4 +69,10 @@ fn a_ranged_split_counts_every_fetched_byte_as_read() {
     let read = metric_value(&rendered, "spate_s3_source_bytes_read_total", &[])
         .unwrap_or_else(|| panic!("no bytes_read_total series:\n{rendered}"));
     assert_eq!(read, fetched as f64, "{rendered}");
+    let decoded = metric_value(&rendered, "spate_s3_source_bytes_decoded_total", &[])
+        .unwrap_or_else(|| panic!("no bytes_decoded_total series:\n{rendered}"));
+    assert_eq!(decoded, owned as f64, "{rendered}");
+    let completed = metric_value(&rendered, "spate_s3_source_objects_completed_total", &[])
+        .unwrap_or_else(|| panic!("no objects_completed_total series:\n{rendered}"));
+    assert_eq!(completed, 1.0, "{rendered}");
 }

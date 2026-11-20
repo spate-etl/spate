@@ -56,8 +56,9 @@ updates:
         update-types: ["minor", "patch"]
 
   # --------------------------------------------------- Rust (the nightly) ----
-  # The dated nightly every job needing one installs. Nothing else moves it:
-  # no workflow here pushes to git.
+  # The dated nightly every job needing one installs, except the docs.rs build,
+  # which takes the latest. Nothing else moves it: no workflow here pushes to
+  # git.
   #
   # No cooldown. This ecosystem's releases carry no date, so the check has
   # nothing to compare and never holds a bump back. The weekly schedule is the

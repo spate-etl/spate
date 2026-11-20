@@ -90,7 +90,7 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | --- | --- |
 | `Test and coverage` | The suite under `cargo llvm-cov` on Linux x86_64 |
 | `Test (arm64)`, `Test (macOS)` | The suite on Linux arm64, and on macOS when a build input changes |
-| `Rustdoc as docs.rs builds it` | Rustdoc per crate on nightly |
+| `Rustdoc as docs.rs builds it` | Rustdoc per crate on the latest nightly, as docs.rs builds it |
 | `Miri over unsafe code` | The lib tests that enter an `unsafe` block, under Miri on nightly |
 | `Check (MSRV)` | The type check on the declared minimum Rust version |
 | `Allocation assertions`, `Allocation snapshots` | The per-record allocation tests and the committed counts |
@@ -104,6 +104,9 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | `Analyze (<language>)` | CodeQL's analysis, on every pull request |
 
 [How CI differs from your machine](05-flaky-tests.md#how-ci-differs-from-your-machine) says what changes for a test on those runners.
+
+The `Rustdoc as docs.rs builds it` job installs the latest nightly on every run, so a new nightly can fail it when the pull request changes nothing it builds.
+The job's summary names the rustc it ran.
 
 `Mutants over the diff` runs in a workflow of its own on each pull request.
 It is advisory, and `CI gate` does not wait for it.

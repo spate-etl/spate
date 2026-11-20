@@ -76,7 +76,8 @@ A document that does not parse (or does not match the target type) is a
 record-level error, handled by `on_error`:
 
 - **`skip`** (default) — drop the record, count it in
-  `spate_json_deser_records_dropped_total{reason}`, and continue. Under `ndjson`
+  `spate_json_deser_records_dropped_total{reason}` on a chain built with
+  `with_metrics` (see [Metrics](#metrics)), and continue. Under `ndjson`
   the good lines around a bad one still flow.
 - **`fail`** — surface a decode error on the first bad record.
 

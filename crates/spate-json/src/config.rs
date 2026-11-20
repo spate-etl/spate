@@ -39,8 +39,8 @@ pub enum JsonFraming {
 #[serde(rename_all = "snake_case")]
 pub enum OnError {
     /// Drop the record, count it in
-    /// `spate_json_deser_records_dropped_total{reason}`, and continue. The
-    /// default for deserializers.
+    /// `spate_json_deser_records_dropped_total{reason}` on a chain built with
+    /// `with_metrics`, and continue. The default for deserializers.
     #[default]
     Skip,
     /// Surface a decode error on the first bad record. What that error then

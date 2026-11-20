@@ -29,9 +29,9 @@
 //! # Errors and metrics
 //!
 //! A document that does not parse (or does not match the target type) is a
-//! record-level error. Under `on_error: skip` (the default) it is dropped and
-//! counted in `spate_json_deser_records_dropped_total{reason="malformed"}` and
-//! the decode continues; under `on_error: fail` it surfaces a decode error on
+//! record-level error. Under `on_error: skip` (the default) it is dropped,
+//! counted in `spate_json_deser_records_dropped_total{reason="malformed"}` on a
+//! chain built with `with_metrics`, and the decode continues; under `on_error: fail` it surfaces a decode error on
 //! the first bad record, which the chain's deserializer error policy then
 //! either replays (stop the pipeline, at-least-once) or drops as a whole
 //! payload. The error text holds the kind of failure, and its position where the

@@ -120,9 +120,7 @@ impl DatagenSourceMetrics {
             open_orders: meter.gauge(OPEN_ORDERS, &[]),
             committed_offset: if per_partition_detail {
                 (0..partitions)
-                    .map(|p| {
-                        meter.gauge(COMMITTED_OFFSET, &[(L_PARTITION, p.to_string().into())])
-                    })
+                    .map(|p| meter.gauge(COMMITTED_OFFSET, &[(L_PARTITION, p.to_string().into())]))
                     .collect()
             } else {
                 Vec::new()

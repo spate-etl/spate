@@ -17,7 +17,6 @@ mod http;
 mod kafka;
 #[cfg(feature = "kafka-client")]
 mod kafka_client;
-mod memory;
 mod registry_stub;
 mod returns;
 #[cfg(feature = "s3")]
@@ -47,7 +46,6 @@ pub use kafka_client::{
     committed, committed_offsets, consumer, create_topics, from_start, high_watermark, producer,
     send, transactional_producer,
 };
-pub use memory::resident_kib;
 pub use registry_stub::{RegistryRequest, RegistryStub};
 pub use returns::{assert_returns, returns_within};
 #[cfg(feature = "s3")]

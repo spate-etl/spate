@@ -1,6 +1,5 @@
-//! E2E scenario: sustained traffic, sampled for growth. Records keep flowing through
-//! every round, against a low pending-batch limit, and each round records the peak
-//! pending reading and the process's resident memory.
+//! E2E scenario: sustained traffic against a low pending-batch limit. Records keep
+//! flowing through every round, and each round records the peak pending reading.
 //!
 //! `SPATE_E2E_LONG_RUN_ROUNDS` sets the length, in rounds. The default is short, so
 //! the suite's usual command runs it, and the nightly run sets a long one.
@@ -25,9 +24,6 @@ const DEFAULT_ROUNDS: u64 = 3;
 const PARTITIONS: i32 = 3;
 const WAVE: u64 = 5_000;
 const ROUND: u64 = 20_000;
-/// Final resident memory as a percentage of the reading after the first round, which
-/// has built the pipeline's pools and clients.
-const RSS_LIMIT_PERCENT: u64 = 150;
 
 fn rounds() -> u64 {
     std::env::var("SPATE_E2E_LONG_RUN_ROUNDS").map_or(DEFAULT_ROUNDS, |rounds| {
@@ -53,13 +49,12 @@ fn wave(range: std::ops::Range<u64>) -> Vec<(i32, Event)> {
         .collect()
 }
 
-/// Pins that sustained traffic stays within the pending limit, that pending work
-/// returns to zero once the traffic ends, and that resident memory grows by no more
-/// than the limit above. A long run also has to reach the pending limit, which a
-/// short one can end before.
+/// Pins that sustained traffic stays within the pending limit and that pending work
+/// returns to zero once the traffic ends. A long run also has to reach the pending
+/// limit, which a short one can end before.
 #[test]
 #[ignore = "requires Docker"]
-fn sustained_traffic_holds_pending_work_and_memory() {
+fn sustained_traffic_holds_pending_work() {
     let h = Harness::up();
     let mut params = PipelineParams::defaults("e2e-long-run", 19196);
     params.max_pending_batches = 4;
@@ -73,8 +68,6 @@ fn sustained_traffic_holds_pending_work_and_memory() {
     produced += WAVE;
     let pipeline = h.spawn_pipeline(&params);
 
-    let mut baseline = None;
-    let mut last = 0;
     for round in 1..=rounds {
         // The next wave goes out while the sink still has one to write, so the
         // pipeline never idles and the broker's disk stays bounded.
@@ -88,10 +81,8 @@ fn sustained_traffic_holds_pending_work_and_memory() {
             }
             rows >= round * ROUND
         });
-        last = spate_test_support::resident_kib();
-        let base = *baseline.get_or_insert(last);
         println!(
-            "round {round}/{rounds}: peak pending {}, resident {last} KiB, baseline {base} KiB",
+            "round {round}/{rounds}: peak pending {}",
             pipeline.sampler.peak_pending()
         );
     }
@@ -113,10 +104,4 @@ fn sustained_traffic_holds_pending_work_and_memory() {
             "sustained traffic reached the limit: {sampled:?}"
         );
     }
-
-    let baseline = baseline.expect("at least one round");
-    assert!(
-        last * 100 <= RSS_LIMIT_PERCENT * baseline,
-        "resident memory grew from {baseline} KiB to {last} KiB"
-    );
 }

@@ -376,14 +376,14 @@ fn abort_and_commit(producer: &BaseProducer, rounds: std::ops::Range<usize>) {
 }
 
 /// A partition held at the pending-batch ceiling is paused at the source, so
-/// what a producer writes behind it stays on the broker: aborted transactions
-/// arriving while the sink holds the head leave resident memory flat, and
-/// every committed record is delivered once the sink answers.
+/// what a producer writes behind it stays on the broker: the client receives
+/// almost none of the aborted transactions written while the sink holds the
+/// head, and every committed record is delivered once the sink answers.
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
     /// The default `queued.max.messages.kbytes`.
-    const PREFETCH_KIB: u64 = 65_536;
+    const PREFETCH_BYTES: f64 = 65_536.0 * 1024.0;
     const ONE_X: usize = 40;
     let (_kafka, brokers) = transaction_broker();
     let producer = support::transactional_producer(&brokers, TOPIC, "ceiling");
@@ -448,6 +448,20 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
         spate_test::metric_value(&handle.render(), metric, &[("pipeline", name.as_str())])
             .unwrap_or(0.0)
     };
+    let client_total = |metric: &str| {
+        spate_test::metric_sum(&handle.render(), metric, &[("pipeline", name.as_str())])
+            .unwrap_or(0.0)
+    };
+    // The group heartbeat keeps a paused client answering, so a rise in its
+    // responses means a statistics snapshot newer than the last reading has
+    // been applied. The bytes received are read from that snapshot.
+    let received_after_a_snapshot = || {
+        let responses = client_total("spate_kafka_source_rx_responses_total");
+        spate_test::wait_until(HANG, "a newer statistics snapshot", || {
+            client_total("spate_kafka_source_rx_responses_total") > responses
+        });
+        client_total("spate_kafka_source_rx_bytes_total")
+    };
 
     spate_test::wait_until(HANG, "the head's write is held", || {
         script.held_writes() == 1
@@ -463,13 +477,16 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
     spate_test::wait_until(HANG, "the partition is paused at the source", || {
         metric(names::CHECKPOINT_CEILING_PAUSES_TOTAL) >= 1.0
     });
-    let one = spate_test_support::resident_kib();
+    // The counter rises when the pause is asked for, so the first snapshot can
+    // still hold fetches made before the source applied it.
+    received_after_a_snapshot();
+    let before = received_after_a_snapshot();
     abort_and_commit(&producer, ONE_X..ONE_X * 10);
-    let ten = spate_test_support::resident_kib();
+    let received = received_after_a_snapshot() - before;
     assert!(
-        ten.saturating_sub(one) < PREFETCH_KIB,
-        "resident memory grew {} KiB over {} aborted transactions behind a paused partition",
-        ten.saturating_sub(one),
+        received < PREFETCH_BYTES,
+        "the client received {received} bytes over {} aborted transactions behind a paused \
+         partition",
         ONE_X * 9,
     );
 

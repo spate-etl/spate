@@ -238,14 +238,28 @@ handle method shapes exist to make them the path of least resistance:
 - **Count at batch boundaries.** Increment counters once per batch with the
   batch's totals; observe a batch's duration once (as a mean where per-record
   granularity would matter), never per record.
-- **Follow the naming rules.** `_total` on counters, a unit suffix
-  (`_seconds` / `_bytes` / `_rows`) on anything measured in a unit. Through a
-  `Meter` the `spate_<namespace>_` prefix is added for you (you pass the local
-  name); only a raw-facade metric needs a prefix you choose yourself, and that
-  one must **not** be `spate_`. Name a latency histogram `*_duration_seconds`
-  specifically: the exporter's default bucket layout is matched by that suffix,
-  so a bare `*_seconds` histogram renders as a summary instead (see
-  [Metrics § Histogram buckets](../../METRICS.md)).
+- **Follow the naming rules.** Through a `Meter` the `spate_<namespace>_`
+  prefix is added for you (you pass the local name); only a raw-facade metric
+  needs a prefix you choose yourself, and that one must **not** be `spate_`.
+  The local name follows these rules:
+  - A counter is a plural noun, an optional qualifier, then `_total`:
+    `records_dropped_total`, `records_in_total`.
+  - A gauge that counts things in a state puts the state first and the counted
+    noun last: `inflight_batches`, `remaining_objects`.
+  - A gauge that measures a subject names the subject, then the measure:
+    `queue_depth`, `queue_capacity`.
+  - A gauge that reads 0 or 1 names its subject, then its state:
+    `replica_healthy`.
+  - A name measured in a unit carries the unit as its last word, before
+    `_total` on a counter: `_seconds`, `_bytes` or `_rows` (`batch_bytes`,
+    `bytes_total`). Name a latency histogram `*_duration_seconds`
+    specifically: the exporter's default bucket layout is matched by that
+    suffix, so a bare `*_seconds` histogram renders as a summary instead (see
+    [Metrics § Histogram buckets](../../METRICS.md)).
+  - A label key names one dimension, with one meaning in the framework and
+    every connector. Its values may differ per family: `error_type` is always
+    the kind of error, and each family that carries it has its own set of
+    kinds.
 - **Keep cardinality bounded.** `shard` and `replica` are bounded by cluster
   topology and always on; `partition` is gated behind
   `metrics.per_partition_detail` (default off) because it is unbounded.

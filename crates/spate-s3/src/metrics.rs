@@ -20,7 +20,7 @@ pub(crate) struct S3Metrics {
     /// units, a cut object counting once per range (rises by the objects a
     /// lane reads when it opens, falls per completed object, settles when the
     /// lane closes).
-    pub(crate) objects_remaining: Gauge,
+    pub(crate) remaining_objects: Gauge,
     /// Bytes read from the store (as stored, pre-decompression).
     pub(crate) bytes_read: Counter,
     /// Bytes after decompression, as the framer receives them. For a plain
@@ -58,7 +58,7 @@ impl S3Metrics {
         };
         S3Metrics {
             objects_completed: meter.counter("objects_completed_total", &[]),
-            objects_remaining: meter.gauge("objects_remaining", &[]),
+            remaining_objects: meter.gauge("remaining_objects", &[]),
             bytes_read: meter.counter("bytes_read_total", &[]),
             bytes_decoded: meter.counter("bytes_decoded_total", &[]),
             get_retries: meter.counter("get_retries_total", &[]),

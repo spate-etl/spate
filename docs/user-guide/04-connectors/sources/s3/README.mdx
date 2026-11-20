@@ -1342,7 +1342,7 @@ noted per family.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A cut object counts once per range, so the count can exceed the number of objects. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held units** (rises by the objects a lane reads when it opens, falls per completed object, settles when the lane closes). A cut object counts once per range. |
+| `spate_s3_source_remaining_objects` | gauge | | Objects not yet completed across **this worker's currently-held units** (rises by the objects a lane reads when it opens, falls per completed object, settles when the lane closes). A cut object counts once per range. |
 | `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte range reads around its edges and drops. |
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte range, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
 | `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget fails the unit rather than the pipeline. |

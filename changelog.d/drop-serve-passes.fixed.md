@@ -1,0 +1,3 @@
+**Kafka source and feed: a drop reaches a revocation behind log or statistics events** (`spate-kafka`)
+
+Dropping the Kafka source or the Kafka feed now reads the consumer's queue length up to four times, and serves what each read finds. A log or statistics event that arrives during one read's serve no longer leaves a queued revocation for the consumer's close. In previous versions the drop read the length once, and such an event left the revocation to the close. For a feed member that held no partitions, with the group coordinator lost, the drop then did not return. A revocation that queues after the last read, or stays behind a new event at each read, is still left to the close.

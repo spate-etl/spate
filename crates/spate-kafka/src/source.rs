@@ -2384,7 +2384,8 @@ impl KafkaSource {
 /// it does a held one. `unassign` answers a queued revocation without serving
 /// its event, which would leave close to serve it as the group terminates,
 /// where the callback can wait forever on a reply. Each consumer's queue is
-/// served first, and a rebalance queued later stays close's to serve.
+/// served first, and a rebalance that queues after the serve stays close's to
+/// serve.
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
@@ -5220,10 +5221,10 @@ mod tests {
         /// The member starts rebalancing. Its `delegating revoke` line and the
         /// rebalance event follow.
         const REBALANCE_STOP: &str = r#"fac="REBALANCE""#;
-        /// `unassign` ran. A serve that follows it would reach this line.
+        /// An `unassign` ran, and a serve after it reached this line.
         const UNASSIGNED: &str = r#"fac="CLEARASSIGN""#;
-        /// The first line after the revocation's callback calls `unassign`. The
-        /// serve's count was read before it, so the serve stops short of it.
+        /// librdkafka received an `assign` or `unassign` call, and a serve
+        /// after it reached this line.
         const UNASSIGN_OP: &str = "received op ASSIGN";
 
         type Member = Arc<BaseConsumer<SourceContext>>;
@@ -5547,7 +5548,7 @@ mod tests {
                 }
                 assert!(
                     !lines.iter().any(|l| l.contains(UNASSIGNED)),
-                    "{group}: a serve ran after unassign: {lines:#?}"
+                    "{group}: the serve reached an unassign: {lines:#?}"
                 );
                 for consumer in &members {
                     assert_eq!(consumer.assignment().expect("assignment").count(), 0);
@@ -5557,24 +5558,67 @@ mod tests {
             }
         }
 
-        /// The serve reaches a rebalance behind the log lines ahead of it,
+        /// One pass reaches a rebalance behind the log lines ahead of it,
         /// which one poll does not.
         #[test]
         fn serving_a_consumer_reaches_a_rebalance_behind_its_log_lines() {
             let cluster = mock();
             let (source, members) = open(config(&cluster, "drop-queued-serve", 1));
             stop_at(&members[0], ASSIGN_STOP);
-            crate::client::serve_queued(&members[0]);
-            {
-                let intents = members[0].context().intents.lock().expect("intent lock");
-                assert!(
-                    matches!(intents.front(), Some(Intent::Assign(_))),
-                    "{intents:?}"
-                );
-            }
+            crate::client::serve_passes(&members[0], 1, || {});
+            assert_front_is_assign(&members[0]);
             drop(source);
             empty_queue(&members[0]);
             assert_closes(cluster, move || drop(members));
+        }
+
+        /// A drop's serve reaches a rebalance behind a line that queued after
+        /// the serve read the queue's length. The `assignment` round trip
+        /// queues librdkafka's `received op GET_ASSIGNMENT` line, which sorts
+        /// ahead of the rebalance and takes a poll of the first pass.
+        #[test]
+        fn serving_a_consumer_reaches_a_rebalance_behind_a_line_queued_during_the_serve() {
+            let cluster = mock();
+            let (source, members) = open(config(&cluster, "drop-queued-line", 1));
+            stop_at(&members[0], ASSIGN_STOP);
+            let mut first = true;
+            crate::client::serve_passes(&members[0], crate::client::DROP_SERVE_PASSES, || {
+                if std::mem::take(&mut first) {
+                    members[0].assignment().expect("assignment");
+                }
+            });
+            assert_front_is_assign(&members[0]);
+            drop(source);
+            empty_queue(&members[0]);
+            assert_closes(cluster, move || drop(members));
+        }
+
+        /// A serve whose queue never reads empty stops after its last pass.
+        #[test]
+        fn a_serve_stops_after_its_last_pass() {
+            let cluster = mock();
+            let (source, members) = open(config(&cluster, "drop-queued-passes", 1));
+            stop_at(&members[0], ASSIGN_STOP);
+            let passes = crate::client::DROP_SERVE_PASSES;
+            let mut reads = 0;
+            crate::client::serve_passes(&members[0], passes, || {
+                reads += 1;
+                if reads <= passes + 2 {
+                    members[0].assignment().expect("assignment");
+                }
+            });
+            assert_eq!(reads, passes);
+            drop(source);
+            empty_queue(&members[0]);
+            assert_closes(cluster, move || drop(members));
+        }
+
+        fn assert_front_is_assign(consumer: &Member) {
+            let intents = consumer.context().intents.lock().expect("intent lock");
+            assert!(
+                matches!(intents.front(), Some(Intent::Assign(_))),
+                "{intents:?}"
+            );
         }
 
         /// The serve keeps going past an error event, which the error hook
@@ -5654,14 +5698,11 @@ mod tests {
                 lines.iter().any(|l| l.contains(REVOKE_STOP)),
                 "the revocation was not served: {lines:#?}"
             );
-            assert!(
-                !lines.iter().any(|l| l.contains(UNASSIGNED)),
-                "a serve ran after unassign: {lines:#?}"
-            );
-            assert!(
-                !lines.iter().any(|l| l.contains(UNASSIGN_OP)),
-                "the serve went past its count: {lines:#?}"
-            );
+            // The revocation's callback calls `unassign` once. An `unassign`
+            // ahead of the serve would answer the revocation and leave its event
+            // stale, and the callback would then make a second call.
+            let calls = lines.iter().filter(|l| l.contains(UNASSIGN_OP)).count();
+            assert_eq!(calls, 1, "{lines:#?}");
             assert_closes(cluster, move || drop(members));
         }
 

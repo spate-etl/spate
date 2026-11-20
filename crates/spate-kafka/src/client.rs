@@ -453,19 +453,41 @@ pub(crate) fn queued_events<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> u
     }
 }
 
-/// Serves as many events as `consumer`'s queue holds at the time of the call.
-///
-/// One poll serves one event of any kind and cannot report an empty queue, so
-/// the count comes from one read of the queue's length, and the serve cannot
-/// follow a growing queue. librdkafka sorts log and statistics events ahead of
-/// a rebalance, so one arriving during the serve takes a poll of the count and
-/// can leave a rebalance for close.
+/// How many times a drop's serve reads the length of a consumer's queue.
+pub(crate) const DROP_SERVE_PASSES: usize = 4;
+
+/// Serves the events on `consumer`'s queue before a drop releases it, reading
+/// the queue's length up to [`DROP_SERVE_PASSES`] times.
 pub(crate) fn serve_queued<C: ConsumerContext>(consumer: &BaseConsumer<C>) {
-    for _ in 0..queued_events(consumer) {
-        // A served message stores no offset, since the caller owns
-        // `enable.auto.offset.store`, so it is dropped with no rewind. The error
-        // hook has logged an error.
-        let _ = consumer.poll(Duration::ZERO);
+    serve_passes(consumer, DROP_SERVE_PASSES, || {});
+}
+
+/// Serves as many events as `consumer`'s queue holds at each read of its
+/// length, for up to `passes` reads, and returns at a read of 0. `counted`
+/// runs after each read that finds events.
+///
+/// A poll cannot report an empty queue, so each pass serves the count it read
+/// and cannot follow a growing queue. librdkafka sorts log and statistics
+/// events ahead of a rebalance, so one arriving during a pass takes a poll of
+/// its count, and a later pass serves the rebalance. A rebalance still queued
+/// after the last pass is left for close.
+pub(crate) fn serve_passes<C: ConsumerContext>(
+    consumer: &BaseConsumer<C>,
+    passes: usize,
+    mut counted: impl FnMut(),
+) {
+    for _ in 0..passes {
+        let queued = queued_events(consumer);
+        if queued == 0 {
+            return;
+        }
+        counted();
+        for _ in 0..queued {
+            // A served message stores no offset, since the caller owns
+            // `enable.auto.offset.store`, so it is dropped with no rewind. The
+            // error hook has logged an error.
+            let _ = consumer.poll(Duration::ZERO);
+        }
     }
 }
 

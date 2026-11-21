@@ -1104,10 +1104,10 @@ start.
 
 A framer takes part in [byte ranges](#large-objects-and-byte-ranges)
 through `RecordFramer::resync_delimiter`. Returning `Some(byte)` declares that
-a record starts after every occurrence of that byte, which `JsonLinesFramer` does
-with `\n`. A format with a header, a byte-order mark, magic bytes or a quoted
-delimiter, as CSV has, returns `None`, which is the default. The source then
-reads every object whole, and logs that at `INFO` when it opens.
+a record starts after every occurrence of that byte, which `JsonLinesFramer`
+does with `\n`. A format with a header, a byte-order mark, magic bytes or a
+quoted delimiter, as CSV has, returns `None`, which is the default. The source
+then reads every object whole, and logs that at `INFO` when it opens.
 
 ## Object errors fail the unit
 
@@ -1358,7 +1358,7 @@ noted per family.
   deployment shape, tuning knobs and failure modes.
 - [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — where
   the feed's acknowledgement sits in the at-least-once story.
-- [JSON format](../../formats/json/README.mdx) — the `JsonLinesFramer` this source
-  takes, and the deserializer behind it.
+- [JSON format](../../formats/json/README.mdx) — the `JsonLinesFramer` this
+  source takes, and the deserializer behind it.
 - [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)
   — how the families above are registered.

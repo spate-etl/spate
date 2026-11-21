@@ -66,7 +66,7 @@ an error that names the attribute.
 - [`spate`](https://crates.io/crates/spate) — the facade an application depends
   on, with the Cargo snippet.
 - [API documentation on docs.rs](https://docs.rs/spate-clickhouse) — the
-  `ClickHouseRow` trait and, in the `rowbinary` module, the Rust field each
+  `ClickHouseRow` trait and, in the crate docs' row types section, the Rust field each
   column type takes.
 - [ClickHouse sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse)
   — configuration and `connect`.

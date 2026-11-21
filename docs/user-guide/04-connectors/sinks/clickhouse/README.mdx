@@ -30,7 +30,8 @@ That is from
 a complete program that builds under the `kafka`, `clickhouse` and `avro`
 features. The single `sink:` section is addressed as `"default"`; a named sink
 resolves under its own name. The fetch that `connect` performs is what the
-encoder and the insert header are both built from; see
+encoder and the insert header are both built from, and `sink.encoder()` hands
+out the encoder for the configured `format`; see
 [Schema validation](./schema-validation.mdx).
 
 To write to **several tables** from one pipeline (one per record kind), see
@@ -227,14 +228,13 @@ A server older than 26.2 fails at startup, because it does not know the
 `deduplicate_insert` setting that the sink sets on every insert. The error
 names the replica and carries the server's `UNKNOWN_SETTING` message.
 
-## RowBinary on pipeline threads
+## Encoding on pipeline threads
 
-Encoding is CPU work, so it happens on the pipeline threads:
-`ClickHouseRowBinaryEncoder` (the sink's `RowEncoder`) serializes each row to
-RowBinary using the crate's own serializer. Its type parameter is the record
-*family*, not the row type, so owned rows are wrapped as `Owned<Row>` (e.g.
-`ClickHouseRowBinaryEncoder::<Owned<OrderRow>>::new(sink.schema())`), while the
-encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O
+Encoding is CPU work, so it happens on the pipeline threads. The sink's
+`RowEncoder`, from `sink.encoder()`, writes each row in the format the `format`
+key names. Its type parameter is the record *family*, not the row type, so
+owned rows are wrapped as `Owned<Row>` (e.g. `sink.encoder::<Owned<OrderRow>>()`),
+while the encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O
 runtime only merge frames, seal batches, and drive inserts; they never touch a
 record.
 
@@ -248,7 +248,8 @@ describes the table, and the struct is checked against the same schema on the
 first record; see [Schema validation](./schema-validation.mdx). Which column
 types each format writes is in
 [ClickHouse column types](./column-types.mdx), and the Rust field each one
-takes is in the crate's `rowbinary` module docs.
+takes is in the row types section of the
+[`spate-clickhouse` reference](https://docs.rs/spate-clickhouse).
 :::
 
 ## Deduplication tokens and the window warning

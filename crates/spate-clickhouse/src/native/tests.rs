@@ -521,7 +521,7 @@ mod first_record_check {
     use spate_core::sink::RowEncoder;
     use spate_test::record;
 
-    /// A schema as `native_schema()` would build it from a live table.
+    /// A schema as `connect` builds it from a live table.
     fn full_schema(cols: &[(&str, &str)]) -> Arc<NativeSchema> {
         let expected = RowSchema {
             wire: crate::schema::Wire::Native,

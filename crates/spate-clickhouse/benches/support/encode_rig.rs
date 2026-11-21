@@ -46,16 +46,28 @@ pub(crate) struct Rig<E, T> {
     buf: BytesMut,
 }
 
-/// The measured work: a whole chunk through one encoder.
+/// The measured work: a whole chunk through one encoder, with the terminal
+/// stage's per-record seal check on `buffered_bytes`.
+///
+/// `#[inline(never)]` keeps the loop a named callee inside the collected
+/// region; inlined, the optimizer can move it past the callgrind toggle and
+/// the case counts almost nothing.
+#[inline(never)]
 pub(crate) fn encode_chunk<E, T>(rig: &mut Rig<E, T>)
 where
     E: RowEncoder<Owned<T>>,
     T: Send + 'static,
 {
     rig.buf.clear();
+    let mut seals = 0usize;
     for rec in &rig.records {
         rig.enc.encode(black_box(rec), &mut rig.buf).unwrap();
+        // A target no chunk reaches keeps every row in one chunk.
+        if rig.buf.len() + rig.enc.buffered_bytes() >= black_box(usize::MAX) {
+            seals += 1;
+        }
     }
+    black_box(seals);
     rig.enc.finish_chunk(&mut rig.buf).unwrap();
     assert!(!rig.buf.is_empty(), "encoder produced no bytes");
 }

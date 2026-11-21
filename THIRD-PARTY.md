@@ -50,6 +50,7 @@ version bump alone leaves this file unchanged.
 | `BSD-3-Clause` | 7 |
 | `ISC` | 6 |
 | `Zlib` | 2 |
+| `BSD-2-Clause` | 1 |
 
 ## Crates
 
@@ -97,18 +98,19 @@ above from what is left. The elected license ids are unaffected either way.
 | `ryu` | 1.0.23 | `Apache-2.0` |
 | `sketches-ddsketch` | 0.3.1 | `Apache-2.0` |
 | `sync_wrapper` | 1.0.2 | `Apache-2.0` |
+| `zstd-sys` | 2.1.3+zstd.1.5.7 | `BSD-2-Clause` |
 | `aws-lc-sys` | 0.45.0 | `BSD-3-Clause` |
 | `bindgen` | 0.72.1 | `BSD-3-Clause` |
 | `encoding_rs` | 0.8.35 | `BSD-3-Clause` |
 | `subtle` | 2.6.1 | `BSD-3-Clause` |
-| `zstd` | 0.14.3 | `BSD-3-Clause` |
-| `zstd-safe` | 8.2.0 | `BSD-3-Clause` |
-| `zstd-sys` | 2.1.2+zstd.1.5.7 | `BSD-3-Clause` |
+| `zstd` | 0.14.4 | `BSD-3-Clause` |
+| `zstd-safe` | 8.3.0 | `BSD-3-Clause` |
+| `zstd-sys` | 2.1.3+zstd.1.5.7 | `BSD-3-Clause` |
 | `aws-lc-rs` | 1.18.1 | `ISC` |
 | `aws-lc-sys` | 0.45.0 | `ISC` |
 | `libloading` | 0.8.9 | `ISC` |
 | `ring` | 0.17.14 | `ISC` |
-| `rustls-webpki` | 0.103.16 | `ISC` |
+| `rustls-webpki` | 0.103.17 | `ISC` |
 | `untrusted` | 0.9.0 | `ISC` |
 | `adler2` | 2.0.1 | `MIT` |
 | `aho-corasick` | 1.1.4 | `MIT` |
@@ -293,8 +295,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `rand_xoshiro` | 0.7.0 | `MIT` |
 | `rapidhash` | 4.5.1 | `MIT` |
 | `raw-cpuid` | 11.6.0 | `MIT` |
-| `rdkafka` | 0.39.0 | `MIT` |
-| `rdkafka-sys` | 4.10.0+2.12.1 | `MIT` |
+| `rdkafka` | 0.40.0 | `MIT` |
+| `rdkafka-sys` | 4.11.0+2.16.0 | `MIT` |
 | `regex` | 1.12.4 | `MIT` |
 | `regex-automata` | 0.4.14 | `MIT` |
 | `regex-lite` | 0.1.9 | `MIT` |

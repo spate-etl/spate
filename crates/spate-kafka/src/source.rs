@@ -1519,8 +1519,8 @@ impl KafkaSource {
                 reason
             });
         }
-        // Every broker's failure is followed by `AllBrokersDown`, which would
-        // otherwise hide it from the deadline error.
+        // `AllBrokersDown` can follow the failure that took the last broker
+        // down, and would otherwise hide it from the deadline error.
         if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
             self.last_consumer_error =
                 Some((Stopwatch::start(&*self.clock), error.reason().to_owned()));

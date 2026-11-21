@@ -100,7 +100,7 @@ sha2 = "0.11"
 
 # The connector clients below (rdkafka, clickhouse, apache-avro, object_store)
 # are internal only, never in public signatures (INV-6).
-rdkafka = { version = "0.39", features = ["zstd"] }
+rdkafka = { version = "0.40", features = ["zstd"] }
 # Not used directly. rdkafka-sys takes zstd-sys with its default features, and
 # from 2.1 those defaults leave out bindgen, which needs libclang on the build
 # host. The floor is 2.1.2 because the zstd-safe behind the workspace's zstd

@@ -1,5 +1,5 @@
 ---
-description: "What a connector crate carries: manifest, constructor shape, testing feature, tests, container suites, bench and fuzz targets, metric handles, docs page and changelog fragment."
+description: "What a connector crate carries: manifest, constructors, testing feature, tests, container suites, benches, fuzz targets, metric handles, docs and changelog."
 ---
 
 # Adding a connector crate

@@ -17,7 +17,7 @@ use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
 use crate::listing::{StoreRoots, TrustHint, UnaddressableConnector, UnaddressableKeys};
 use crate::location::{Location, await_fingerprint, feed_fingerprint};
-use crate::metrics::S3Metrics;
+use crate::metrics::S3SourceMetrics;
 use crate::split::Packing;
 use crate::unit::Scope;
 use crate::unit_reader::{LaneParts, UNITS_HELD, UnitReader};
@@ -617,7 +617,7 @@ impl Source for S3Source {
             "the S3 source holds up to {units} units at once"
         );
 
-        let metrics = ctx.meter.as_ref().map(S3Metrics::new);
+        let metrics = ctx.meter.as_ref().map(S3SourceMetrics::new);
         let delimiter = make_framer().resync_delimiter();
         if delimiter.is_none() {
             tracing::info!(

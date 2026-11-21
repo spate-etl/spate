@@ -40,6 +40,7 @@
 
 use crate::error::classify;
 use crate::lane_ctx::{LaneLabel, PoisonKind};
+use crate::metrics::FetchCounters;
 use crate::split::SplitRange;
 use crate::trim::RangeTrim;
 use crate::unit::{Origin, quoted};
@@ -199,13 +200,13 @@ pub(crate) struct FetcherParams {
     pub(crate) pause: Arc<AtomicBool>,
     /// First step of the read schedule, [`read_backoff`]; tests shrink it.
     pub(crate) retry_base: Duration,
-    /// `spate_s3_source_get_retries_total`, when metrics are attached.
-    pub(crate) retries: Option<spate_core::metrics::Counter>,
+    /// `spate_s3_source_get_retries_total` and
+    /// `spate_s3_source_bytes_read_total`, when metrics are attached. The
+    /// fetcher counts the bytes a ranged read fetches and trims; the lane
+    /// counts the bytes it forwards.
+    pub(crate) counters: Option<FetchCounters>,
     /// The byte range of the slice's one member, for a ranged unit.
     pub(crate) range: Option<SplitRange>,
-    /// `spate_s3_source_bytes_read_total`, counting the bytes a ranged read
-    /// fetches and trims; the lane counts the bytes it forwards.
-    pub(crate) bytes_read: Option<spate_core::metrics::Counter>,
     /// Where the split's unit came from: a notification may name a version
     /// to read, and a failed precondition on one is an overwrite.
     pub(crate) origin: Origin,
@@ -234,9 +235,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         tx,
         pause,
         retry_base,
-        retries,
+        counters,
         range,
-        bytes_read,
         origin,
     } = params;
     let mut ahead = ReadAhead::default();
@@ -284,7 +284,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
                         start: 0,
                         end: (range_bytes.max(1) as u64).min(later.size),
                         retry_base,
-                        retries: retries.clone(),
+                        counters: counters.clone(),
                         origin: origin.clone(),
                     })
                 }),
@@ -300,8 +300,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             &tx,
             &pause,
             retry_base,
-            retries.as_ref(),
-            bytes_read.as_ref(),
+            counters.as_ref(),
             &origin,
             &mut ahead,
             next,
@@ -355,7 +354,7 @@ struct WindowRead {
     start: u64,
     end: u64,
     retry_base: Duration,
-    retries: Option<spate_core::metrics::Counter>,
+    counters: Option<FetchCounters>,
     origin: Origin,
 }
 
@@ -413,7 +412,7 @@ impl WindowRead {
                         &self.etag,
                         self.start,
                         self.retry_base,
-                        self.retries.as_ref(),
+                        self.counters.as_ref(),
                     )
                     .await);
                 }
@@ -424,7 +423,7 @@ impl WindowRead {
                         &e,
                         self.start,
                         &mut budget,
-                        self.retries.as_ref(),
+                        self.counters.as_ref(),
                     )
                     .await?;
                 }
@@ -546,8 +545,7 @@ async fn stream_object(
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
     retry_base: Duration,
-    retries: Option<&spate_core::metrics::Counter>,
-    bytes_read: Option<&spate_core::metrics::Counter>,
+    counters: Option<&FetchCounters>,
     origin: &Origin,
     ahead: &mut ReadAhead,
     next: Option<WindowRead>,
@@ -570,8 +568,7 @@ async fn stream_object(
                 tx,
                 pause,
                 retry_base,
-                retries,
-                bytes_read,
+                counters,
                 origin,
                 ahead,
                 next,
@@ -591,7 +588,7 @@ async fn stream_object(
                 tx,
                 pause,
                 retry_base,
-                retries,
+                counters,
                 origin,
             )
             .await
@@ -630,8 +627,7 @@ async fn stream_object_ranged(
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
     retry_base: Duration,
-    retries: Option<&spate_core::metrics::Counter>,
-    bytes_read: Option<&spate_core::metrics::Counter>,
+    counters: Option<&FetchCounters>,
     origin: &Origin,
     ahead: &mut ReadAhead,
     mut next: Option<WindowRead>,
@@ -655,7 +651,7 @@ async fn stream_object_ranged(
         start,
         end,
         retry_base,
-        retries: retries.cloned(),
+        counters: counters.cloned(),
         origin: origin.clone(),
     };
     // `delivered` is the GET position of the window in hand.
@@ -673,8 +669,8 @@ async fn stream_object_ranged(
         let mut bytes = match &mut trim {
             Some(trim) => {
                 let owned = trim.feed(delivered, buffered);
-                if let Some(counter) = bytes_read {
-                    counter.increment(read - owned.len() as u64);
+                if let Some(counters) = counters {
+                    counters.read(read - owned.len() as u64);
                 }
                 owned
             }
@@ -736,7 +732,7 @@ async fn stream_object_streaming(
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
     retry_base: Duration,
-    retries: Option<&spate_core::metrics::Counter>,
+    counters: Option<&FetchCounters>,
     origin: &Origin,
 ) -> Result<bool, SplitFailure> {
     let path = object_path(split, entry)?;
@@ -754,7 +750,7 @@ async fn stream_object_streaming(
         let result = match store.get_opts(&path, options).await {
             Ok(r) => r,
             Err(e) => {
-                retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await?;
+                retry_or_fail(split, entry, &e, delivered, &mut budget, counters).await?;
                 continue 'attempts;
             }
         };
@@ -801,7 +797,7 @@ async fn stream_object_streaming(
                             ),
                         ));
                     }
-                    retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await?;
+                    retry_or_fail(split, entry, &e, delivered, &mut budget, counters).await?;
                     continue 'attempts;
                 }
                 None => return Ok(true),
@@ -840,7 +836,7 @@ async fn head_after_overwrite(
     pinned: &str,
     delivered: u64,
     retry_base: Duration,
-    retries: Option<&spate_core::metrics::Counter>,
+    counters: Option<&FetchCounters>,
 ) -> SplitFailure {
     let mut budget = ReadBudget::new(retry_base);
     loop {
@@ -867,7 +863,7 @@ async fn head_after_overwrite(
             }
             Err(e) => {
                 if let Err(failure) =
-                    retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await
+                    retry_or_fail(split, entry, &e, delivered, &mut budget, counters).await
                 {
                     let headed = |reason: String| {
                         format!("{reason} (the HEAD after the store refused the pinned read)")
@@ -972,7 +968,7 @@ async fn retry_or_fail(
     e: &object_store::Error,
     delivered: u64,
     budget: &mut ReadBudget,
-    retries: Option<&spate_core::metrics::Counter>,
+    counters: Option<&FetchCounters>,
 ) -> Result<(), SplitFailure> {
     if classify(e) != ErrorClass::Retryable {
         let reason = format!(
@@ -1013,8 +1009,8 @@ async fn retry_or_fail(
     tokio::time::sleep(delay).await;
     // Counted once the backoff ends, so a fetcher aborted while it waits
     // counts no attempt it never made.
-    if let Some(c) = retries {
-        c.increment(1);
+    if let Some(counters) = counters {
+        counters.get_retried();
     }
     Ok(())
 }
@@ -1527,9 +1523,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
@@ -1608,9 +1603,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
@@ -1801,9 +1795,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
@@ -1838,9 +1831,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
@@ -1875,9 +1867,8 @@ mod tests {
             tx,
             pause: Arc::clone(&pause),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
@@ -1916,9 +1907,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
@@ -1979,9 +1969,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         }
     }
@@ -2553,7 +2542,10 @@ mod tests {
             let retried = Arc::new(AtomicU64::new(0));
             let (tx, mut rx) = mpsc::channel(DEPTH);
             let task = tokio::spawn(run_fetcher(FetcherParams {
-                retries: Some(spate_core::metrics::Counter::from_arc(Arc::clone(&retried))),
+                counters: Some(FetchCounters::from_handles(
+                    spate_core::metrics::Counter::from_arc(Arc::clone(&retried)),
+                    spate_core::metrics::Counter::noop(),
+                )),
                 ..fetcher(store, slice, 64, 64, tx)
             }));
             let msgs = drain(&mut rx).await;
@@ -2918,9 +2910,8 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(true)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: None,
             range: None,
-            bytes_read: None,
             origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
@@ -3282,9 +3273,8 @@ mod tests {
                 tx,
                 pause: Arc::new(AtomicBool::new(false)),
                 retry_base: Duration::from_millis(1),
-                retries: None,
+                counters: None,
                 range,
-                bytes_read: None,
                 origin: Origin::Lister,
             }),
             rt.handle(),
@@ -3493,9 +3483,11 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries: None,
+            counters: Some(FetchCounters::from_handles(
+                spate_core::metrics::Counter::noop(),
+                spate_core::metrics::Counter::from_arc(Arc::clone(&trimmed)),
+            )),
             range: Some(SplitRange::new(8, 21, b'\n')),
-            bytes_read: Some(spate_core::metrics::Counter::from_arc(Arc::clone(&trimmed))),
             origin: Origin::Lister,
         }));
         let mut msgs = Vec::new();
@@ -3734,9 +3726,10 @@ mod tests {
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
-            retries,
+            counters: retries.map(|retries| {
+                FetchCounters::from_handles(retries, spate_core::metrics::Counter::noop())
+            }),
             range: None,
-            bytes_read: None,
             origin,
         }));
         let mut msgs = Vec::new();

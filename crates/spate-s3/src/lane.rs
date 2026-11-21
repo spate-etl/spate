@@ -32,7 +32,7 @@ use crate::config::Compression;
 use crate::fetch::{ChunkMsg, SplitFailure};
 use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
-use crate::metrics::S3Metrics;
+use crate::metrics::S3SourceMetrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::clock::deadline_after;
@@ -133,7 +133,7 @@ pub struct S3Lane {
     watermark_candidate: i64,
     /// Sticky terminal failure: every later poll re-reports it.
     failed: Option<(ErrorClass, String)>,
-    metrics: Option<S3Metrics>,
+    metrics: Option<S3SourceMetrics>,
     /// Decoded bytes already counted into the metrics.
     decoded_reported: u64,
 }
@@ -166,7 +166,7 @@ impl S3Lane {
         tracker: Arc<SplitTracker>,
         poison_tx: std_mpsc::Sender<PoisonReport>,
         waker: FeedWaker,
-        metrics: Option<S3Metrics>,
+        metrics: Option<S3SourceMetrics>,
     ) -> S3Lane {
         let watermark_candidate = resume.map_or(0, |p| {
             p.encode()
@@ -320,9 +320,9 @@ impl S3Lane {
         }
         let counted = self.tracker.object_done();
         if let Some(m) = &self.metrics {
-            m.objects_completed.increment(1);
+            m.object_completed();
             if counted {
-                m.remaining_objects.decrement(1.0);
+                m.remaining_objects_settled(1);
             }
         }
         self.report_decoded();
@@ -376,7 +376,7 @@ impl S3Lane {
             }
             ChunkMsg::Chunk(bytes) => {
                 if let Some(m) = &self.metrics {
-                    m.bytes_read.increment(bytes.len() as u64);
+                    m.bytes_read(bytes.len() as u64);
                 }
                 if let Err(e) = self.framer.push_chunk(bytes) {
                     self.poison_decode(&e);
@@ -428,8 +428,7 @@ impl S3Lane {
     fn report_decoded(&mut self) {
         if let Some(m) = &self.metrics {
             let total = self.framer.decoded_bytes();
-            m.bytes_decoded
-                .increment(total.saturating_sub(self.decoded_reported));
+            m.bytes_decoded(total.saturating_sub(self.decoded_reported));
             self.decoded_reported = total;
         }
     }

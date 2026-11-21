@@ -468,7 +468,7 @@ impl Harness {
                     .expect("sink config"),
             )
             .expect("sink")
-            .build::<spate::deser::Owned<Event>>(),
+            .connect::<spate::deser::Owned<Event>>(),
         );
         let sink = sink.expect("schema fetch");
         let schema = sink.schema();

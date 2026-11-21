@@ -148,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .deserialize_into()?;
     let compression = compression_name(sink_config.compression);
     let sink = pipeline.block_on(
-        clickhouse::ClickHouseSinkBuilder::new(sink_config)?.build::<Owned<OrderLineRow>>(),
+        clickhouse::ClickHouseSinkBuilder::new(sink_config)?.connect::<Owned<OrderLineRow>>(),
     )?;
     let router = sink.router::<Owned<OrderLineRow>>(order_key);
     let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);

@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spate::clickhouse::ClickHouseSinkBuilder::from_component_config(
             pipeline.config().sink_config("default")?,
         )?
-        .build::<Owned<Row>>(),
+        .connect::<Owned<Row>>(),
     )?;
 
     let report = pipeline

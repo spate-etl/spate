@@ -28,7 +28,7 @@ async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .build::<Owned<Order>>()
+        .connect::<Owned<Order>>()
         .await
         .expect("schema fetch")
 }

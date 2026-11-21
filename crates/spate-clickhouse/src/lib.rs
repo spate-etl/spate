@@ -99,7 +99,7 @@
 //!
 //! let sink = pipeline.block_on(
 //!     spate_clickhouse::ClickHouseSinkBuilder::from_component_config(section)?
-//!         .build::<Owned<OrderRow>>(),
+//!         .connect::<Owned<OrderRow>>(),
 //! )?;
 //! let encoder = ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema());
 //! ```
@@ -107,7 +107,7 @@
 //! [`ClickHouseSinkBuilder::from_component_config`] turns that section into a
 //! [`ClickHouseSinkBuilder`], holding per-shard
 //! [`ClickHouseEndpoint`]s and the sink-pool configuration but no row type
-//! yet; [`ClickHouseSinkBuilder::build`] supplies it, reads the
+//! yet; [`ClickHouseSinkBuilder::connect`] supplies it, reads the
 //! table's columns from every replica, and generates the
 //! [`ClickHouseWriter`] (the framework's `ShardWriter`) from both.
 //! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a

@@ -57,7 +57,7 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
     .unwrap();
     let sink = ClickHouseSinkBuilder::new(cfg)
         .unwrap()
-        .build::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .unwrap();
     let schema = sink.schema();

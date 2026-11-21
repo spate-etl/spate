@@ -3,7 +3,7 @@
 //!
 //! It answers every request that is not an insert with the
 //! `system.columns` rows it was built with, so a sink built by
-//! `ClickHouseSinkBuilder::new(..).build()` points at it like a real server, and it
+//! `ClickHouseSinkBuilder::new(..).connect()` points at it like a real server, and it
 //! accepts every insert. A request is an insert when its URL carries a
 //! `query` pair, which only the client's insert requests write. The client
 //! validates the schema answer against its `RowBinaryWithNamesAndTypes`
@@ -179,7 +179,7 @@ impl Drop for BenchServer {
 }
 
 /// The writer and the one endpoint of a Native sink over the `events` table
-/// at `url`, built by `ClickHouseSinkBuilder::new(..).build()` as a pipeline builds it.
+/// at `url`, built by `ClickHouseSinkBuilder::new(..).connect()` as a pipeline builds it.
 ///
 /// `compression` is the sink's `compression` value: `lz4`, `zstd:3`, `off`.
 ///
@@ -219,7 +219,7 @@ shards:
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .build::<Owned<EventRow>>()
+        .connect::<Owned<EventRow>>()
         .await
         .expect("the schema fetch")
 }

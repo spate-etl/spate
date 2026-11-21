@@ -4,7 +4,7 @@
 //! [`ClickHouseSinkConfig`];
 //! [`ClickHouseSinkBuilder::from_component_config`] validates it and produces
 //! a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
-//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::build`] supplies
+//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::connect`] supplies
 //! the row type and produces the runnable [`ClickHouseSink`], including its
 //! writer.
 
@@ -621,10 +621,10 @@ impl Default for TimeoutSection {
 /// The sink is built in two steps because the configuration alone cannot
 /// finish it. Its `INSERT` names the row type's columns, and its writer
 /// describes each row with the types read from every replica, so
-/// [`build`](Self::build) takes the row type and reads the table's schema
+/// [`connect`](Self::connect) takes the row type and reads the table's schema
 /// before it produces the runnable [`ClickHouseSink`].
 #[derive(Debug)]
-#[must_use = "await build::<F>() to get a runnable ClickHouseSink"]
+#[must_use = "await connect::<F>() to get a runnable ClickHouseSink"]
 pub struct ClickHouseSinkBuilder {
     cfg: ClickHouseSinkConfig,
     endpoints: Vec<Vec<ClickHouseEndpoint>>,
@@ -707,7 +707,7 @@ impl ClickHouseSinkBuilder {
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
-    /// `builder.build::<Owned<OrderRow>>()`.
+    /// `builder.connect::<Owned<OrderRow>>()`.
     ///
     /// # Errors
     ///
@@ -719,7 +719,9 @@ impl ClickHouseSinkBuilder {
     /// settings check with an error. A replica that gives a request no
     /// answer within `timeouts.startup` fails that request's variant,
     /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
-    pub async fn build<F: crate::ClickHouseRowFamily>(self) -> Result<ClickHouseSink, SchemaError> {
+    pub async fn connect<F: crate::ClickHouseRowFamily>(
+        self,
+    ) -> Result<ClickHouseSink, SchemaError> {
         validate_columns(F::COLUMNS)
             .map_err(|why| SchemaError::Columns(format!("sink.clickhouse: {why}")))?;
 
@@ -812,7 +814,7 @@ pub struct ClickHouseSink {
     format: Format,
     /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
     frame_codec: Option<FrameCodecFactory>,
-    /// The live table's columns, fetched at `build`.
+    /// The live table's columns, fetched at `connect`.
     schema: Arc<RowSchema>,
     /// An independent client set for readiness probing: sharing the insert
     /// clients would report the write path healthy because probing keeps
@@ -826,7 +828,7 @@ pub struct ClickHouseSink {
 
 impl ClickHouseSink {
     /// The live table's columns, in the row struct's field order, as
-    /// [`build`](ClickHouseSinkBuilder::build) fetched them. Hand it to
+    /// [`connect`](ClickHouseSinkBuilder::connect) fetched them. Hand it to
     /// [`crate::ClickHouseEncoder::with_schema`] for the first-record struct
     /// check.
     #[must_use]
@@ -892,7 +894,7 @@ impl ClickHouseSink {
     /// diff. Placement/DDL drift does not error at query time; it silently
     /// returns wrong results under `optimize_skip_unused_shards`.
     ///
-    /// Call **after** [`build`](ClickHouseSinkBuilder::build) and
+    /// Call **after** [`connect`](ClickHouseSinkBuilder::connect) and
     /// **before** the pipeline consumes the sink.
     pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
         match &self.distributed {
@@ -1099,7 +1101,7 @@ fn is_column_name(s: &str) -> bool {
     s.split('.').all(is_identifier)
 }
 
-/// The runtime backstop for [`ClickHouseSinkBuilder::build`]:
+/// The runtime backstop for [`ClickHouseSinkBuilder::connect`]:
 /// `#[derive(ClickHouseRow)]` rejects a duplicate, empty, or malformed
 /// column list at compile time, but a hand-written `ClickHouseRowFamily`
 /// impl (for a borrowed record family, which the blanket impl over
@@ -1496,7 +1498,7 @@ settings: { insert_quorum: "auto" }
         let _in = io.enter();
         let mock = Mock::new();
         let (url, held) = test_startup::silent_after(&io, &mock, 0);
-        let build = bounded_builder(&url, &given, "").build::<spate_core::deser::Owned<IdOnly>>();
+        let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
         let SchemaError::Fetch {
             url: named, reason, ..
@@ -1517,7 +1519,7 @@ settings: { insert_quorum: "auto" }
         let mock = Mock::new();
         mock.add(handlers::provide(id_column()));
         let (url, held) = test_startup::silent_after(&io, &mock, 1);
-        let build = bounded_builder(&url, &given, "").build::<spate_core::deser::Owned<IdOnly>>();
+        let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
         let SchemaError::Settings { url: named, reason } = err else {
             panic!("expected the settings check to fail: {err}");
@@ -1554,7 +1556,7 @@ settings: { insert_quorum: "auto" }
             let sink = io
                 .block_on(
                     bounded_builder(&url, &given, CHECK)
-                        .build::<spate_core::deser::Owned<IdOnly>>(),
+                        .connect::<spate_core::deser::Owned<IdOnly>>(),
                 )
                 .expect("the replica answers the build");
             let checked = async move { sink.validate_distributed().await };
@@ -1587,7 +1589,7 @@ settings: { insert_quorum: "auto" }
             .block_on(
                 ClickHouseSinkBuilder::from_component_config(&component(&section))
                     .unwrap()
-                    .build::<spate_core::deser::Owned<IdOnly>>(),
+                    .connect::<spate_core::deser::Owned<IdOnly>>(),
             )
             .unwrap_err();
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
@@ -1610,9 +1612,9 @@ settings: { insert_quorum: "auto" }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record
     /// family, bypassing the derive's compile-time checks entirely, so
-    /// `build` re-runs them at runtime, before it reaches the server.
+    /// `connect` re-runs them at runtime, before it reaches the server.
     #[tokio::test]
-    async fn build_rejects_a_hand_written_familys_bad_columns() {
+    async fn connect_rejects_a_hand_written_familys_bad_columns() {
         use spate_core::deser::RecFamily;
 
         struct BadColumns;
@@ -1628,7 +1630,7 @@ settings: { insert_quorum: "auto" }
             "table: t\nshards: [{replicas: [\"http://127.0.0.1:1\"]}]",
         ))
         .unwrap()
-        .build::<BadColumns>()
+        .connect::<BadColumns>()
         .await
         .unwrap_err();
         let SchemaError::Columns(msg) = err else {
@@ -1956,7 +1958,8 @@ settings: { insert_quorum: "auto" }
     }
 
     /// The nested section has the same two spellings, and `new` must
-    /// produce one `build` accepts rather than one it rejects.
+    /// produce one `ClickHouseSinkBuilder::new` accepts rather than one it
+    /// rejects.
     #[test]
     fn distributed_check_new_matches_the_yaml_defaults_and_builds() {
         let from_yaml: DistributedCheckSection =

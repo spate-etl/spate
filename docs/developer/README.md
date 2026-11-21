@@ -21,7 +21,7 @@ This guide says how the work is done.
 3. [Commands and CI](03-commands.md) — the working loop, what `cargo xtask ci` runs, what CI adds, and how CI picks what to run.
 4. [Writing a test](04-writing-a-test.md) — where a test lives, which harness to use, and the tools that check a test reaches the code.
 5. [Tests that do not flake](05-flaky-tests.md) — the rules that keep a test passing on every CI runner, and what to do when one fails there.
-6. [Adding a connector crate](06-connector-crate.md) — what a connector crate carries, and the constructors each of its components has.
+6. [Adding a connector crate](06-connector-crate.md) — what a connector crate carries beyond its source.
 7. [Performance](07-performance.md) — the allocation-free per-record path, and the benchmark tiers that measure a change.
 8. [Code and comments](08-code-and-comments.md) — what rustdoc and a comment state, and the reuse rule.
 9. [Before you open a pull request](09-before-review.md) — the checks a review runs, so you can run them first.

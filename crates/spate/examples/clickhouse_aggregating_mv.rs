@@ -129,14 +129,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Sink: ClickHouse, pointed at the Null landing table ────────────────
     // Validated against the *Null* table (plain columns). If this sink is ever
-    // repointed at the AggregatingMergeTree, `build` fails here with an
+    // repointed at the AggregatingMergeTree, `connect` fails here with an
     // actionable "insert into a Null table + MV" error, because the sink
     // cannot write aggregate states directly.
     let sink = pipeline.block_on(
         clickhouse::ClickHouseSinkBuilder::from_component_config(
             pipeline.config().sink_config("default")?,
         )?
-        .build::<Owned<OrderRollup>>(),
+        .connect::<Owned<OrderRollup>>(),
     )?;
     let encoder = ClickHouseEncoder::<Owned<OrderRollup>>::with_schema(sink.schema());
 

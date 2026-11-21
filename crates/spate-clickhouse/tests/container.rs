@@ -173,7 +173,7 @@ shards:
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .build::<Owned<Order>>()
+        .connect::<Owned<Order>>()
         .await
         .expect("schema fetch")
 }
@@ -226,7 +226,7 @@ shards:
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .build::<F>()
+        .connect::<F>()
         .await
 }
 

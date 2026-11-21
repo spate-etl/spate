@@ -149,13 +149,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clickhouse::ClickHouseSinkBuilder::from_component_config(
             pipeline.config().sink_config("payments")?,
         )?
-        .build::<Owned<PaymentRow>>(),
+        .connect::<Owned<PaymentRow>>(),
     )?;
     let refunds_sink = pipeline.block_on(
         clickhouse::ClickHouseSinkBuilder::from_component_config(
             pipeline.config().sink_config("refunds")?,
         )?
-        .build::<Owned<RefundRow>>(),
+        .connect::<Owned<RefundRow>>(),
     )?;
     let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
     let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);

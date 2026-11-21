@@ -52,7 +52,7 @@ distributed_check:
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .build::<Owned<IdName>>()
+        .connect::<Owned<IdName>>()
         .await
         .expect("schema fetch")
 }

@@ -106,9 +106,9 @@ a column's byte width — a `Decimal` scale change within one precision band, a
 with every insert so a server or profile default cannot turn that check off.
 
 `ClickHouseEncoder::<F>` takes its record family independently of
-`connect::<F>()`, so nothing stops naming a different row type at each call site;
-agreement holds only when the same struct names both. Getting this wrong is
-exactly what the first-record check catches.
+`connect::<F>()`, so nothing stops naming a different row type at each call
+site; agreement holds only when the same struct names both. Getting this wrong
+is exactly what the first-record check catches.
 
 ## Related
 

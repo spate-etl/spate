@@ -1,6 +1,8 @@
 **Kafka source, sink and feed run on librdkafka 2.16.0** (`spate-kafka`)
 
-The Kafka connectors now build on `rdkafka` 0.40.0, which bundles librdkafka 2.16.0. In previous versions they built on `rdkafka` 0.39.0 and librdkafka 2.12.1. Two changes in librdkafka are visible to a pipeline.
+The Kafka connectors now build on `rdkafka` 0.40.0, which bundles librdkafka 2.16.0. In previous versions they built on `rdkafka` 0.39.0 and librdkafka 2.12.1. Three changes in librdkafka are visible to a pipeline.
+
+When the brokers a Kafka client has learned report its metadata as stale, or a bootstrap broker's address has changed, the client goes back to the bootstrap servers and resolves their addresses again. Messages waiting to be sent go back to their partitions and are sent once the client knows the new leaders. In previous versions the client could keep asking the brokers that reported its metadata as stale, and keep a connected bootstrap broker at its old address.
 
 The Kafka source no longer commits offsets for an assignment that librdkafka has marked lost, as it does when the consumer's session times out on the client or `max.poll.interval.ms` is exceeded. In previous versions librdkafka sent that commit as it revoked the partitions. With `group.instance.id` set in the source's `rdkafka` map, the broker could answer it with `FENCED_INSTANCE_ID`, which librdkafka treats as fatal, and the run failed. The Kafka feed commits its offsets itself and is unaffected.
 

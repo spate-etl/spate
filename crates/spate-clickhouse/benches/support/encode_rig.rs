@@ -49,8 +49,9 @@ pub(crate) struct Rig<E, T> {
 /// The measured work: a whole chunk through one encoder, with the terminal
 /// stage's per-record seal check on `buffered_bytes`.
 ///
-/// `#[inline(never)]` keeps the body a symbol of its own, outside the callgrind
-/// toggle the benchmark function is wrapped in.
+/// `#[inline(never)]` keeps the loop a named callee inside the collected
+/// region; inlined, the optimizer can move it past the callgrind toggle and
+/// the case counts almost nothing.
 #[inline(never)]
 pub(crate) fn encode_chunk<E, T>(rig: &mut Rig<E, T>)
 where

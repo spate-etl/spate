@@ -70,6 +70,11 @@ struct Rig<T: Send + 'static> {
 /// Summing the shard indices is what keeps the loop alive: the routing
 /// decision is otherwise unobserved, and without a use the optimizer is free
 /// to delete the call being counted.
+///
+/// `#[inline(never)]` keeps the loop a named callee inside the collected
+/// region; inlined, the optimizer can move it past the callgrind toggle and
+/// the case counts almost nothing.
+#[inline(never)]
 fn route_all<T: Send + 'static>(rig: &Rig<T>) -> usize {
     let mut acc = 0usize;
     for rec in &rig.records {

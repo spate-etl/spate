@@ -120,8 +120,9 @@ fn sink_outage_backpressures_and_loses_nothing() {
 /// fails the run.
 ///
 /// Each shard queue fits every row the limit lets the pipeline hold, so the
-/// queues never refuse a send. Backpressure then cannot stop the drivers before
-/// the limit binds, which a frozen sink with small queues can do.
+/// queues never refuse a send, and those rows sit far below the in-flight byte
+/// budget. Backpressure then cannot stop the drivers before the limit binds,
+/// which a frozen sink with small queues can do.
 #[test]
 #[ignore = "requires Docker"]
 fn sink_outage_holds_pending_work_at_its_limit() {

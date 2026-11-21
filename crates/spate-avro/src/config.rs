@@ -60,7 +60,7 @@ pub enum AvroMode {
 }
 
 /// A schema provided inline or from a file. Set exactly one field.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct SchemaSource {
@@ -123,7 +123,7 @@ impl SchemaSource {
 /// Construct with [`RegistrySection::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RegistrySection {
@@ -184,7 +184,7 @@ impl std::fmt::Debug for RegistrySection {
 /// Build one in code with the constructor for its mode,
 /// [`confluent`](Self::confluent), [`raw`](Self::raw) or
 /// [`single_object`](Self::single_object), then set the optional fields.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct AvroDeserializerConfig {
@@ -1202,8 +1202,8 @@ mod tests {
         );
     }
 
-    /// Each mode's constructor sets its mode and required field, and the
-    /// result validates and builds.
+    /// Each mode's constructor sets its mode and required field, equals the
+    /// same section loaded from YAML, and validates and builds.
     #[test]
     fn mode_constructors_set_their_required_field() {
         let rt = runtime();
@@ -1226,6 +1226,17 @@ mod tests {
             confluent.registry.as_ref().map(|r| r.url.as_str()),
             Some("http://127.0.0.1:1")
         );
+        assert_eq!(
+            parsed(&format!("mode: raw\nschema: {{inline: '{SCHEMA}'}}")),
+            raw
+        );
+        assert_eq!(
+            parsed(&format!(
+                "mode: single_object\nschema: {{inline: '{SCHEMA}'}}"
+            )),
+            single
+        );
+        assert_eq!(parsed("registry: {url: 'http://127.0.0.1:1'}"), confluent);
         for config in [raw, single, confluent] {
             config.validate().unwrap();
             build(&config, &rt).unwrap();

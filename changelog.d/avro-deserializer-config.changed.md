@@ -4,7 +4,7 @@ The `deserializer: { avro: ... }` section deserializes into `AvroDeserializerCon
 
 `AvroDeserializerConfig`, `AvroMode` and `SchemaSource` are `#[non_exhaustive]`. Code outside the crate can no longer build the config with a struct literal. Start from `AvroDeserializerConfig::confluent(registry)`, `raw(schema)` or `single_object(schema)` and set the optional fields instead. A `match` on `AvroMode` needs a wildcard arm.
 
-`validate` runs every check that needs no file or network access, and `AvroDeserializerBuilder::new` runs it before it reads a schema file or builds the registry client. Three refusals now come earlier than they did:
+`validate` runs every check that reads no file, parses no schema and makes no network call, and `AvroDeserializerBuilder::new` runs it before it loads and parses a schema or builds the registry client. Three refusals now come earlier than they did:
 
 - In every mode, the mode checks run before `reader_schema` is read.
 - In `raw` and `single_object`, a `prewarm_subjects` list and a `single_object` `reader_schema` are refused before `schema` is read.

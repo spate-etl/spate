@@ -284,9 +284,9 @@ impl AvroDeserializerConfig {
         Ok(cfg)
     }
 
-    /// Checks every rule that needs no file or network access.
-    /// [`AvroDeserializerBuilder::new`] runs it before loading schemas and
-    /// building the registry client.
+    /// Checks every rule that reads no file, parses no schema and makes no
+    /// network call. [`AvroDeserializerBuilder::new`] runs it before loading
+    /// and parsing schemas and building the registry client.
     ///
     /// # Errors
     ///
@@ -294,8 +294,10 @@ impl AvroDeserializerConfig {
     /// the section breaks: in `confluent` mode a `registry.url` that is not
     /// an `http` or `https` URL or carries userinfo, or a `registry.password`
     /// without a `registry.username`; a `negative_cache_ttl` under `100ms`;
-    /// a section the mode does not use or a missing one it needs; and a
-    /// `schema` or `reader_schema` with both `inline` and `path`, or neither.
+    /// a `registry.tls.root_ca` beside a `registry.url` that is not
+    /// `https://`; a section the mode does not use or a missing one it needs;
+    /// and a `schema` or `reader_schema` with both `inline` and `path`, or
+    /// neither.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.checked().map(|_| ())
     }
@@ -402,7 +404,7 @@ impl AvroDeserializerBuilder {
     /// `confluent` mode this reads `registry.tls.root_ca`, and on Linux and
     /// other non-Apple Unix the system trust store. Unlike the JSON builder,
     /// this one can fail after [`AvroDeserializerConfig::validate`] passes,
-    /// because it reads schema files and builds an HTTP client.
+    /// because it reads and parses the schemas and builds an HTTP client.
     ///
     /// # Errors
     ///
@@ -1175,6 +1177,33 @@ mod tests {
         for (case, config, expected) in cases {
             let err = config.validate().expect_err(case);
             assert_eq!(err.to_string(), expected, "{case}");
+        }
+    }
+
+    /// A `schema` or `reader_schema` loaded from YAML with both `inline` and
+    /// `path`, or neither, is refused by name.
+    #[test]
+    fn a_yaml_schema_source_needs_exactly_one_of_inline_or_path() {
+        for (yaml, expected) in [
+            (
+                "mode: raw\nschema: {}",
+                "deserializer.avro.schema: needs exactly one of `inline` or `path`",
+            ),
+            (
+                "mode: raw\nschema: {inline: x, path: /etc/e.avsc}",
+                "deserializer.avro.schema: needs exactly one of `inline` or `path`",
+            ),
+            (
+                "mode: raw\nschema: {inline: x}\nreader_schema: {}",
+                "deserializer.avro.reader_schema: needs exactly one of `inline` or `path`",
+            ),
+            (
+                "mode: raw\nschema: {inline: x}\nreader_schema: {inline: x, path: /etc/e.avsc}",
+                "deserializer.avro.reader_schema: needs exactly one of `inline` or `path`",
+            ),
+        ] {
+            let err = AvroDeserializerConfig::from_component_config(&component(yaml)).unwrap_err();
+            assert_eq!(err.to_string(), expected, "{yaml}");
         }
     }
 

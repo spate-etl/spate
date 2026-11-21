@@ -48,12 +48,10 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 ### Name each type a role uses for the trait it implements
 
-Name an encoder, writer, lane, batch, framer or router `<Vendor><Variant><Noun>`, where the noun is the last word of the framework trait it implements, such as `ClickHouseRowBinaryEncoder` for a `RowEncoder` or `S3Lane` for a `SourceLane`.
-Leave out the variant when the connector has one implementor of that trait, as `KafkaWriter` does.
+Name an encoder, writer, lane, batch, framer or router `<Vendor><Variant><Noun>`, where the noun is the last word of the trait it implements, such as `ClickHouseRowBinaryEncoder` for a `RowEncoder` or `S3Lane` for a `SourceLane`.
+The variant names what sets the type apart, such as its format or its shard placement, as in `ClickHouseDistributedRouter`.
+A connector with one implementor of a trait may leave the variant out, as `KafkaWriter` does.
 A role type keeps its `<Vendor><Role>` name, so `ClickHouseSink` stays as it is although it implements `SinkBundle`.
-
-`KafkaFeedPublisher` is the one exception.
-It implements `Feed` so it can share the feed's publish path, but it reads nothing, so its name says it publishes.
 
 **Why:** the vendor keeps one connector's types apart from another's in an application's imports.
 The variant tells two implementors of one trait apart, as `KafkaJsonEncoder` and `KafkaBytesEncoder` are told apart.

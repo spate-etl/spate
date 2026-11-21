@@ -89,7 +89,7 @@ Hold the handles in a struct in the crate's metrics module, shaped like its peer
 
 - Declare each metric name and each label key the crate adds as a constant in that module.
 - Keep the handle fields private.
-  Callers record through one method per event, such as `JsonDeserMetrics::dropped_malformed`.
+  Callers outside the module record through one function per event, such as `JsonDeserMetrics::dropped_malformed`.
 - When another task records into some of the handles, give it a struct of just those handles with the same shape, such as `LaneCounters` in spate-datagen.
 - Derive `Debug`.
 - Name the struct for its vendor and role, such as `KafkaFeedMetrics`.

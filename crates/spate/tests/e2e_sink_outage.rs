@@ -1,6 +1,7 @@
 //! E2E scenario: sink outage. ClickHouse is paused mid-stream; backpressure
 //! engages (observed via /metrics), and after recovery every record is
-//! delivered, at-least-once with bounded duplicates.
+//! delivered, at-least-once with bounded duplicates. A second scenario widens
+//! the queues so that only `checkpoint.max_pending_batches` holds the backlog.
 //!
 //! Selecting it:
 //!
@@ -15,7 +16,8 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use spate_test::{metric_sum, metric_value};
+use spate::pipeline::RuntimeOptions;
+use spate_test::{HANG, metric_sum};
 use std::time::{Duration, Instant};
 use support::*;
 
@@ -23,8 +25,11 @@ use support::*;
 /// a wave during it.
 const TOTAL: usize = 40_000;
 
+/// Partitions of the scenario topic.
+const PARTITIONS: i32 = 3;
+
 /// Small queues and chunks so the outage visibly backs up into the source
-/// instead of hiding in buffers.
+/// instead of hiding in buffers. The pending-limit scenario widens the queues.
 fn outage_params(name: &'static str, admin_port: u16) -> PipelineParams {
     let mut params = PipelineParams::defaults(name, admin_port);
     params.queue_capacity = 2;
@@ -41,18 +46,15 @@ fn outage_params(name: &'static str, admin_port: u16) -> PipelineParams {
 /// a fast run drained all rows before the pause landed, and an idle sink feels no
 /// outage.
 fn start_outage(h: &Harness, params: &PipelineParams) -> RunningPipeline {
-    let partitions = 3;
-    h.create_topic(&params.topic, partitions);
+    h.create_topic(&params.topic, PARTITIONS);
     h.create_table(&params.table);
-    let all = events(partitions, TOTAL);
+    let all = events(PARTITIONS, TOTAL);
     let (first_wave, second_wave) = all.split_at(15_000);
     h.produce(&params.topic, first_wave);
 
     let pipeline = h.spawn_pipeline(params);
 
-    wait_until(Duration::from_secs(60), "first 10k rows", || {
-        h.count(&params.table) >= 10_000
-    });
+    wait_until(HANG, "first 10k rows", || h.count(&params.table) >= 10_000);
 
     h.pause_clickhouse();
     h.produce(&params.topic, second_wave);
@@ -114,31 +116,27 @@ fn sink_outage_backpressures_and_loses_nothing() {
 }
 
 /// Pins that `checkpoint.max_pending_batches` holds a real backlog at the limit.
-/// The limit sits below what the outage's queues let build up, so without it the
-/// reading passes the limit and the sampler fails the run. It can stop the source
-/// before the queues fill, so this runs apart from the backpressure scenario.
+/// Without the limit the reading passes it during the outage and the sampler
+/// fails the run.
+///
+/// Each shard queue fits every row the limit lets the pipeline hold, so the
+/// queues never refuse a send. Backpressure then cannot stop the drivers before
+/// the limit binds, which a frozen sink with small queues can do.
 #[test]
 #[ignore = "requires Docker"]
 fn sink_outage_holds_pending_work_at_its_limit() {
     let h = Harness::up();
     let mut params = outage_params("e2e-outage-limit", 19192);
     params.max_pending_batches = 4;
+    // A chunk holds at least one row.
+    params.queue_capacity =
+        params.max_pending_batches * PARTITIONS as usize * RuntimeOptions::default().max_records;
     let pipeline = start_outage(&h, &params);
 
     let limit = params.max_pending_batches as f64;
-    wait_until(
-        Duration::from_secs(90),
-        "the pending reading to reach the limit",
-        || {
-            let (_, body) = http_get(pipeline.admin, "/metrics");
-            metric_value(
-                &body,
-                "spate_checkpoint_pending_batches",
-                &[("pipeline", params.name)],
-            )
-            .is_some_and(|pending| pending >= limit)
-        },
-    );
+    wait_until(HANG, "the pending reading to reach the limit", || {
+        pipeline.pending().is_some_and(|pending| pending >= limit)
+    });
     h.unpause_clickhouse();
 
     pipeline.assert_drained(&h, TOTAL as u64);

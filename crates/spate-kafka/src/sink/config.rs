@@ -525,6 +525,16 @@ impl KafkaSink {
     /// creation, so a passthrough that conflicts with the forced durability
     /// settings fails at startup here rather than on the first batch.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_kafka::{KafkaSink, KafkaSinkConfig};
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let sink = KafkaSink::new(KafkaSinkConfig::new("localhost:9092", "orders"))?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a

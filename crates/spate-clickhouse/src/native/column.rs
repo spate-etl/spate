@@ -13,8 +13,9 @@
 //!   the composite prefix-ordering rule fall out for free.
 //!
 //! There is no per-record rollback: a mid-row failure poisons the block and
-//! the encoder refuses to finalize it (see [`NativeEncoder`](super::NativeEncoder)),
-//! so a failed record never leaves a half-written block on the wire.
+//! the encoder refuses to finalize it (see
+//! [`ClickHouseNativeEncoder`](super::ClickHouseNativeEncoder)), so a failed
+//! record never leaves a half-written block on the wire.
 
 use super::NativeError;
 use super::lowcard::LowCard;

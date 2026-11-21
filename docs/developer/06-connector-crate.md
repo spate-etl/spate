@@ -46,6 +46,25 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Checked by:** review.
 
+### Name each type a role uses for the trait it implements
+
+Name an encoder, writer, lane, batch, framer or router `<Vendor><Variant><Noun>`, where the noun is the last word of the framework trait it implements, such as `ClickHouseRowBinaryEncoder` for a `RowEncoder` or `S3Lane` for a `SourceLane`.
+Leave out the variant when the connector has one implementor of that trait, as `KafkaWriter` does.
+A role type keeps its `<Vendor><Role>` name, so `ClickHouseSink` stays as it is although it implements `SinkBundle`.
+
+`KafkaFeedPublisher` is the one exception.
+It implements `Feed` so it can share the feed's publish path, but it reads nothing, so its name says it publishes.
+
+**Why:** the vendor keeps one connector's types apart from another's in an application's imports.
+The variant tells two implementors of one trait apart, as `KafkaJsonEncoder` and `KafkaBytesEncoder` are told apart.
+The trait's last word keeps the name short, and it matches how the workspace already names these types.
+
+**Follow:** [`crates/spate-kafka/src/sink/encoder.rs`](repo:crates/spate-kafka/src/sink/encoder.rs).
+
+**Departs:** spate-json's `NdjsonFramer` ([#2336](https://github.com/spate-etl/spate/issues/2336)).
+
+**Checked by:** review.
+
 ### Suffix a config `Config` and a nested block `Section`
 
 Name the type a component is built from `*Config`, and a block nested inside a YAML section `*Section`, such as core's `CheckpointSection`.

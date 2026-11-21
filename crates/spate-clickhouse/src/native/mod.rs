@@ -8,7 +8,8 @@
 //! ```
 //! A `FORMAT Native` insert body over HTTP is a *stream* of such blocks (they
 //! concatenate), so the sink's per-chunk framing is unchanged: each
-//! [`crate::native::NativeEncoder`]-produced chunk is one complete block.
+//! [`crate::native::ClickHouseNativeEncoder`]-produced chunk is one complete
+//! block.
 //!
 //! The encoder is **type-driven**: it needs each column's ClickHouse type to
 //! lay bytes out columnar, so it is built from a fetched [`RowSchema`]. The
@@ -133,10 +134,10 @@ impl NativeError {
     }
 }
 
-/// The immutable, `clickhouse`-free column template a [`NativeEncoder`] is
-/// built from: the validated, struct-ordered `(name, parsed type, raw type
-/// string)` columns plus the validation mode they were fetched under, which
-/// the encoder's first-record struct check applies.
+/// The immutable, `clickhouse`-free column template a
+/// [`ClickHouseNativeEncoder`] is built from: the validated, struct-ordered
+/// `(name, parsed type, raw type string)` columns plus the validation mode they
+/// were fetched under, which the encoder's first-record struct check applies.
 #[derive(Debug)]
 pub struct NativeSchema {
     expected: RowSchema,
@@ -222,13 +223,13 @@ impl NativeSchema {
 /// in [`finish_chunk`](RowEncoder::finish_chunk).
 ///
 /// `F` is the **record family**: `Owned<T>` for plain owned row structs
-/// (`NativeEncoder::<Owned<MyRow>>::new(schema)`), or a borrowed family for
-/// zero-copy pipelines. Any family whose records implement `Serialize` at
-/// every lifetime encodes.
+/// (`ClickHouseNativeEncoder::<Owned<MyRow>>::new(schema)`), or a borrowed
+/// family for zero-copy pipelines. Any family whose records implement
+/// `Serialize` at every lifetime encodes.
 ///
 /// Cloning mints a fresh, empty encoder over the same schema; the terminal
 /// stage clones one per shard.
-pub struct NativeEncoder<F> {
+pub struct ClickHouseNativeEncoder<F> {
     schema: Arc<NativeSchema>,
     columns: Vec<ColumnWriter>,
     rows: u32,
@@ -250,12 +251,12 @@ pub struct NativeEncoder<F> {
     _row: PhantomData<fn(F)>,
 }
 
-impl<F> NativeEncoder<F> {
+impl<F> ClickHouseNativeEncoder<F> {
     /// A Native encoder for the columns described by `schema`.
     #[must_use]
     pub fn new(schema: Arc<NativeSchema>) -> Self {
         let columns = schema.fresh_columns();
-        NativeEncoder {
+        ClickHouseNativeEncoder {
             schema,
             columns,
             rows: 0,
@@ -311,24 +312,24 @@ impl<F> NativeEncoder<F> {
     }
 }
 
-impl<F> Clone for NativeEncoder<F> {
+impl<F> Clone for ClickHouseNativeEncoder<F> {
     fn clone(&self) -> Self {
         // A per-shard clone is a fresh, empty encoder over the same schema —
         // never a copy of another shard's buffered rows.
-        NativeEncoder::new(Arc::clone(&self.schema))
+        ClickHouseNativeEncoder::new(Arc::clone(&self.schema))
     }
 }
 
-impl<F> fmt::Debug for NativeEncoder<F> {
+impl<F> fmt::Debug for ClickHouseNativeEncoder<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NativeEncoder")
+        f.debug_struct("ClickHouseNativeEncoder")
             .field("columns", &self.schema.columns().len())
             .field("rows", &self.rows)
             .finish()
     }
 }
 
-impl<F> RowEncoder<F> for NativeEncoder<F>
+impl<F> RowEncoder<F> for ClickHouseNativeEncoder<F>
 where
     F: RecFamily,
     for<'b> F::Rec<'b>: Serialize,
@@ -408,14 +409,14 @@ where
 }
 
 #[cfg(test)]
-impl<T> NativeEncoder<T> {
+impl<T> ClickHouseNativeEncoder<T> {
     /// Encode `rows` into a single Native block and return the bytes. Panics
     /// on encode failure; tests supply matching schema and rows.
     pub(crate) fn block_of<R: Serialize>(
         schema: Arc<NativeSchema>,
         rows: &[R],
     ) -> Result<Vec<u8>, NativeError> {
-        let mut enc = NativeEncoder::<T>::new(schema);
+        let mut enc = ClickHouseNativeEncoder::<T>::new(schema);
         for r in rows {
             r.serialize(RowDispatchSer {
                 columns: &mut enc.columns,

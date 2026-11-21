@@ -3,9 +3,9 @@
 //! `xxHash64(<key column>)` would.
 //!
 //! Inserting directly into shard-local tables is this sink's whole design;
-//! [`DistributedRouter`] is what lets SELECTs through a `Distributed` table
-//! still prune shards (`optimize_skip_unused_shards=1`). It reproduces the
-//! engine's placement of `xxHash64(key) % sum(weights)`, with the remainder
+//! [`ClickHouseDistributedRouter`] is what lets SELECTs through a `Distributed`
+//! table still prune shards (`optimize_skip_unused_shards=1`). It reproduces
+//! the engine's placement of `xxHash64(key) % sum(weights)`, with the remainder
 //! mapped to consecutive half-open weight intervals in **config order** (weights
 //! `[9, 10]` → shard 0 owns `[0, 9)`, shard 1 owns `[9, 19)`).
 //!
@@ -95,10 +95,10 @@ pub type KeyExtractor<F> = for<'a, 'buf> fn(&'a <F as RecFamily>::Rec<'buf>) -> 
 ///
 /// Construct via [`ClickHouseSink::router`](crate::ClickHouseSink::router)
 /// so weights come from the validated config and cannot disagree with the
-/// endpoint topology; [`DistributedRouter::new`] is the programmatic
+/// endpoint topology; [`ClickHouseDistributedRouter::new`] is the programmatic
 /// escape hatch. Cloning is free (a fn pointer and a shared weights
 /// table); the terminal stage clones one router per pipeline thread.
-pub struct DistributedRouter<F: RecFamily> {
+pub struct ClickHouseDistributedRouter<F: RecFamily> {
     extract: KeyExtractor<F>,
     /// Exclusive prefix-sum interval ends; `ends[last]` = total weight.
     ends: Arc<[u64]>,
@@ -106,7 +106,7 @@ pub struct DistributedRouter<F: RecFamily> {
     uniform: bool,
 }
 
-impl<F: RecFamily> DistributedRouter<F> {
+impl<F: RecFamily> ClickHouseDistributedRouter<F> {
     /// Programmatic constructor: weights in shard-config order, each
     /// `>= 1`. Prefer [`ClickHouseSink::router`](crate::ClickHouseSink::router),
     /// which sources weights from the validated YAML.
@@ -117,12 +117,12 @@ impl<F: RecFamily> DistributedRouter<F> {
     pub fn new(extract: KeyExtractor<F>, weights: &[u32]) -> Result<Self, ConfigError> {
         if weights.is_empty() {
             return Err(ConfigError::Validation(
-                "DistributedRouter requires at least one shard weight".into(),
+                "ClickHouseDistributedRouter requires at least one shard weight".into(),
             ));
         }
         if let Some(i) = weights.iter().position(|&w| w == 0) {
             return Err(ConfigError::Validation(format!(
-                "DistributedRouter shard {i} has weight 0; ClickHouse weights are \
+                "ClickHouseDistributedRouter shard {i} has weight 0; ClickHouse weights are \
                  interval widths and must be at least 1"
             )));
         }
@@ -132,7 +132,7 @@ impl<F: RecFamily> DistributedRouter<F> {
             acc += u64::from(w);
             ends.push(acc);
         }
-        Ok(DistributedRouter {
+        Ok(ClickHouseDistributedRouter {
             extract,
             ends: ends.into(),
             uniform: weights.iter().all(|&w| w == 1),
@@ -177,7 +177,7 @@ impl<F: RecFamily> DistributedRouter<F> {
     }
 }
 
-impl<F: RecFamily> RecordRouter<F> for DistributedRouter<F> {
+impl<F: RecFamily> RecordRouter<F> for ClickHouseDistributedRouter<F> {
     #[inline]
     fn route_record<'buf>(&self, rec: &Record<F::Rec<'buf>>, num_shards: usize) -> usize {
         // Silent misrouting is the failure this router prevents;
@@ -185,7 +185,7 @@ impl<F: RecFamily> RecordRouter<F> for DistributedRouter<F> {
         assert_eq!(
             num_shards,
             self.ends.len(),
-            "DistributedRouter was built for {} shard(s) but the sink has {num_shards}; \
+            "ClickHouseDistributedRouter was built for {} shard(s) but the sink has {num_shards}; \
              construct it via ClickHouseSink::router so the topologies cannot drift",
             self.ends.len()
         );
@@ -195,9 +195,9 @@ impl<F: RecFamily> RecordRouter<F> for DistributedRouter<F> {
 
 // Manual impls: derives would demand `F: Clone`/`F: Debug`, and family
 // markers are bare unit structs.
-impl<F: RecFamily> Clone for DistributedRouter<F> {
+impl<F: RecFamily> Clone for ClickHouseDistributedRouter<F> {
     fn clone(&self) -> Self {
-        DistributedRouter {
+        ClickHouseDistributedRouter {
             extract: self.extract,
             ends: Arc::clone(&self.ends),
             uniform: self.uniform,
@@ -205,9 +205,9 @@ impl<F: RecFamily> Clone for DistributedRouter<F> {
     }
 }
 
-impl<F: RecFamily> fmt::Debug for DistributedRouter<F> {
+impl<F: RecFamily> fmt::Debug for ClickHouseDistributedRouter<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DistributedRouter")
+        f.debug_struct("ClickHouseDistributedRouter")
             .field("ends", &self.ends)
             .field("uniform", &self.uniform)
             .finish_non_exhaustive()
@@ -246,7 +246,8 @@ mod tests {
 
     #[test]
     fn equal_weights_reduce_to_hash_modulo_shard_count() {
-        let router = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 1, 1, 1]).unwrap();
+        let router =
+            ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 1, 1, 1]).unwrap();
         for h in [0u64, 1, 3, 4, 17, u64::MAX, 0xEF46_DB37_51D8_E999] {
             assert_eq!(router.shard_for_hash(h), (h % 4) as usize, "hash {h}");
         }
@@ -256,7 +257,8 @@ mod tests {
     fn weight_intervals_match_the_distributed_nine_ten_example() {
         // The ClickHouse docs' example: weights 9 and 10, with remainders
         // [0, 9) belonging to the first shard and [9, 19) to the second.
-        let router = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[9, 10]).unwrap();
+        let router =
+            ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[9, 10]).unwrap();
         for r in 0..9u64 {
             assert_eq!(router.shard_for_hash(r), 0, "remainder {r}");
         }
@@ -273,16 +275,16 @@ mod tests {
         // ClickHouse 26.3 server (`SELECT hex(xxHash64('abc')), ...`);
         // the container suite re-pins them against the server.
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("")),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("")),
             0xEF46_DB37_51D8_E999
         );
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("abc")),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("abc")),
             0x44BC_2CF5_AD77_0999
         );
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::Bytes(b"abc")),
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("abc")),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::Bytes(b"abc")),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::Str("abc")),
             "Str and Bytes hash identically for the same bytes"
         );
     }
@@ -294,20 +296,22 @@ mod tests {
         // little-endian fixed-width byte interpretation rather than internal
         // consistency alone.
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
             0xB556_806F_B6D1_4353,
         );
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U32(42)),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::U32(42)),
             0xD756_D7B6_2FC5_0BF1,
         );
         assert_eq!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::Bytes(&42u64.to_le_bytes())),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::Bytes(
+                &42u64.to_le_bytes()
+            )),
         );
         assert_ne!(
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U32(42)),
-            DistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::U32(42)),
+            ClickHouseDistributedRouter::<OwnedBytes>::hash_key(ShardKey::U64(42)),
             "the declared column width is part of the hash input"
         );
     }
@@ -317,7 +321,7 @@ mod tests {
         fn empty_key(_rec: &Vec<u8>) -> ShardKey<'_> {
             ShardKey::Str("")
         }
-        let router = DistributedRouter::<OwnedBytes>::new(empty_key, &[1, 1]).unwrap();
+        let router = ClickHouseDistributedRouter::<OwnedBytes>::new(empty_key, &[1, 1]).unwrap();
         let rec = record(vec![7]);
         let shard = RecordRouter::route_record(&router, &rec, 2);
         assert_eq!(shard, (0xEF46_DB37_51D8_E999u64 % 2) as usize);
@@ -325,9 +329,9 @@ mod tests {
 
     #[test]
     fn new_rejects_zero_weights_and_empty_weight_lists() {
-        let empty = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[]);
+        let empty = ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[]);
         assert!(empty.is_err(), "empty weights must be rejected");
-        let zero = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 0, 1]);
+        let zero = ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 0, 1]);
         let msg = zero.unwrap_err().to_string();
         assert!(msg.contains("shard 1"), "names the offending shard: {msg}");
     }
@@ -335,7 +339,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "built for 2 shard(s) but the sink has 3")]
     fn route_panics_when_topology_disagrees_with_construction() {
-        let router = DistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 1]).unwrap();
+        let router =
+            ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[1, 1]).unwrap();
         let rec = record(vec![7]);
         let _ = RecordRouter::route_record(&router, &rec, 3);
     }
@@ -346,7 +351,7 @@ mod tests {
             ShardKey::Str(rec.key)
         }
 
-        let router = DistributedRouter::<EvFam>::new(key_of, &[1, 1]).unwrap();
+        let router = ClickHouseDistributedRouter::<EvFam>::new(key_of, &[1, 1]).unwrap();
         let rec = record(Ev { key: "abc" });
         assert_eq!(
             RecordRouter::route_record(&router, &rec, 2),
@@ -360,7 +365,7 @@ mod tests {
         // over the `Rec<'buf>` GAT as well as the coercion.
         let extract: KeyExtractor<EvFam> = |rec| ShardKey::Str(rec.key);
 
-        let router = DistributedRouter::<EvFam>::new(extract, &[1, 1]).unwrap();
+        let router = ClickHouseDistributedRouter::<EvFam>::new(extract, &[1, 1]).unwrap();
         let rec = record(Ev { key: "abc" });
         assert_eq!(
             RecordRouter::route_record(&router, &rec, 2),

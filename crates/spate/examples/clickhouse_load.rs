@@ -66,8 +66,8 @@
 use serde::{Deserialize, Serialize};
 use spate::avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
 use spate::clickhouse::{
-    self, ClickHouseRow, ClickHouseSinkConfig, Compression, DateTime64Millis, NativeEncoder,
-    ShardKey,
+    self, ClickHouseNativeEncoder, ClickHouseRow, ClickHouseSinkConfig, Compression,
+    DateTime64Millis, ShardKey,
 };
 use spate::datagen::{DatagenSource, EVENT_SCHEMA_JSON};
 use spate::prelude::*;
@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clickhouse::ClickHouseSinkBuilder::new(sink_config)?.connect::<Owned<OrderLineRow>>(),
     )?;
     let router = sink.router::<Owned<OrderLineRow>>(order_key);
-    let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
+    let encoder = ClickHouseNativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
 
     let started = Instant::now();
     let report = pipeline

@@ -3,7 +3,7 @@
 // These tests use ONE real ClickHouse server to pin down two things the whole
 // Distributed-parity feature rests on:
 //
-//   1. that `DistributedRouter::hash_key` reproduces the server's own
+//   1. that `ClickHouseDistributedRouter::hash_key` reproduces the server's own
 //      `xxHash64(...)` bit-for-bit (the placement oracle; if this drifts,
 //      every parity claim is void), and
 //   2. that `validate_distributed()` reads a real `Distributed` table's DDL
@@ -18,7 +18,7 @@
 use super::*;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::ClickHouseSinkConfig;
-use spate_clickhouse::{DistributedRouter, ShardKey};
+use spate_clickhouse::{ClickHouseDistributedRouter, ShardKey};
 use spate_core::deser::Owned;
 
 /// The concrete family the (family-generic but family-agnostic) `hash_key`
@@ -58,7 +58,7 @@ distributed_check:
 }
 
 /// The live oracle: the server's `xxHash64` over strings and both integer
-/// widths must equal `DistributedRouter::hash_key` for the matching
+/// widths must equal `ClickHouseDistributedRouter::hash_key` for the matching
 /// [`ShardKey`], byte-for-byte. Every other parity claim in this crate is
 /// downstream of this equality holding on a real server.
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn server_hash_parity_holds_for_string_and_u64_keys() {
         .await
         .expect("hash oracle query");
 
-    let ours = |k| format!("{:016X}", DistributedRouter::<Fam>::hash_key(k));
+    let ours = |k| format!("{:016X}", ClickHouseDistributedRouter::<Fam>::hash_key(k));
     assert_eq!(
         empty,
         ours(ShardKey::Str("")),

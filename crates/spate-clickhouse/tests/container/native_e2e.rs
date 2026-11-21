@@ -1,17 +1,17 @@
 // ---- Native format: end-to-end against a real server --------------------------
 //
 // Proves the columnar encoder against ClickHouse itself: row 1 is inserted
-// through the NativeEncoder (`INSERT ... FORMAT Native`), then read back and
-// compared to what we sent. The server is the arbiter: it parses our block
-// bytes into its own columnar storage and re-serializes for the read, so a
-// misencoded column fails the write or diverges on read-back. The table
+// through the ClickHouseNativeEncoder (`INSERT ... FORMAT Native`), then read
+// back and compared to what we sent. The server is the arbiter: it parses our
+// block bytes into its own columnar storage and re-serializes for the read, so
+// a misencoded column fails the write or diverges on read-back. The table
 // deliberately exercises the Native-specific risk cases the `wide` table
 // lacks: Array(LowCardinality) (the prefix-ordering rule), Map(LowCardinality),
 // Array(Nullable), and LowCardinality(Nullable).
 
 use super::*;
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use spate_clickhouse::{DateTime64Millis, Decimal64, NativeEncoder};
+use spate_clickhouse::{ClickHouseNativeEncoder, DateTime64Millis, Decimal64};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use uuid::Uuid;
@@ -143,7 +143,7 @@ async fn native_format_round_trips_through_a_real_server() {
     let native_schema = sink
         .native_schema()
         .expect("fetch native schema from system.columns");
-    let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
+    let mut encoder = ClickHouseNativeEncoder::<Owned<NativeRow>>::new(native_schema);
     let sent = rows();
     let batch = encode_native_batch(&mut encoder, sent.clone(), "native-1").expect("encode");
     sink.writer
@@ -197,7 +197,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     )
     .await;
     let schema = sink.native_schema().expect("fetch native schema");
-    let mut enc = NativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
+    let mut enc = ClickHouseNativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
     let err = encode_native_batch(
         &mut enc,
         vec![MilliRow {
@@ -222,7 +222,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
         ts: DateTime64Micros,
     }
     const TS_MICROS: i64 = 1_700_000_000_123_456;
-    let mut enc = NativeEncoder::<Owned<MicroRow>>::new(schema);
+    let mut enc = ClickHouseNativeEncoder::<Owned<MicroRow>>::new(schema);
     let batch = encode_native_batch(
         &mut enc,
         vec![MicroRow {
@@ -268,7 +268,7 @@ async fn native_lowcardinality_composites_render_correctly() {
     )
     .await;
     let native_schema = sink.native_schema().expect("native schema");
-    let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
+    let mut encoder = ClickHouseNativeEncoder::<Owned<NativeRow>>::new(native_schema);
     let batch = encode_native_batch(&mut encoder, rows(), "native-2").expect("encode");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)

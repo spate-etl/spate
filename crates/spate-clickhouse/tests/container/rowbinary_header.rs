@@ -45,7 +45,7 @@ async fn a_same_width_alter_is_rejected_rather_than_silently_miswritten() {
     )
     .await;
     let mut encoder =
-        spate_clickhouse::ClickHouseEncoder::<Owned<DriftRow>>::with_schema(sink.schema());
+        spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<DriftRow>>::new(sink.schema());
 
     let batch = encode_batch(&mut encoder, vec![row(1)], "drift-1").expect("encode");
     sink.writer

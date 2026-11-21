@@ -3,7 +3,7 @@
 //! offsets, LowCardinality dictionary). These run without Docker; the
 //! server round-trip (`tests/container.rs`) is the ground-truth oracle.
 
-use super::{NativeEncoder, NativeSchema};
+use super::{ClickHouseNativeEncoder, NativeSchema};
 use crate::schema::typeparse;
 use serde::Serialize;
 use spate_core::deser::Owned;
@@ -14,7 +14,7 @@ fn schema(cols: &[(&str, &str)]) -> Arc<NativeSchema> {
 }
 
 fn block<R: Serialize>(cols: &[(&str, &str)], rows: &[R]) -> Vec<u8> {
-    NativeEncoder::<()>::block_of(schema(cols), rows).expect("encode")
+    ClickHouseNativeEncoder::<()>::block_of(schema(cols), rows).expect("encode")
 }
 
 /// `[VarUInt cols][VarUInt rows]` then per column `[name][type]`.
@@ -544,7 +544,7 @@ mod first_record_check {
     /// writers, as the first-record check cannot probe one.
     #[test]
     fn a_failed_row_poisons_the_block() {
-        let mut enc = NativeEncoder::<Owned<(String,)>>::new(schema(&[("id", "UInt32")]));
+        let mut enc = ClickHouseNativeEncoder::<Owned<(String,)>>::new(schema(&[("id", "UInt32")]));
         let mut buf = BytesMut::new();
 
         let err = enc
@@ -578,7 +578,8 @@ mod first_record_check {
         struct R {
             ts: DateTime64Millis,
         }
-        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
+        let mut enc =
+            ClickHouseNativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
         let err = enc
             .encode(
                 &record(R {
@@ -600,7 +601,8 @@ mod first_record_check {
         struct R {
             ts: DateTime64Millis,
         }
-        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(3)")]));
+        let mut enc =
+            ClickHouseNativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(3)")]));
         let mut buf = BytesMut::new();
         enc.encode(
             &record(R {
@@ -625,7 +627,7 @@ mod first_record_check {
         struct R {
             n: u64,
         }
-        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("n", "Int64")]));
+        let mut enc = ClickHouseNativeEncoder::<Owned<R>>::new(full_schema(&[("n", "Int64")]));
         let err = enc
             .encode(&record(R { n: 1 }), &mut BytesMut::new())
             .expect_err("class mismatch must be rejected");
@@ -641,7 +643,8 @@ mod first_record_check {
         struct R {
             ts: i64,
         }
-        let mut enc = NativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
+        let mut enc =
+            ClickHouseNativeEncoder::<Owned<R>>::new(full_schema(&[("ts", "DateTime64(6)")]));
         enc.encode(
             &record(R {
                 ts: 1_700_000_000_000,
@@ -661,7 +664,7 @@ mod first_record_check {
         struct R {
             ts: DateTime64Millis,
         }
-        let mut enc = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(6)")]));
+        let mut enc = ClickHouseNativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(6)")]));
         let err = enc
             .encode(
                 &record(R {
@@ -674,7 +677,7 @@ mod first_record_check {
         assert_eq!(err.class(), ErrorClass::Fatal);
         assert!(reason.contains("DateTime64Millis"), "{reason}");
 
-        let mut ok = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(3)")]));
+        let mut ok = ClickHouseNativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(3)")]));
         ok.encode(
             &record(R {
                 ts: DateTime64Millis(1),
@@ -693,8 +696,10 @@ mod first_record_check {
             b: u32,
             a: u32,
         }
-        let mut enc =
-            NativeEncoder::<Owned<Swapped>>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
+        let mut enc = ClickHouseNativeEncoder::<Owned<Swapped>>::new(schema(&[
+            ("a", "UInt32"),
+            ("b", "UInt32"),
+        ]));
         let err = enc
             .encode(&record(Swapped { b: 1, a: 2 }), &mut BytesMut::new())
             .expect_err("field-name swap must be rejected");
@@ -710,7 +715,8 @@ mod first_record_check {
             a: u32,
             b: u32,
         }
-        let mut enc = NativeEncoder::<Owned<Ok2>>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
+        let mut enc =
+            ClickHouseNativeEncoder::<Owned<Ok2>>::new(schema(&[("a", "UInt32"), ("b", "UInt32")]));
         let mut buf = BytesMut::new();
         enc.encode(&record(Ok2 { a: 1, b: 2 }), &mut buf)
             .expect("matching names encode");
@@ -738,7 +744,7 @@ mod first_record_check {
         }
         let cols = &[("id", "UInt32"), ("s", "String")];
 
-        let mut owned_enc = NativeEncoder::<Owned<RowOwned>>::new(schema(cols));
+        let mut owned_enc = ClickHouseNativeEncoder::<Owned<RowOwned>>::new(schema(cols));
         let mut owned_buf = BytesMut::new();
         owned_enc
             .encode(
@@ -752,7 +758,7 @@ mod first_record_check {
         owned_enc.finish_chunk(&mut owned_buf).expect("finish");
 
         let text = String::from("zero");
-        let mut ref_enc = NativeEncoder::<RowRefFam>::new(schema(cols));
+        let mut ref_enc = ClickHouseNativeEncoder::<RowRefFam>::new(schema(cols));
         let mut ref_buf = BytesMut::new();
         ref_enc
             .encode(&record(RowRef { id: 9, s: &text }), &mut ref_buf)
@@ -778,8 +784,8 @@ mod lowcard_limit {
 
     /// An encoder over one `LowCardinality(String)` column whose dictionary
     /// holds 2^32 entries.
-    fn full<F>() -> NativeEncoder<F> {
-        let mut enc = NativeEncoder::new(schema(&[("c", "LowCardinality(String)")]));
+    fn full<F>() -> ClickHouseNativeEncoder<F> {
+        let mut enc = ClickHouseNativeEncoder::new(schema(&[("c", "LowCardinality(String)")]));
         let ColumnWriter::LowCard(lc) = &mut enc.columns[0] else {
             panic!("a LowCardinality column");
         };
@@ -886,7 +892,7 @@ mod block_size {
     #[test]
     fn buffered_size_is_the_emitted_block_length() {
         for rows in [1, 2, 4, 5, 17, 255, 256, 257, 300] {
-            let mut enc = NativeEncoder::<Owned<Row>>::new(schema(COLUMNS));
+            let mut enc = ClickHouseNativeEncoder::<Owned<Row>>::new(schema(COLUMNS));
             let mut buf = BytesMut::new();
             for i in 0..rows {
                 enc.encode(&record(row(i)), &mut buf).expect("row encodes");
@@ -913,7 +919,7 @@ mod block_size {
                 .join(", ")
         );
         assert!(enum_type.len() >= 128);
-        let mut enc = NativeEncoder::<Owned<Level>>::new(schema(&[("v", &enum_type)]));
+        let mut enc = ClickHouseNativeEncoder::<Owned<Level>>::new(schema(&[("v", &enum_type)]));
         let mut buf = BytesMut::new();
         enc.encode(&record(Level { v: 1 }), &mut buf)
             .expect("row encodes");
@@ -928,7 +934,7 @@ mod block_size {
     fn buffered_size_counts_a_two_byte_column_count() {
         let names: Vec<String> = (0..130).map(|n| format!("c{n}")).collect();
         let cols: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "UInt8")).collect();
-        let mut enc = NativeEncoder::<Owned<Vec<u8>>>::new(schema(&cols));
+        let mut enc = ClickHouseNativeEncoder::<Owned<Vec<u8>>>::new(schema(&cols));
         let mut buf = BytesMut::new();
         enc.encode(&record(vec![1u8; cols.len()]), &mut buf)
             .expect("row encodes");
@@ -943,7 +949,7 @@ mod block_size {
     #[test]
     fn a_64_kib_target_seals_blocks_of_at_least_64_kib() {
         const TARGET: usize = 64 * 1024;
-        let mut enc = NativeEncoder::<Owned<Row>>::new(schema(COLUMNS));
+        let mut enc = ClickHouseNativeEncoder::<Owned<Row>>::new(schema(COLUMNS));
         let mut blocks = Vec::new();
         let mut rows_in_block = 0;
         for i in 0..20_000 {

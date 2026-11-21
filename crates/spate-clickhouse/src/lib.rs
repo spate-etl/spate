@@ -54,9 +54,9 @@
 //!
 //! # Shard-affinity routing (Distributed parity)
 //!
-//! [`DistributedRouter`] (built via [`ClickHouseSink::router`]) places each
-//! record on the same shard a ClickHouse `Distributed` table with sharding
-//! expression `xxHash64(<key column>)` would, so SELECTs through the
+//! [`ClickHouseDistributedRouter`] (built via [`ClickHouseSink::router`])
+//! places each record on the same shard a ClickHouse `Distributed` table with
+//! sharding expression `xxHash64(<key column>)` would, so SELECTs through the
 //! Distributed table can prune shards (`optimize_skip_unused_shards=1`)
 //! while inserts keep going direct-to-local. The ordering contract is the
 //! operator's: `shards[i]` in the sink config must be the cluster's
@@ -101,7 +101,7 @@
 //!     spate_clickhouse::ClickHouseSinkBuilder::from_component_config(section)?
 //!         .connect::<Owned<OrderRow>>(),
 //! )?;
-//! let encoder = ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema());
+//! let encoder = ClickHouseRowBinaryEncoder::<Owned<OrderRow>>::new(sink.schema());
 //! ```
 //!
 //! [`ClickHouseSinkBuilder::from_component_config`] turns that section into a
@@ -110,8 +110,8 @@
 //! yet; [`ClickHouseSinkBuilder::connect`] supplies it, reads the
 //! table's columns from every replica, and generates the
 //! [`ClickHouseWriter`] (the framework's `ShardWriter`) from both.
-//! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a
-//! record family: owned rows use `Owned<Row>`, and the encode path itself
+//! [`ClickHouseRowBinaryEncoder`] is the matching `RowEncoder`, parameterized
+//! by a record family: owned rows use `Owned<Row>`, and the encode path itself
 //! needs only `Row: serde::Serialize`.
 //!
 //! # Wire format
@@ -122,7 +122,7 @@
 //! transposes each chunk into one self-describing block instead: it costs
 //! more client CPU but cuts server parse CPU and compressed wire size
 //! substantially. Build it via [`ClickHouseSink::native_schema`] and
-//! [`NativeEncoder`].
+//! [`ClickHouseNativeEncoder`].
 
 // `#[derive(ClickHouseRow)]` used inside this crate's own unit tests (part of
 // the lib target's own compilation, unlike an integration test under
@@ -157,9 +157,9 @@ pub use config::{
     DistributedCheckSection, Format, TlsSection,
 };
 pub use distributed::DistributedCheckError;
-pub use encoder::{ClickHouseEncoder, PreEncodedRows};
-pub use native::{NativeEncoder, NativeError, NativeSchema};
-pub use router::{DistributedRouter, KeyExtractor, ShardKey};
+pub use encoder::{ClickHouseBytesEncoder, ClickHouseRowBinaryEncoder};
+pub use native::{ClickHouseNativeEncoder, NativeError, NativeSchema};
+pub use router::{ClickHouseDistributedRouter, KeyExtractor, ShardKey};
 pub use row::{ClickHouseRow, ClickHouseRowFamily};
 pub use rowbinary::{RowBinaryError, serialize_row};
 pub use schema::{RowSchema, SchemaError};

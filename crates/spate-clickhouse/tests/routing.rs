@@ -1,6 +1,7 @@
-//! Docker-free routing seam test: the real [`DistributedRouter`], minted by
-//! [`ClickHouseSinkBuilder::router`] from a validated weighted config, driven
-//! through the framework's actual terminal stage (`chain(...).sink(...)`).
+//! Docker-free routing seam test: the real [`ClickHouseDistributedRouter`],
+//! minted by [`ClickHouseSinkBuilder::router`] from a validated weighted
+//! config, driven through the framework's actual terminal stage
+//! (`chain(...).sink(...)`).
 //!
 //! The router is taken from the builder rather than the sink so this stays
 //! server-free: placement is decided by the configured shard weights, which
@@ -14,7 +15,7 @@
 use bytes::BytesMut;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::ClickHouseSinkConfig;
-use spate_clickhouse::{ClickHouseRow, DistributedRouter, ShardKey};
+use spate_clickhouse::{ClickHouseDistributedRouter, ClickHouseRow, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
@@ -163,9 +164,9 @@ shards:
     // Placement oracle: the same hash + weight-interval selection the unit
     // vectors pin (and the container suite proves against a live server).
     let expect_shard = |sku: &str| {
-        router.shard_for_hash(DistributedRouter::<Owned<SkuRow>>::hash_key(ShardKey::Str(
-            sku,
-        )))
+        router.shard_for_hash(ClickHouseDistributedRouter::<Owned<SkuRow>>::hash_key(
+            ShardKey::Str(sku),
+        ))
     };
 
     let mut seen = Vec::new();

@@ -229,11 +229,11 @@ names the replica and carries the server's `UNKNOWN_SETTING` message.
 
 ## RowBinary on pipeline threads
 
-Encoding is CPU work, so it happens on the pipeline threads: `ClickHouseEncoder`
-(the sink's `RowEncoder`) serializes each row to RowBinary using the crate's own
-serializer. Its type parameter is the record *family*, not the row type, so
-owned rows are wrapped as `Owned<Row>` (e.g.
-`ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema())`), while the
+Encoding is CPU work, so it happens on the pipeline threads:
+`ClickHouseRowBinaryEncoder` (the sink's `RowEncoder`) serializes each row to
+RowBinary using the crate's own serializer. Its type parameter is the record
+*family*, not the row type, so owned rows are wrapped as `Owned<Row>` (e.g.
+`ClickHouseRowBinaryEncoder::<Owned<OrderRow>>::new(sink.schema())`), while the
 encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O
 runtime only merge frames, seal batches, and drive inserts; they never touch a
 record.

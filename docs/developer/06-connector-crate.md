@@ -8,7 +8,7 @@ A connector crate ships a source, a sink, a format or a feed backend, or several
 The first part of this page gives the conventions its public surface follows, so a user meets the same shapes in every connector.
 The second part covers what the crate carries beyond its `src/`.
 
-Each convention states what to do, then why, then a connector that follows it, then what fails when a change breaks it.
+Each convention states what to do, then why, then code that follows it where some does, then what fails when a change breaks it.
 "Review" there means no test or lint checks it, so a reviewer does.
 
 Some shipped code departs from a convention.
@@ -40,19 +40,19 @@ Start the name of every public config type a connector exports with the connecto
 **Why:** two connectors can then both export a `Compression` or a `Format` and an application that imports from both needs no aliases.
 A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
-**Follow:** [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
+**Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `OnError`, `Format`, `SchemaSource`, `Dataset`, `Encoding`, `Clock` and the three `Compression` enums ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** `OnError`, `Format`, `SchemaSource`, `Dataset`, `Encoding`, `Clock`, the three `Compression` enums, `RegistrySection`, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
 
 **Checked by:** review.
 
 ### Suffix a config `Config` and a nested block `Section`
 
-Name the type a component is built from `*Config`, and a block nested inside a YAML section `*Section`, such as `ChunkSection`.
+Name the type a component is built from `*Config`, and a block nested inside a YAML section `*Section`, such as core's `CheckpointSection`.
 
 **Why:** a reader then knows from the name whether a type builds a component or is one part of another config.
 
-**Follow:** [`crates/spate-core/src/config/chunk.rs`](repo:crates/spate-core/src/config/chunk.rs).
+**Follow:** `CheckpointSection` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs).
 
 **Departs:** nested blocks named `*Config`, such as ClickHouse's `ShardConfig` ([#2330](https://github.com/spate-etl/spate/issues/2330), [#1604](https://github.com/spate-etl/spate/issues/1604)).
 
@@ -61,26 +61,26 @@ Name the type a component is built from `*Config`, and a block nested inside a Y
 ### Export every type a role's user names from the crate root
 
 Export from the crate root every public type a user of a role names: the role type, its config, every nested config type, and any type a constructor returns.
-spate-s3 exports `S3Source`, `S3SourceConfig`, `S3Lane` and `S3Batch` from its root.
+The spate-s3 crate exports `S3Source`, `S3SourceConfig`, `S3Lane` and `S3Batch` from its root.
 
 **Why:** a user then reaches every type a connector needs through one path, such as `spate::s3::`.
 The connector's name on each nested type keeps two roots from colliding.
 
 **Follow:** [`crates/spate-s3/src/lib.rs`](repo:crates/spate-s3/src/lib.rs).
 
-**Departs:** `KafkaFeed`, `KafkaEndpoint`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, Kafka's sink `Compression`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 
 ### Build each role through a fallible `new` and `from_component_config`
 
 Give each role type two constructors.
-`new` takes its config, calls the config's public `validate`, and returns `Result<Self, ConfigError>`.
-`from_component_config` takes the role's YAML section, parses the config and goes through the same checks.
-`new` also takes any runtime handle the role needs, as `S3Source::new` takes the I/O runtime's handle.
+The `new` constructor takes its config, calls the config's public `validate`, and returns `Result<Self, ConfigError>`.
+The `from_component_config` constructor takes the role's YAML section, parses the config and goes through the same checks.
+Both also take any runtime handle the role needs, as `S3Source::new` takes the I/O runtime's handle.
 
 A role that needs I/O before it can run, such as the ClickHouse sink reading its table schema, builds in two steps.
-`new` and `from_component_config` return a builder, and the builder's `connect` does the I/O and returns the role, as `ClickHouseSinkBuilder::connect` does.
+Its two constructors return a builder, and the builder's `connect` does the I/O and returns the role, as `ClickHouseSinkBuilder::connect` does.
 
 **Why:** an application that builds a pipeline in code and one that reads YAML reach the same type and the same checks.
 An invalid config fails at construction, as the `ConfigError` the rest of the configuration returns, and never later as text inside a start error.
@@ -117,8 +117,8 @@ One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
 **Why:** a caller then asks "retry or stop?" the same way of every role, and the client's error survives for logging.
 A meaning that belongs to one role, such as `NotReady` on a deserializer, stays on that role.
 
-**Departs:** core's role error types do not have this shape yet, and the ClickHouse sink returns its own `SchemaError` and `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)).
-`FatalError` is not `#[non_exhaustive]` ([#1605](https://github.com/spate-etl/spate/issues/1605)).
+**Departs:** core's role error types have other shapes, and the ClickHouse sink returns its own `SchemaError` and `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)).
+The `FatalError` type is not `#[non_exhaustive]` ([#1605](https://github.com/spate-etl/spate/issues/1605)).
 Until core's types change, a connector uses them as they are.
 
 **Checked by:** review.
@@ -143,14 +143,17 @@ Mark every public config struct and enum `#[non_exhaustive]`.
 **Follow:** [`crates/spate-datagen/src/config.rs`](repo:crates/spate-datagen/src/config.rs).
 
 **Checked by:** review.
-`cargo xtask semver-checks` fails the later change that adds a field to a struct without the attribute.
+The `cargo xtask semver-checks` command fails the later change that adds a field to a struct without the attribute.
 
 ### Read durations with `humantime_serde`, in flat `_timeout` keys
 
 Deserialize every `Duration` field with `humantime_serde`, so the YAML value reads `30s` or `500ms`.
-Name a timeout `<what>_timeout` at the level of the section it belongs to, and let `0s` turn it off.
+Name a timeout `<what>_timeout` at the level of the section it belongs to.
+When a timeout can be turned off, let `0s` turn it off.
 
-**Why:** every duration key in every connector then takes the same syntax, and a timeout is turned off the same way everywhere.
+Some timeouts must stay bounded, such as the Kafka sink's `delivery_timeout`, which refuses `0s` because librdkafka reads zero as no timeout.
+
+**Why:** every duration key in every connector then takes the same syntax, and a timeout that can be off is turned off the same way everywhere.
 
 **Follow:** `startup_timeout` in [`crates/spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs).
 
@@ -175,14 +178,14 @@ Give every byte-size field the type `ByteSize`, so the YAML value reads `1MiB` a
 Put `#[serde(rename_all = "snake_case")]` on every config enum.
 Spell the value that turns a feature off `none`.
 
-The ClickHouse format value `rowbinary` is the one exception, kept with an explicit rename.
+The ClickHouse format value `rowbinary` is the one exception.
+Under `snake_case` it would read `row_binary`, so give that variant an explicit rename that keeps `rowbinary`.
 
 **Why:** a key and its value then read in one case, and a user turns any feature off with the same word.
 
 **Follow:** `PinningMode` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) for the case, and spate-s3's `Compression` in [`crates/spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs) for `none`.
 
-**Departs:** enums renamed `lowercase` or `kebab-case` in spate-clickhouse, spate-datagen, spate-kafka, spate-s3 and core's chunk config, whose values are all one word today.
-The off values `pinning: off` and the ClickHouse `compression` key's `off` alias ([#2324](https://github.com/spate-etl/spate/issues/2324)).
+**Departs:** enums renamed `lowercase` or `kebab-case` in spate-clickhouse, spate-datagen, spate-kafka, spate-s3 and core's chunk config, and the off values `pinning: off` and the ClickHouse `compression` key's `off` alias ([#2324](https://github.com/spate-etl/spate/issues/2324)).
 
 **Checked by:** review.
 
@@ -225,9 +228,9 @@ Until core parses them beside the backend key, a new sink declares them as the s
 
 ### Name a feature for the dependency it enables
 
-Name a crate feature that turns on an optional dependency after that dependency, such as `rust_decimal`.
+Name a crate feature that exists to turn on one optional dependency after that dependency, such as `rust_decimal`.
 Name any other feature in kebab-case.
-The `spate` crate names its features `<connector>-<name>`.
+The `spate` crate exposes a connector's feature as `<connector>-<name>`, such as `clickhouse-rust-decimal`.
 
 A feature makes an optional backend available.
 When the backend is faster for some data and slower for other data, each component chooses it, as the Kafka encoder does with `with_simd_json()`.
@@ -236,7 +239,7 @@ When the backend is faster for some data and slower for other data, each compone
 
 **Follow:** [`crates/spate-clickhouse/Cargo.toml`](repo:crates/spate-clickhouse/Cargo.toml).
 
-**Departs:** spate-json's `simd` feature, which switches the backend for the whole build, and spate-kafka's `json-simd` ([#2321](https://github.com/spate-etl/spate/issues/2321)).
+**Departs:** spate-json's `simd` feature, which switches the backend for the whole build, and spate-kafka's `json-simd` ([#2321](https://github.com/spate-etl/spate/issues/2321)), and spate-datagen's `avro`, which turns on `apache-avro` ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 

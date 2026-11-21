@@ -42,7 +42,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use spate::feed::Feed;
-use spate::json::NdjsonFramer;
+use spate::json::JsonLinesFramer;
 use spate::prelude::*;
 use spate::s3::S3Source;
 use spate::sqs::SqsFeed;
@@ -113,12 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A lister run blocks its thread and refuses a Tokio runtime context, so
     // it runs here on `main`'s thread, before the worker starts.
     S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
         .list_once(&section, Arc::clone(&feed) as Arc<dyn Feed>)?;
     println!("listed {OBJECTS} objects");
 
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)));
     let (sink, script) = capture_sink(1, 1);
     let report = pipeline
         .sink(sink)?

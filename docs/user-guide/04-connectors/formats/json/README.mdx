@@ -61,7 +61,7 @@ deserializer:
   single pass. Error handling is **atomic**: one malformed element drops the
   whole array, or fails it as one payload.
 
-A source that frames its own byte stream supplies this crate's `NdjsonFramer`
+A source that frames its own byte stream supplies this crate's `JsonLinesFramer`
 instead, and then the granularity is derived rather than configured; see
 [Framing vs deserialization](../README.mdx#framing-vs-deserialization).
 
@@ -231,7 +231,7 @@ wrap every decoder. See [Metrics](../../../../METRICS.md).
 - [Kafka source](../../sources/kafka/README.mdx) — a common source of the
   payloads this format decodes.
 - [S3 source](../../sources/s3/README.mdx) — a streaming source, which takes
-  this crate's `NdjsonFramer` to cut objects into records.
+  this crate's `JsonLinesFramer` to cut objects into records.
 - [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail
   for undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch

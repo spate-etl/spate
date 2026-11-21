@@ -151,7 +151,7 @@ impl S3Source {
     /// Set the record framer that cuts each object's byte stream into records.
     /// `spate-s3` is a transport and owns no framing, so this is **required**:
     /// supply the framer for the objects' format (e.g. `spate-json`'s
-    /// `NdjsonFramer` for NDJSON) before the pipeline opens the source.
+    /// `JsonLinesFramer` for NDJSON) before the pipeline opens the source.
     ///
     /// `factory` builds a fresh
     /// [`RecordFramer`](spate_core::framing::RecordFramer) per object (framers are
@@ -591,7 +591,7 @@ impl Source for S3Source {
         let Some(make_framer) = self.framer.clone() else {
             return Err(SourceError::fatal(
                 "S3Source has no record framer; supply one with `with_framer(...)` \
-                         (e.g. spate-json's NdjsonFramer) before running the pipeline",
+                         (e.g. spate-json's JsonLinesFramer) before running the pipeline",
             ));
         };
         // Defense in depth for hand-constructed configs; cheap.
@@ -1994,9 +1994,10 @@ mod tests {
         let (mut source, _rt) = source_over("url: \"s3://b/data/\"\n");
         let err = source.open(ctx()).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(
-            err.reason().starts_with("S3Source has no record framer"),
-            "{err}"
+        assert_eq!(
+            err.reason(),
+            "S3Source has no record framer; supply one with `with_framer(...)` \
+             (e.g. spate-json's JsonLinesFramer) before running the pipeline"
         );
     }
 

@@ -61,7 +61,7 @@
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*
 //!   for the objects' format via
 //!   [`S3Source::with_framer`](crate::S3Source::with_framer) (e.g.
-//!   `spate-json`'s `NdjsonFramer` for NDJSON), emitting one raw payload per
+//!   `spate-json`'s `JsonLinesFramer` for NDJSON), emitting one raw payload per
 //!   framed record. Deserialization then stays in the operator chain
 //!   (`spate-json` etc.), as with the Kafka source.
 //!

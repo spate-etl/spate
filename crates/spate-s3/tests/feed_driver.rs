@@ -471,7 +471,7 @@ fn renew_held_renews_the_unit_the_source_holds() {
 }
 
 /// A framer that declares no resync delimiter.
-struct NoResync(spate_json::NdjsonFramer);
+struct NoResync(spate_json::JsonLinesFramer);
 
 impl spate_core::framing::RecordFramer for NoResync {
     fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {

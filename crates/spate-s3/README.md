@@ -12,7 +12,7 @@ Turn on feature `s3` on the [`spate`](https://crates.io/crates/spate) facade.
 The facade README has the Cargo snippet.
 
 The source also needs a record framer from a format crate, such as
-`NdjsonFramer` behind the `json` feature. A fleet of workers shares a durable
+`JsonLinesFramer` behind the `json` feature. A fleet of workers shares a durable
 feed, from the `sqs` or `kafka` feature. The in-process feed needs no feature.
 
 ## Configuration
@@ -216,7 +216,7 @@ their labels in the
   — a continuous job on a bucket's storage notifications.
 - [Examples index](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/README.md)
   — every example, with the features and infrastructure each needs.
-- [`spate-json`](https://crates.io/crates/spate-json) — `NdjsonFramer`, the
+- [`spate-json`](https://crates.io/crates/spate-json) — `JsonLinesFramer`, the
   framer for NDJSON objects.
 - [`spate-test`](https://crates.io/crates/spate-test) — in-memory sources and
   sinks, for a test with no infrastructure.

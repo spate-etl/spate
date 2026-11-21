@@ -1,7 +1,7 @@
 //! Deterministic newline-delimited byte streams for the framing benches,
 //! counted and wall-clock alike.
 //!
-//! [`NdjsonFramer`](spate_json::NdjsonFramer) knows nothing about JSON beyond
+//! [`JsonLinesFramer`](spate_json::JsonLinesFramer) knows nothing about JSON beyond
 //! the newline convention, so what decides its cost is the *shape* of the byte
 //! stream: how many lines, how wide each one is, how the chunk boundaries fall
 //! against them, which terminator the producer wrote, and how much of the

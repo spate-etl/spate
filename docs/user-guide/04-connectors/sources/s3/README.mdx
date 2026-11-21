@@ -83,7 +83,7 @@ declares the same one.
 The record **format is not a config key**. The S3 source is a transport and
 owns no framing. The format's framer is wired into the source in code (see
 [Decoding records](#decoding-records)); the per-record size bound lives on the
-framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
+framer (e.g. `JsonLinesFramer::new(max_record_bytes)`), not in this table.
 
 A stale config still carrying `lanes` (read parallelism is the feed's
 `units_held`, one data lane per held unit; see
@@ -1076,7 +1076,7 @@ through a
 supplied by the caller, and **deserialization stays in the operator chain**.
 Framing a byte stream is a format concern, so the framer is owned by the format
 crate: for NDJSON, that is [`spate-json`](../../formats/json/README.mdx)'s
-`NdjsonFramer`.
+`JsonLinesFramer`.
 
 `with_framer` takes a factory rather than a framer, because framers are
 per-object stateful and each object gets a fresh one; the bound the framer is
@@ -1104,7 +1104,7 @@ start.
 
 A framer takes part in [byte ranges](#large-objects-and-byte-ranges)
 through `RecordFramer::resync_delimiter`. Returning `Some(byte)` declares that
-a record starts after every occurrence of that byte, which `NdjsonFramer` does
+a record starts after every occurrence of that byte, which `JsonLinesFramer` does
 with `\n`. A format with a header, a byte-order mark, magic bytes or a quoted
 delimiter, as CSV has, returns `None`, which is the default. The source then
 reads every object whole, and logs that at `INFO` when it opens.
@@ -1358,7 +1358,7 @@ noted per family.
   deployment shape, tuning knobs and failure modes.
 - [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — where
   the feed's acknowledgement sits in the at-least-once story.
-- [JSON format](../../formats/json/README.mdx) — the `NdjsonFramer` this source
+- [JSON format](../../formats/json/README.mdx) — the `JsonLinesFramer` this source
   takes, and the deserializer behind it.
 - [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)
   — how the families above are registered.

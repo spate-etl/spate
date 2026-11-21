@@ -11,7 +11,7 @@
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use flate2::write::MultiGzDecoder;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::Compression;
 use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
 use std::hint::black_box;
@@ -34,7 +34,7 @@ pub(crate) struct Rig {
 }
 
 pub(crate) fn make_framer() -> MakeFramer {
-    Arc::new(|| Box::new(NdjsonFramer::new(ndjson::MAX_RECORD_BYTES)))
+    Arc::new(|| Box::new(JsonLinesFramer::new(ndjson::MAX_RECORD_BYTES)))
 }
 
 /// One object whose body is transformed by `store` (identity for plain, a

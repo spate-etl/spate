@@ -17,7 +17,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use spate_core::framing::RecordFramer;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -33,7 +33,7 @@ struct Input {
 /// Feed `chunks` through a fresh framer and collect every record. `None` when
 /// a push exceeded the record-size cap.
 fn frame(max_record_bytes: usize, chunks: &[&[u8]]) -> Option<Vec<Vec<u8>>> {
-    let mut framer: Box<dyn RecordFramer> = Box::new(NdjsonFramer::new(max_record_bytes));
+    let mut framer: Box<dyn RecordFramer> = Box::new(JsonLinesFramer::new(max_record_bytes));
     for chunk in chunks {
         framer.push(chunk).ok()?;
     }
@@ -71,7 +71,7 @@ fuzz_target!(|input: Input| {
         "framing of {stream:02x?} at cap {cap} depends on the chunking"
     );
 
-    let delimiter = NdjsonFramer::new(cap)
+    let delimiter = JsonLinesFramer::new(cap)
         .resync_delimiter()
         .expect("NDJSON declares a resync delimiter");
     let delimiters: Vec<usize> = (0..stream.len())

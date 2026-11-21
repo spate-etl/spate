@@ -21,7 +21,7 @@
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use spate_core::framing::RecordFramer;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use std::hint::black_box;
 
 /// The framer's per-record cap. Generous relative to every fixture here, so no
@@ -70,7 +70,7 @@ pub(crate) struct Rig {
 /// function counts. The caller asserts both totals.
 #[inline(never)]
 pub(crate) fn frame_stream(rig: &Rig) -> (usize, usize) {
-    let mut framer = NdjsonFramer::new(MAX_RECORD_BYTES);
+    let mut framer = JsonLinesFramer::new(MAX_RECORD_BYTES);
     let (mut records, mut bytes) = (0usize, 0usize);
     for chunk in &rig.chunks {
         framer

@@ -54,8 +54,9 @@ fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
         .config()
         .sink_config("default")?
         .deserialize_into()?;
-    let sink = pipeline
-        .block_on(clickhouse::config::build(sink_config)?.with_row::<Owned<PageViewRow>>())?;
+    let sink = pipeline.block_on(
+        clickhouse::ClickHouseSinkBuilder::new(sink_config)?.connect::<Owned<PageViewRow>>(),
+    )?;
     let router = sink.router::<Owned<PageViewRow>>(|row| ShardKey::U64(row.user_id));
     let encoder = NativeEncoder::<Owned<PageViewRow>>::new(sink.native_schema()?);
     let pipeline = pipeline.sink(sink)?.chains(move |ctx| {

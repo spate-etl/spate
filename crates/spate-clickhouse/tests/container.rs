@@ -6,6 +6,7 @@
 mod support;
 
 use bytes::BytesMut;
+use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily, Compression};
 use spate_core::deser::Owned;
@@ -170,9 +171,9 @@ shards:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<Order>>()
+        .connect::<Owned<Order>>()
         .await
         .expect("schema fetch")
 }
@@ -223,9 +224,9 @@ shards:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<F>()
+        .connect::<F>()
         .await
 }
 

@@ -146,12 +146,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // order-sharded router, as a single-sink pipeline does, with N of them
     // here. Built before `add_sink` moves each sink into its worker pool.
     let payments_sink = pipeline.block_on(
-        clickhouse::config::from_component_config(pipeline.config().sink_config("payments")?)?
-            .with_row::<Owned<PaymentRow>>(),
+        clickhouse::ClickHouseSinkBuilder::from_component_config(
+            pipeline.config().sink_config("payments")?,
+        )?
+        .connect::<Owned<PaymentRow>>(),
     )?;
     let refunds_sink = pipeline.block_on(
-        clickhouse::config::from_component_config(pipeline.config().sink_config("refunds")?)?
-            .with_row::<Owned<RefundRow>>(),
+        clickhouse::ClickHouseSinkBuilder::from_component_config(
+            pipeline.config().sink_config("refunds")?,
+        )?
+        .connect::<Owned<RefundRow>>(),
     )?;
     let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
     let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);

@@ -17,6 +17,7 @@ use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use serde::{Deserialize, Serialize};
 use spate_clickhouse::ClickHouseRow;
+use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::serialize_row;
 use spate_clickhouse::testing::{ColumnRow, system_columns};
@@ -65,9 +66,9 @@ shards:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .expect("schema fetch and column check")
 }
@@ -187,9 +188,9 @@ shards:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .expect_err("the fetch must fail")
 }
@@ -316,9 +317,9 @@ shards:
 "#
         ))
         .expect("config yaml");
-        config::build(cfg)
+        ClickHouseSinkBuilder::new(cfg)
             .expect("valid sink config")
-            .with_row::<Owned<EventRow>>()
+            .connect::<Owned<EventRow>>()
             .await
             .expect("schema fetch")
     }
@@ -385,9 +386,9 @@ shards:
 "#
         ))
         .expect("config yaml");
-        config::build(cfg)
+        ClickHouseSinkBuilder::new(cfg)
             .expect("valid sink config")
-            .with_row::<Owned<PriceRow>>()
+            .connect::<Owned<PriceRow>>()
             .await
             .expect("schema fetch")
     }
@@ -531,9 +532,9 @@ async fn the_deepest_accepted_column_type_builds_the_sink() {
                 mock.url()
             ))
             .expect("config yaml");
-            let sink = config::build(cfg)
+            let sink = ClickHouseSinkBuilder::new(cfg)
                 .expect("valid sink config")
-                .with_row::<Owned<TestRow>>()
+                .connect::<Owned<TestRow>>()
                 .await
                 .unwrap_or_else(|e| panic!("{format}: {e}"));
             if format == "native" {
@@ -589,9 +590,9 @@ settings: {{ insert_qourum: "2" }}
         refuses.url(),
     ))
     .expect("config yaml");
-    let err = config::build(cfg)
+    let err = ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .expect_err("a refused setting must fail startup");
     match err {
@@ -624,9 +625,9 @@ shards:
         b.url()
     ))
     .unwrap();
-    let err = config::build(cfg)
+    let err = ClickHouseSinkBuilder::new(cfg)
         .unwrap()
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .expect_err("drift must fail");
     let msg = err.to_string();
@@ -871,9 +872,9 @@ async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::Clic
         "table: orders\ncompression: off\nshards:\n{shards}{check}\n"
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .expect("schema fetch")
 }

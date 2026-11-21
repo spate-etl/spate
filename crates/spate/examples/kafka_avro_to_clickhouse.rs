@@ -151,15 +151,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
     // The connector turns its section into a builder holding everything but
     // the row type: per-shard replica endpoints, pool tuning, readiness
-    // probe. `with_row` supplies it, generating the INSERT column list from
+    // probe. `connect` supplies it, generating the INSERT column list from
     // `OrderRow`'s field declaration order, and fetches the live table's
     // columns from every replica before any thread spawns. A column the table
     // lacks, a non-insertable one, replica drift or an unreachable replica
     // fails here with a readable diff.
     // ANCHOR: sink
     let sink = pipeline.block_on(
-        clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?
-            .with_row::<Owned<OrderRow>>(),
+        clickhouse::ClickHouseSinkBuilder::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .connect::<Owned<OrderRow>>(),
     )?;
     // ANCHOR_END: sink
 

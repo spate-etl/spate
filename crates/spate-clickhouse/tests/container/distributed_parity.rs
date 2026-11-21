@@ -443,9 +443,9 @@ async fn parity_sink(
         check = check.unwrap_or_default(),
     ))
     .expect("sink config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<LineRow>>()
+        .connect::<Owned<LineRow>>()
         .await
         .expect("schema fetch")
 }

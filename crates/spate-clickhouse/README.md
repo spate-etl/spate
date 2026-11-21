@@ -66,8 +66,9 @@ separate. `zstd` alone means level 3.
 
 The insert column list is not a key. `#[derive(ClickHouseRow)]` generates it
 from the row struct, as [Column contract](#column-contract) describes.
-`config::from_component_config` turns the section into a builder, and its
-`with_row` supplies the row type and fetches the table's schema.
+`ClickHouseSinkBuilder::from_component_config` turns the section into a
+builder, and its `connect` supplies the row type and fetches the table's
+schema.
 [`kafka_avro_to_clickhouse.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/kafka_avro_to_clickhouse.rs)
 wires the sink into a whole pipeline.
 
@@ -147,7 +148,7 @@ column order does not matter, because the column list maps by name.
 
 Three checks hold the struct to the table:
 
-- `with_row` reads `system.columns` from every replica of every shard before
+- `connect` reads `system.columns` from every replica of every shard before
   the pipeline starts. It fails on a column the table lacks, a column that
   cannot be inserted into, or replicas that disagree.
 - Each request body opens with a header naming every column and the type

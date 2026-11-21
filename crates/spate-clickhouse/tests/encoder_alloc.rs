@@ -5,7 +5,8 @@
 use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use serde::Serialize;
-use spate_clickhouse::config::{self, ClickHouseSinkConfig};
+use spate_clickhouse::ClickHouseSinkBuilder;
+use spate_clickhouse::config::ClickHouseSinkConfig;
 use spate_clickhouse::testing::system_columns;
 use spate_clickhouse::{ClickHouseEncoder, ClickHouseRow};
 use spate_core::deser::Owned;
@@ -54,9 +55,9 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
         mock.url()
     ))
     .unwrap();
-    let sink = config::build(cfg)
+    let sink = ClickHouseSinkBuilder::new(cfg)
         .unwrap()
-        .with_row::<Owned<TestRow>>()
+        .connect::<Owned<TestRow>>()
         .await
         .unwrap();
     let schema = sink.schema();

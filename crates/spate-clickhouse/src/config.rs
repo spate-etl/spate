@@ -1,11 +1,12 @@
 //! Opaque-section configuration and the sink factory.
 //!
 //! The `sink: { clickhouse: { ... } }` YAML section deserializes into
-//! [`ClickHouseSinkConfig`]; [`from_component_config`] validates it and
-//! produces a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
-//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::with_row`]
-//! supplies the row type and produces the runnable [`ClickHouseSink`],
-//! including its writer.
+//! [`ClickHouseSinkConfig`];
+//! [`ClickHouseSinkBuilder::from_component_config`] validates it and produces
+//! a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
+//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::connect`] supplies
+//! the row type and produces the runnable [`ClickHouseSink`], including its
+//! writer.
 
 use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
@@ -289,6 +290,152 @@ impl ClickHouseSinkConfig {
         }
     }
 
+    /// Deserialize and validate from the pipeline's opaque component section.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the section does not deserialize into
+    /// this type, or when [`validate`](Self::validate) refuses it. Every error
+    /// starts at the section's [`path`](ComponentConfig::path), such as
+    /// `sinks.eu.clickhouse` for a `sinks:` entry named `eu`, or `clickhouse`
+    /// for a section built with [`ComponentConfig::new`] and never placed in a
+    /// pipeline config.
+    pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
+        let cfg: ClickHouseSinkConfig = section.deserialize_into()?;
+        cfg.validate_at(&section.path())?;
+        Ok(cfg)
+    }
+
+    /// Checks the configuration rules: the shard topology, each replica URL's
+    /// scheme and credentials, identifiers, the pool sections'
+    /// [`SinkPoolConfig::validate`] rules, the compression level, reserved
+    /// settings, `distributed_check`, and a `tls.root_ca` set with no
+    /// `https://` URL to use it. It reads no file and builds no client, so a
+    /// `tls.root_ca` file that cannot be loaded is refused by
+    /// [`ClickHouseSinkBuilder::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] for the first setting it refuses, starting
+    /// at `sink.clickhouse`.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_at(&SectionPath::sink(TAG))
+    }
+
+    /// [`validate`](Self::validate), with each error starting at `at`.
+    fn validate_at(&self, at: &SectionPath) -> Result<(), ConfigError> {
+        if self.shards.is_empty() {
+            return Err(at.invalid("shards", "at least one shard is required"));
+        }
+        for (i, shard) in self.shards.iter().enumerate() {
+            if shard.replicas.is_empty() {
+                return Err(at.invalid(&format!("shards[{i}].replicas"), "must not be empty"));
+            }
+            for (j, url) in shard.replicas.iter().enumerate() {
+                ENDPOINT.check(url).map_err(|e| {
+                    at.invalid(&format!("shards[{i}].replicas[{j}]"), e.to_string())
+                })?;
+            }
+            // Weights are ClickHouse interval widths: a zero-weight shard
+            // receives nothing under Distributed parity and breaks the
+            // prefix-sum selection.
+            if shard.weight == 0 {
+                return Err(at.invalid(&format!("shards[{i}].weight"), "must be at least 1"));
+            }
+        }
+        let table_parts: Vec<&str> = self.table.split('.').collect();
+        if self.table.is_empty()
+            || table_parts.len() > 2
+            || !table_parts.iter().all(|p| is_identifier(p))
+        {
+            return Err(at.invalid(
+                "table",
+                format!(
+                    "`{}` is not a valid (optionally database-qualified) identifier",
+                    self.table
+                ),
+            ));
+        }
+        if let Some(db) = &self.database
+            && !is_identifier(db)
+        {
+            return Err(at.invalid("database", format!("`{db}` is not a valid identifier")));
+        }
+        if let Err(why) = self.pool().validate() {
+            return Err(at.error(why.to_string()));
+        }
+
+        // Compression: the string parser bounds the level, and a config built
+        // in code can hold `Zstd(level)` directly. The same bound here makes a
+        // config built in code accept the levels YAML accepts.
+        if let Compression::Zstd(level) = self.compression
+            && !ZSTD_LEVELS.contains(&level)
+        {
+            return Err(at.invalid(
+                "compression",
+                format!(
+                    "zstd level must be in [{}, {}] (got {level})",
+                    ZSTD_LEVELS.start(),
+                    ZSTD_LEVELS.end()
+                ),
+            ));
+        }
+
+        if let Err(e) = crate::writer::RESERVED.check("settings", self.settings.keys()) {
+            return Err(at.error(e.to_string()));
+        }
+
+        if let Some(check) = &self.distributed_check {
+            if !is_identifier(&check.cluster) {
+                return Err(at.invalid(
+                    "distributed_check.cluster",
+                    format!("`{}` is not a valid identifier", check.cluster),
+                ));
+            }
+            let parts: Vec<&str> = check.table.split('.').collect();
+            if check.table.is_empty() || parts.len() > 2 || !parts.iter().all(|p| is_identifier(p))
+            {
+                return Err(at.invalid(
+                    "distributed_check.table",
+                    format!(
+                        "`{}` is not a valid (optionally database-qualified) identifier",
+                        check.table
+                    ),
+                ));
+            }
+            match (&check.sharding_key, &check.sharding_expr) {
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(at.invalid(
+                        "distributed_check",
+                        "set exactly one of sharding_key or sharding_expr",
+                    ));
+                }
+                (Some(key), None) if !is_identifier(key) => {
+                    return Err(at.invalid(
+                        "distributed_check.sharding_key",
+                        format!("`{key}` is not a valid identifier"),
+                    ));
+                }
+                (None, Some(expr)) if expr.trim().is_empty() => {
+                    return Err(at.invalid("distributed_check.sharding_expr", "must not be empty"));
+                }
+                _ => {}
+            }
+            if let Some(url) = &check.endpoint {
+                ENDPOINT
+                    .check(url)
+                    .map_err(|e| at.invalid("distributed_check.endpoint", e.to_string()))?;
+            }
+        }
+        if self.tls.root_ca.is_some() && !Schemes::of(self).https {
+            return Err(at.invalid(
+                "tls.root_ca",
+                "is set, but no replica or distributed_check.endpoint is https://",
+            ));
+        }
+        Ok(())
+    }
+
     /// The worker-pool tuning the four pool sections describe.
     fn pool(&self) -> SinkPoolConfig {
         SinkPoolConfig::new(self.batch, self.inflight, self.retry, self.breaker)
@@ -415,7 +562,8 @@ impl DistributedCheckSection {
     /// other field starts at its YAML default.
     ///
     /// To compare against a full expression instead, clear `sharding_key`
-    /// and set `sharding_expr`: [`build`] takes exactly one of the two.
+    /// and set `sharding_expr`: [`ClickHouseSinkBuilder::new`] takes exactly one
+    /// of the two.
     #[must_use]
     pub fn new(
         cluster: impl Into<String>,
@@ -471,10 +619,14 @@ impl Default for TimeoutSection {
 }
 
 /// A validated sink configuration with no row type yet.
-/// [`with_row`](Self::with_row) supplies it, fetches the table's schema, and
-/// produces the runnable [`ClickHouseSink`].
+///
+/// The sink is built in two steps because the configuration alone cannot
+/// finish it. Its `INSERT` names the row type's columns, and its writer
+/// describes each row with the types read from every replica, so
+/// [`connect`](Self::connect) takes the row type and reads the table's schema
+/// before it produces the runnable [`ClickHouseSink`].
 #[derive(Debug)]
-#[must_use = "await with_row::<F>() to get a runnable ClickHouseSink"]
+#[must_use = "await connect::<F>() to get a runnable ClickHouseSink"]
 pub struct ClickHouseSinkBuilder {
     cfg: ClickHouseSinkConfig,
     endpoints: Vec<Vec<ClickHouseEndpoint>>,
@@ -486,6 +638,60 @@ pub struct ClickHouseSinkBuilder {
 }
 
 impl ClickHouseSinkBuilder {
+    /// A builder from a config made in code.
+    ///
+    /// Reads the system trust store and `tls.root_ca` when any replica or
+    /// `distributed_check.endpoint` is `https://`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_clickhouse::{ClickHouseSinkBuilder, ClickHouseSinkConfig, config::ShardConfig};
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let shards = vec![ShardConfig::new(vec!["http://ch-0-0:8123".into()])];
+    /// let builder = ClickHouseSinkBuilder::new(ClickHouseSinkConfig::new("orders_local", shards))?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`], starting at `sink.clickhouse`, when `cfg`
+    /// breaks a configuration rule, when `tls.root_ca` cannot be loaded, or
+    /// when a URL is `https://` and neither the system trust store nor
+    /// `tls.root_ca` holds a usable certificate.
+    pub fn new(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
+        build_with(cfg, &SectionPath::sink(TAG), SystemRoots::load)
+    }
+
+    /// A builder from the opaque `sink: { clickhouse: ... }` component section.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_clickhouse::ClickHouseSinkBuilder;
+    /// use spate_core::config::ComponentConfig;
+    ///
+    /// # fn run(section: &ComponentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    /// let builder = ClickHouseSinkBuilder::from_component_config(section)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`ClickHouseSinkConfig::from_component_config`], and otherwise as
+    /// [`new`](Self::new). Every error starts at the section's
+    /// [`path`](ComponentConfig::path).
+    pub fn from_component_config(
+        section: &ComponentConfig,
+    ) -> Result<ClickHouseSinkBuilder, ConfigError> {
+        build_with(
+            ClickHouseSinkConfig::from_component_config(section)?,
+            &section.path(),
+            SystemRoots::load,
+        )
+    }
+
     /// Supplies the row type and fetches the table's schema, producing the
     /// runnable sink.
     ///
@@ -503,7 +709,7 @@ impl ClickHouseSinkBuilder {
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
-    /// `builder.with_row::<Owned<OrderRow>>()`.
+    /// `builder.connect::<Owned<OrderRow>>()`.
     ///
     /// # Errors
     ///
@@ -515,7 +721,7 @@ impl ClickHouseSinkBuilder {
     /// settings check with an error. A replica that gives a request no
     /// answer within `timeouts.startup` fails that request's variant,
     /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
-    pub async fn with_row<F: crate::ClickHouseRowFamily>(
+    pub async fn connect<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {
         validate_columns(F::COLUMNS)
@@ -610,7 +816,7 @@ pub struct ClickHouseSink {
     format: Format,
     /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
     frame_codec: Option<FrameCodecFactory>,
-    /// The live table's columns, fetched at `with_row`.
+    /// The live table's columns, fetched at `connect`.
     schema: Arc<RowSchema>,
     /// An independent client set for readiness probing: sharing the insert
     /// clients would report the write path healthy because probing keeps
@@ -624,7 +830,7 @@ pub struct ClickHouseSink {
 
 impl ClickHouseSink {
     /// The live table's columns, in the row struct's field order, as
-    /// [`with_row`](ClickHouseSinkBuilder::with_row) fetched them. Hand it to
+    /// [`connect`](ClickHouseSinkBuilder::connect) fetched them. Hand it to
     /// [`crate::ClickHouseEncoder::with_schema`] for the first-record struct
     /// check.
     #[must_use]
@@ -672,7 +878,7 @@ impl ClickHouseSink {
     /// A [`DistributedRouter`] over this sink's shard topology and
     /// configured weights. Its placement matches a `Distributed` table with
     /// sharding expression `xxHash64(<key column>)`. Infallible: the weights
-    /// were validated at [`build`].
+    /// were validated at [`ClickHouseSinkBuilder::new`].
     ///
     /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
     /// projections are not injective), so name it:
@@ -690,7 +896,7 @@ impl ClickHouseSink {
     /// diff. Placement/DDL drift does not error at query time; it silently
     /// returns wrong results under `optimize_skip_unused_shards`.
     ///
-    /// Call **after** [`with_row`](ClickHouseSinkBuilder::with_row) and
+    /// Call **after** [`connect`](ClickHouseSinkBuilder::connect) and
     /// **before** the pipeline consumes the sink.
     pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
         match &self.distributed {
@@ -723,46 +929,12 @@ impl SinkBundle for ClickHouseSink {
 }
 // ANCHOR_END: bundle
 
-/// Build a [`ClickHouseSinkBuilder`] from the opaque `sink: { clickhouse: ... }`
-/// component section.
-///
-/// Errors start at the section's path, such as `sinks.eu.clickhouse.table`
-/// for a `sinks:` entry, or `clickhouse.table` for a section built with
-/// [`ComponentConfig::new`] and never placed in a pipeline config.
-///
-/// # Errors
-///
-/// [`ConfigError::Component`] when the section does not deserialize into
-/// [`ClickHouseSinkConfig`], and otherwise as [`build`].
-pub fn from_component_config(
-    section: &ComponentConfig,
-) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    let cfg: ClickHouseSinkConfig = section.deserialize_into()?;
-    build_with(cfg, &section.path(), SystemRoots::load)
-}
-
-/// Build from an already-deserialized config (programmatic use).
-///
-/// Reads the system trust store and `tls.root_ca` when any replica or
-/// `distributed_check.endpoint` is `https://`.
-///
-/// Errors start at `sink.clickhouse`, such as `sink.clickhouse.table`.
-///
-/// # Errors
-///
-/// [`ConfigError::Component`] when `cfg` breaks a configuration rule, when
-/// `tls.root_ca` cannot be loaded, or when a URL is `https://` and neither the
-/// system trust store nor `tls.root_ca` holds a usable certificate.
-pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    build_with(cfg, &SectionPath::sink(TAG), SystemRoots::load)
-}
-
 fn build_with(
     cfg: ClickHouseSinkConfig,
     at: &SectionPath,
     system_roots: impl FnOnce() -> SystemRoots,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    validate(&cfg, at)?;
+    cfg.validate_at(at)?;
     let schemes = Schemes::of(&cfg);
     let roots = crate::http::root_store(&cfg.tls, schemes.https, system_roots)
         .map_err(|why| at.invalid("tls.root_ca", why.to_string()))?;
@@ -854,118 +1026,6 @@ fn make_endpoints(cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> Vec<Vec<Cli
         .collect()
 }
 
-fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigError> {
-    if cfg.shards.is_empty() {
-        return Err(at.invalid("shards", "at least one shard is required"));
-    }
-    for (i, shard) in cfg.shards.iter().enumerate() {
-        if shard.replicas.is_empty() {
-            return Err(at.invalid(&format!("shards[{i}].replicas"), "must not be empty"));
-        }
-        for (j, url) in shard.replicas.iter().enumerate() {
-            ENDPOINT
-                .check(url)
-                .map_err(|e| at.invalid(&format!("shards[{i}].replicas[{j}]"), e.to_string()))?;
-        }
-        // Weights are ClickHouse interval widths: a zero-weight shard
-        // receives nothing under Distributed parity and breaks the
-        // prefix-sum selection.
-        if shard.weight == 0 {
-            return Err(at.invalid(&format!("shards[{i}].weight"), "must be at least 1"));
-        }
-    }
-    let table_parts: Vec<&str> = cfg.table.split('.').collect();
-    if cfg.table.is_empty()
-        || table_parts.len() > 2
-        || !table_parts.iter().all(|p| is_identifier(p))
-    {
-        return Err(at.invalid(
-            "table",
-            format!(
-                "`{}` is not a valid (optionally database-qualified) identifier",
-                cfg.table
-            ),
-        ));
-    }
-    if let Some(db) = &cfg.database
-        && !is_identifier(db)
-    {
-        return Err(at.invalid("database", format!("`{db}` is not a valid identifier")));
-    }
-    if let Err(why) = cfg.pool().validate() {
-        return Err(at.error(why.to_string()));
-    }
-
-    // Compression: the string parser bounds the level, and a programmatic
-    // `build()` caller can construct `Zstd(level)` directly. The same bound
-    // here makes a config built in code accept the levels YAML accepts.
-    if let Compression::Zstd(level) = cfg.compression
-        && !ZSTD_LEVELS.contains(&level)
-    {
-        return Err(at.invalid(
-            "compression",
-            format!(
-                "zstd level must be in [{}, {}] (got {level})",
-                ZSTD_LEVELS.start(),
-                ZSTD_LEVELS.end()
-            ),
-        ));
-    }
-
-    if let Err(e) = crate::writer::RESERVED.check("settings", cfg.settings.keys()) {
-        return Err(at.error(e.to_string()));
-    }
-
-    if let Some(check) = &cfg.distributed_check {
-        if !is_identifier(&check.cluster) {
-            return Err(at.invalid(
-                "distributed_check.cluster",
-                format!("`{}` is not a valid identifier", check.cluster),
-            ));
-        }
-        let parts: Vec<&str> = check.table.split('.').collect();
-        if check.table.is_empty() || parts.len() > 2 || !parts.iter().all(|p| is_identifier(p)) {
-            return Err(at.invalid(
-                "distributed_check.table",
-                format!(
-                    "`{}` is not a valid (optionally database-qualified) identifier",
-                    check.table
-                ),
-            ));
-        }
-        match (&check.sharding_key, &check.sharding_expr) {
-            (Some(_), Some(_)) | (None, None) => {
-                return Err(at.invalid(
-                    "distributed_check",
-                    "set exactly one of sharding_key or sharding_expr",
-                ));
-            }
-            (Some(key), None) if !is_identifier(key) => {
-                return Err(at.invalid(
-                    "distributed_check.sharding_key",
-                    format!("`{key}` is not a valid identifier"),
-                ));
-            }
-            (None, Some(expr)) if expr.trim().is_empty() => {
-                return Err(at.invalid("distributed_check.sharding_expr", "must not be empty"));
-            }
-            _ => {}
-        }
-        if let Some(url) = &check.endpoint {
-            ENDPOINT
-                .check(url)
-                .map_err(|e| at.invalid("distributed_check.endpoint", e.to_string()))?;
-        }
-    }
-    if cfg.tls.root_ca.is_some() && !Schemes::of(cfg).https {
-        return Err(at.invalid(
-            "tls.root_ca",
-            "is set, but no replica or distributed_check.endpoint is https://",
-        ));
-    }
-    Ok(())
-}
-
 /// The rule each replica and `distributed_check.endpoint` URL meets. The
 /// `clickhouse` client parses its URL with the same parser.
 const ENDPOINT: UrlRule<'static> =
@@ -1043,7 +1103,7 @@ fn is_column_name(s: &str) -> bool {
     s.split('.').all(is_identifier)
 }
 
-/// The runtime backstop for [`ClickHouseSinkBuilder::with_row`]:
+/// The runtime backstop for [`ClickHouseSinkBuilder::connect`]:
 /// `#[derive(ClickHouseRow)]` rejects a duplicate, empty, or malformed
 /// column list at compile time, but a hand-written `ClickHouseRowFamily`
 /// impl (for a borrowed record family, which the blanket impl over
@@ -1173,7 +1233,7 @@ shards:
             "{printed}"
         );
 
-        let builder = from_component_config(&component(
+        let builder = ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\nshards: [{replicas: ['http://a:8123/?password=hunter2']}]\n",
         ))
         .unwrap();
@@ -1181,7 +1241,7 @@ shards:
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("http://a:8123/?<redacted>"), "{printed}");
 
-        let err = refusal(from_component_config(&component(
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\nshards: [{replicas: ['svc:hunter2@a:8123']}]\n",
         )));
         assert_eq!(
@@ -1223,16 +1283,16 @@ shards:
             ),
         ];
         for (yaml, key) in cases {
-            let err = refusal(from_component_config(&component(&format!(
-                "table: orders\n{yaml}"
-            ))));
+            let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+                &format!("table: orders\n{yaml}"),
+            )));
             assert_eq!(
                 err,
                 format!("sink.clickhouse.{key}: carries userinfo; set them in user and password")
             );
         }
 
-        let builder = from_component_config(&component(
+        let builder = ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\nshards: [{replicas: ['http://a:8123/?x=a@b']}]\n",
         ))
         .expect("an `@` after the host is not userinfo");
@@ -1245,7 +1305,7 @@ shards:
     fn debug_never_prints_password_or_settings_values() {
         let yaml =
             format!("{MINIMAL}user: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n");
-        let builder = from_component_config(&component(&yaml)).unwrap();
+        let builder = ClickHouseSinkBuilder::from_component_config(&component(&yaml)).unwrap();
         let printed = format!("{builder:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
         for visible in ["\"svc\"", "Some(<redacted>)", "\"password\": <redacted>"] {
@@ -1264,7 +1324,7 @@ shards:
 
     #[test]
     fn minimal_config_builds_with_framework_defaults() {
-        let builder = from_component_config(&component(MINIMAL)).unwrap();
+        let builder = ClickHouseSinkBuilder::from_component_config(&component(MINIMAL)).unwrap();
         assert_eq!(
             insert_statement("orders", IdName::COLUMNS, Format::RowBinary),
             "INSERT INTO `orders` (`id`, `name`) FORMAT RowBinaryWithNamesAndTypes"
@@ -1276,7 +1336,7 @@ shards:
 
     #[test]
     fn qualified_table_and_knobs_map_through() {
-        let sink = from_component_config(&component(
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(
             r#"
 table: analytics.orders
 shards:
@@ -1309,9 +1369,9 @@ settings: { insert_quorum: "auto" }
     /// value for it fails validation.
     #[test]
     fn decompress_is_a_reserved_setting() {
-        let err = refusal(from_component_config(&component(&format!(
-            "{MINIMAL}settings: {{decompress: \"0\"}}\n"
-        ))));
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+            &format!("{MINIMAL}settings: {{decompress: \"0\"}}\n"),
+        )));
         assert_eq!(
             err,
             "sink.clickhouse: settings.\"decompress\" cannot be \
@@ -1325,9 +1385,9 @@ settings: { insert_quorum: "auto" }
     /// `settings` fails validation.
     #[test]
     fn database_is_a_reserved_setting() {
-        let err = refusal(from_component_config(&component(&format!(
-            "{MINIMAL}database: analytics\nsettings: {{database: \"default\"}}\n"
-        ))));
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+            &format!("{MINIMAL}database: analytics\nsettings: {{database: \"default\"}}\n"),
+        )));
         assert_eq!(
             err,
             "sink.clickhouse: settings.\"database\" cannot be overridden: owned by the typed \
@@ -1340,9 +1400,9 @@ settings: { insert_quorum: "auto" }
     /// configured `disable` fails validation.
     #[test]
     fn deduplicate_insert_is_a_reserved_setting() {
-        let err = refusal(from_component_config(&component(&format!(
-            "{MINIMAL}settings: {{deduplicate_insert: disable}}\n"
-        ))));
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+            &format!("{MINIMAL}settings: {{deduplicate_insert: disable}}\n"),
+        )));
         assert_eq!(
             err,
             "sink.clickhouse: settings.\"deduplicate_insert\" cannot be overridden: forced to \
@@ -1354,9 +1414,9 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn every_setting_an_insert_carries_is_refused_in_settings() {
         for (name, _) in crate::writer::owned_settings("token", true) {
-            let err = refusal(from_component_config(&component(&format!(
-                "{MINIMAL}settings: {{{name}: \"0\"}}\n"
-            ))));
+            let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+                &format!("{MINIMAL}settings: {{{name}: \"0\"}}\n"),
+            )));
             let refused = format!("sink.clickhouse: settings.\"{name}\" cannot be overridden: ");
             assert!(err.starts_with(&refused), "{name}: {err}");
         }
@@ -1382,7 +1442,7 @@ settings: { insert_quorum: "auto" }
             ),
         ];
         for (yaml, needle) in cases {
-            let err = from_component_config(&component(yaml)).unwrap_err();
+            let err = ClickHouseSinkBuilder::from_component_config(&component(yaml)).unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains(needle),
@@ -1417,7 +1477,10 @@ settings: { insert_quorum: "auto" }
         let section = format!(
             "table: t\nshards: [{{replicas: [\"{url}\"]}}]\ntimeouts: {{ startup: 7s }}\n{extra}"
         );
-        on_clock(from_component_config(&component(&section)).unwrap(), clock)
+        on_clock(
+            ClickHouseSinkBuilder::from_component_config(&component(&section)).unwrap(),
+            clock,
+        )
     }
 
     const STARTUP: Duration = Duration::from_secs(7);
@@ -1437,8 +1500,7 @@ settings: { insert_quorum: "auto" }
         let _in = io.enter();
         let mock = Mock::new();
         let (url, held) = test_startup::silent_after(&io, &mock, 0);
-        let build =
-            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
         let SchemaError::Fetch {
             url: named, reason, ..
@@ -1459,8 +1521,7 @@ settings: { insert_quorum: "auto" }
         let mock = Mock::new();
         mock.add(handlers::provide(id_column()));
         let (url, held) = test_startup::silent_after(&io, &mock, 1);
-        let build =
-            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
         let SchemaError::Settings { url: named, reason } = err else {
             panic!("expected the settings check to fail: {err}");
@@ -1497,7 +1558,7 @@ settings: { insert_quorum: "auto" }
             let sink = io
                 .block_on(
                     bounded_builder(&url, &given, CHECK)
-                        .with_row::<spate_core::deser::Owned<IdOnly>>(),
+                        .connect::<spate_core::deser::Owned<IdOnly>>(),
                 )
                 .expect("the replica answers the build");
             let checked = async move { sink.validate_distributed().await };
@@ -1528,9 +1589,9 @@ settings: { insert_quorum: "auto" }
         let section = format!("table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]");
         let err = io
             .block_on(
-                from_component_config(&component(&section))
+                ClickHouseSinkBuilder::from_component_config(&component(&section))
                     .unwrap()
-                    .with_row::<spate_core::deser::Owned<IdOnly>>(),
+                    .connect::<spate_core::deser::Owned<IdOnly>>(),
             )
             .unwrap_err();
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
@@ -1543,7 +1604,7 @@ settings: { insert_quorum: "auto" }
             TimeoutSection::default().startup,
             Some(Duration::from_secs(30))
         );
-        let sink = from_component_config(&component(
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\ntimeouts: { startup: 5s }",
         ))
         .unwrap();
@@ -1553,9 +1614,9 @@ settings: { insert_quorum: "auto" }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record
     /// family, bypassing the derive's compile-time checks entirely, so
-    /// `with_row` re-runs them at runtime, before it reaches the server.
+    /// `connect` re-runs them at runtime, before it reaches the server.
     #[tokio::test]
-    async fn with_row_rejects_a_hand_written_familys_bad_columns() {
+    async fn connect_rejects_a_hand_written_familys_bad_columns() {
         use spate_core::deser::RecFamily;
 
         struct BadColumns;
@@ -1567,11 +1628,11 @@ settings: { insert_quorum: "auto" }
         }
 
         // The replica is unroutable, so reaching it would surface as `Fetch`.
-        let err = from_component_config(&component(
+        let err = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards: [{replicas: [\"http://127.0.0.1:1\"]}]",
         ))
         .unwrap()
-        .with_row::<BadColumns>()
+        .connect::<BadColumns>()
         .await
         .unwrap_err();
         let SchemaError::Columns(msg) = err else {
@@ -1603,7 +1664,7 @@ settings: { insert_quorum: "auto" }
         ];
         for (extra, needle) in cases {
             let yaml = format!("{base}{extra}");
-            let err = from_component_config(&component(&yaml)).unwrap_err();
+            let err = ClickHouseSinkBuilder::from_component_config(&component(&yaml)).unwrap_err();
             assert!(
                 err.to_string().contains(needle),
                 "expected `{needle}` for `{extra}`: {err}"
@@ -1613,7 +1674,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn valid_retry_and_breaker_still_build() {
-        let sink = from_component_config(&component(
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards: [{replicas: [\"http://a\"]}]\n\
              retry: { initial: 100ms, max: 10s, multiplier: 1.0, jitter: 0.0 }\n\
              breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
@@ -1659,7 +1720,9 @@ settings: { insert_quorum: "auto" }
         ];
         for (extra, want) in cases {
             let yaml = format!("{MINIMAL}{extra}\n");
-            let msg = refusal(from_component_config(&component(&yaml)));
+            let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+                &yaml,
+            )));
             assert_eq!(msg, format!("sink.clickhouse: {want}"), "for `{extra}`");
         }
     }
@@ -1670,12 +1733,16 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn a_pool_refusal_keeps_its_place_in_validate() {
         let earlier = format!("{MINIMAL}database: \"bad-db\"\nbatch: {{ max_rows: 0 }}\n");
-        let msg = refusal(from_component_config(&component(&earlier)));
+        let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+            &earlier,
+        )));
         assert!(msg.starts_with("sink.clickhouse.database: "), "{msg}");
 
         let later =
             format!("{MINIMAL}settings: {{ decompress: \"0\" }}\nbatch: {{ max_rows: 0 }}\n");
-        let msg = refusal(from_component_config(&component(&later)));
+        let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+            &later,
+        )));
         assert_eq!(
             msg,
             format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxRows)
@@ -1709,16 +1776,17 @@ settings: { insert_quorum: "auto" }
             "input_format_with_names_use_header",
             "input_format_with_types_use_header",
         ] {
-            let err =
-                from_component_config(&component(&format!("{base}settings: {{ {key}: \"0\" }}")))
-                    .expect_err("a managed setting");
+            let err = ClickHouseSinkBuilder::from_component_config(&component(&format!(
+                "{base}settings: {{ {key}: \"0\" }}"
+            )))
+            .expect_err("a managed setting");
             assert!(err.to_string().contains(key), "{err}");
         }
     }
 
     #[test]
     fn unknown_fields_are_rejected_with_a_path() {
-        let err = from_component_config(&component(
+        let err = ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\nshards: [{replicas: [\"http://a\"]}]\nbatch: {max_rowz: 5}",
         ))
         .unwrap_err();
@@ -1730,7 +1798,7 @@ settings: { insert_quorum: "auto" }
     /// column list.
     #[test]
     fn a_stale_columns_key_is_rejected_with_a_path() {
-        let err = from_component_config(&component(
+        let err = ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]",
         ))
         .unwrap_err();
@@ -1813,14 +1881,14 @@ settings: { insert_quorum: "auto" }
         let mut cfg =
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
         cfg.compression = Compression::Zstd(99);
-        let err = build(cfg).unwrap_err();
+        let err = ClickHouseSinkBuilder::new(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
     }
 
     /// A config built in code accepts the zstd levels the YAML parser
     /// accepts, and no others.
     #[test]
-    fn build_accepts_zstd_levels_one_through_twenty_two_only() {
+    fn new_accepts_zstd_levels_one_through_twenty_two_only() {
         let zstd = |level| {
             let mut cfg =
                 ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
@@ -1828,12 +1896,12 @@ settings: { insert_quorum: "auto" }
             cfg
         };
         for level in [1, 22] {
-            if let Err(e) = build(zstd(level)) {
+            if let Err(e) = ClickHouseSinkBuilder::new(zstd(level)) {
                 panic!("zstd level {level} must build: {e}");
             }
         }
         for level in [0, 23] {
-            let msg = refusal(build(zstd(level)));
+            let msg = refusal(ClickHouseSinkBuilder::new(zstd(level)));
             assert_eq!(
                 msg,
                 format!("sink.clickhouse.compression: zstd level must be in [1, 22] (got {level})")
@@ -1842,11 +1910,11 @@ settings: { insert_quorum: "auto" }
     }
 
     #[test]
-    fn build_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
+    fn new_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
         let mut cfg =
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
         cfg.batch.max_bytes = 0;
-        let msg = refusal(build(cfg));
+        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
         assert_eq!(
             msg,
             format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxBytes)
@@ -1866,13 +1934,13 @@ settings: { insert_quorum: "auto" }
 
         let mut cfg = zstd_99();
         cfg.breaker.failure_threshold = 0;
-        let msg = refusal(build(cfg));
+        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
         let want = SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold);
         assert_eq!(msg, format!("sink.clickhouse: {want}"));
 
         let mut cfg = zstd_99();
         cfg.retry.multiplier = 0.5;
-        let msg = refusal(build(cfg));
+        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
         let want = SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5));
         assert_eq!(msg, format!("sink.clickhouse: {want}"));
     }
@@ -1892,7 +1960,8 @@ settings: { insert_quorum: "auto" }
     }
 
     /// The nested section has the same two spellings, and `new` must
-    /// produce one `build` accepts rather than one it rejects.
+    /// produce one `ClickHouseSinkBuilder::new` accepts rather than one it
+    /// rejects.
     #[test]
     fn distributed_check_new_matches_the_yaml_defaults_and_builds() {
         let from_yaml: DistributedCheckSection =
@@ -1905,17 +1974,18 @@ settings: { insert_quorum: "auto" }
         let mut cfg =
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a:8123".into()])]);
         cfg.distributed_check = Some(DistributedCheckSection::new("prod", "db.t_dist", "id"));
-        let _ = build(cfg).expect("a config built entirely from `new` passes validation");
+        let _ = ClickHouseSinkBuilder::new(cfg)
+            .expect("a config built entirely from `new` passes validation");
     }
 
     /// An `https://` replica signed by the CA that `SSL_CERT_FILE` names is
-    /// trusted through `build`. Regression for #619.
+    /// trusted through `ClickHouseSinkBuilder::new`. Regression for #619.
     #[tokio::test(flavor = "multi_thread")]
-    async fn build_trusts_a_ca_from_the_system_trust_store() {
-        const NAME: &str = "config::tests::build_trusts_a_ca_from_the_system_trust_store";
+    async fn new_trusts_a_ca_from_the_system_trust_store() {
+        const NAME: &str = "config::tests::new_trusts_a_ca_from_the_system_trust_store";
         const URL: &str = "SPATE_TEST_CLICKHOUSE_TLS_URL";
         if let Ok(url) = std::env::var(URL) {
-            let builder = build(ClickHouseSinkConfig::new(
+            let builder = ClickHouseSinkBuilder::new(ClickHouseSinkConfig::new(
                 "t",
                 vec![ShardConfig::new(vec![url])],
             ))
@@ -2117,7 +2187,7 @@ settings: { insert_quorum: "auto" }
         let section =
             sinks_entry("table: t\nshards: [{ replicas: [\"http://a\"] }]\npassword: hunter2\n");
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            let _ = from_component_config(&section).unwrap();
+            let _ = ClickHouseSinkBuilder::from_component_config(&section).unwrap();
         });
         let cleartext: Vec<_> = lines.iter().filter(|l| l.contains(CLEARTEXT)).collect();
         assert_eq!(cleartext.len(), 1, "{lines:?}");
@@ -2156,7 +2226,7 @@ settings: { insert_quorum: "auto" }
         let upper =
             "table: t\nshards: [{replicas: [\"HTTPS://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(upper).unwrap();
-        validate(&cfg, &SectionPath::sink("clickhouse")).expect("an HTTPS:// replica is https");
+        cfg.validate().expect("an HTTPS:// replica is https");
 
         let yaml = "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2165,7 +2235,10 @@ settings: { insert_quorum: "auto" }
             Some(std::path::PathBuf::from("/etc/ca.pem"))
         );
 
-        let err = from_component_config(&component(&yaml.replace("https", "http"))).unwrap_err();
+        let err = ClickHouseSinkBuilder::from_component_config(&component(
+            &yaml.replace("https", "http"),
+        ))
+        .unwrap_err();
         assert!(err.to_string().contains("tls.root_ca"), "{err}");
     }
 
@@ -2184,7 +2257,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn zero_shard_weight_is_rejected() {
-        let err = from_component_config(&component(
+        let err = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards: [{replicas: [\"http://a\"], weight: 0}]",
         ))
         .unwrap_err();
@@ -2195,7 +2268,7 @@ settings: { insert_quorum: "auto" }
     fn sink_router_captures_config_weights_in_order() {
         use crate::router::ShardKey;
 
-        let sink = from_component_config(&component(
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards:\n\
              \x20 - replicas: [\"http://a\"]\n\
              \x20   weight: 9\n\
@@ -2218,7 +2291,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn distributed_check_parses_with_endpoint_defaulting_to_first_replica() {
-        let sink = from_component_config(&component(
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(
             "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\n\
              distributed_check: { cluster: prod, table: db.t_dist, sharding_key: id }",
         ))
@@ -2237,7 +2310,9 @@ settings: { insert_quorum: "auto" }
             "distributed_check: { cluster: c, table: t_dist }",
             "distributed_check: { cluster: c, table: t_dist, sharding_key: id, sharding_expr: \"xxHash64(id)\" }",
         ] {
-            let err = from_component_config(&component(&format!("{base}{check}"))).unwrap_err();
+            let err =
+                ClickHouseSinkBuilder::from_component_config(&component(&format!("{base}{check}")))
+                    .unwrap_err();
             assert!(
                 err.to_string().contains("exactly one"),
                 "for `{check}`: {err}"
@@ -2271,7 +2346,9 @@ settings: { insert_quorum: "auto" }
             ),
         ];
         for (check, needle) in cases {
-            let err = from_component_config(&component(&format!("{base}{check}"))).unwrap_err();
+            let err =
+                ClickHouseSinkBuilder::from_component_config(&component(&format!("{base}{check}")))
+                    .unwrap_err();
             assert!(
                 err.to_string().contains(needle),
                 "expected `{needle}` for `{check}`: {err}"
@@ -2306,7 +2383,7 @@ settings: { insert_quorum: "auto" }
         });
         let mut cfg = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec![url])]);
         cfg.compression = Compression::Zstd(3);
-        let builder = build(cfg).unwrap();
+        let builder = ClickHouseSinkBuilder::new(cfg).unwrap();
         builder.endpoints[0][0]
             .client()
             .query("SELECT 1")
@@ -2322,7 +2399,7 @@ settings: { insert_quorum: "auto" }
     /// errors do.
     #[test]
     fn an_error_in_a_sinks_entry_names_the_entry() {
-        let err = refusal(from_component_config(&sinks_entry(
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
             "table: t\nshards: []\n",
         )));
         assert_eq!(
@@ -2330,9 +2407,9 @@ settings: { insert_quorum: "auto" }
             "sinks.eu.clickhouse.shards: at least one shard is required"
         );
 
-        let err = refusal(from_component_config(&sinks_entry(&format!(
-            "{MINIMAL}settings: {{insert_deduplicate: \"0\"}}\n"
-        ))));
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
+            &format!("{MINIMAL}settings: {{insert_deduplicate: \"0\"}}\n"),
+        )));
         assert!(
             err.starts_with(
                 "sinks.eu.clickhouse: settings.\"insert_deduplicate\" cannot be overridden: "
@@ -2342,16 +2419,14 @@ settings: { insert_quorum: "auto" }
     }
 
     /// An unusable `tls.root_ca` is refused at that key of the section it
-    /// came from.
+    /// came from. The config constructor does not load the file, so only the
+    /// builder's own path reaches this refusal.
     #[test]
     fn an_unusable_root_ca_in_a_sinks_entry_names_the_entry() {
         let section = sinks_entry(
             "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /nonexistent/ca.pem}\n",
         );
-        let cfg: ClickHouseSinkConfig = section.deserialize_into().unwrap();
-        let err = refusal(build_with(cfg, &section.path(), || {
-            SystemRoots::from_certs(Vec::new())
-        }));
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&section));
         assert!(
             err.starts_with("sinks.eu.clickhouse.tls.root_ca: `/nonexistent/ca.pem`: "),
             "{err}"
@@ -2364,8 +2439,47 @@ settings: { insert_quorum: "auto" }
     fn an_unplaced_section_reports_at_its_tag() {
         let section = spate_test::component_config(TAG, "table: t\nshards: []\n");
         assert_eq!(
-            refusal(from_component_config(&section)),
+            refusal(ClickHouseSinkBuilder::from_component_config(&section)),
             "clickhouse.shards: at least one shard is required"
+        );
+    }
+
+    /// The config constructor refuses at the section's place in the pipeline,
+    /// as the builder does.
+    #[test]
+    fn config_from_component_config_refuses_at_the_section_path() {
+        let unplaced = spate_test::component_config(TAG, "table: t\nshards: []\n");
+        assert_eq!(
+            refusal(ClickHouseSinkConfig::from_component_config(&unplaced)),
+            "clickhouse.shards: at least one shard is required"
+        );
+        assert_eq!(
+            refusal(ClickHouseSinkConfig::from_component_config(&sinks_entry(
+                "table: t\nshards: []\n"
+            ))),
+            "sinks.eu.clickhouse.shards: at least one shard is required"
+        );
+    }
+
+    /// `validate` checks the configuration rules at `sink.clickhouse` and
+    /// leaves the CA file to the builder.
+    #[test]
+    fn validate_refuses_without_building() {
+        let no_shards = ClickHouseSinkConfig::new("t", Vec::new());
+        assert_eq!(
+            refusal(no_shards.validate()),
+            "sink.clickhouse.shards: at least one shard is required"
+        );
+
+        let mut missing_ca =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        missing_ca.tls.root_ca = Some("/nonexistent/ca.pem".into());
+        missing_ca
+            .validate()
+            .expect("the CA file is the builder's to load");
+        assert!(
+            refusal(ClickHouseSinkBuilder::new(missing_ca))
+                .starts_with("sink.clickhouse.tls.root_ca: `/nonexistent/ca.pem`: "),
         );
     }
 
@@ -2429,16 +2543,18 @@ settings: { insert_quorum: "auto" }
             ),
         ];
         for (body, want) in cases {
-            let err = refusal(from_component_config(&component(&format!(
-                "table: t\n{body}"
-            ))));
+            let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
+                &format!("table: t\n{body}"),
+            )));
             assert_eq!(err, format!("sink.clickhouse.{want}"), "{body}");
         }
         let expr = check("cluster: c, table: d, sharding_expr: \"cityHash64(id)\"");
-        if let Err(e) = from_component_config(&component(&format!("table: t\n{expr}"))) {
+        if let Err(e) =
+            ClickHouseSinkBuilder::from_component_config(&component(&format!("table: t\n{expr}")))
+        {
             panic!("a non-empty sharding_expr must build: {e}");
         }
-        let err = refusal(from_component_config(&component(
+        let err = refusal(ClickHouseSinkBuilder::from_component_config(&component(
             "table: \"a.b.c\"\nshards: [{replicas: [\"http://a\"]}]\n",
         )));
         assert_eq!(

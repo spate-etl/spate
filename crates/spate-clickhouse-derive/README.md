@@ -12,7 +12,7 @@ Derive `ClickHouseRow` on a struct with named fields. One import,
 `use spate::clickhouse::ClickHouseRow`, brings in the trait and the derive.
 [`kafka_avro_to_clickhouse.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/kafka_avro_to_clickhouse.rs)
 derives it on `OrderRow` beside `Serialize` and hands the row type to the sink
-with `with_row::<Owned<OrderRow>>()`. The example builds under the `kafka`,
+with `connect::<Owned<OrderRow>>()`. The example builds under the `kafka`,
 `clickhouse` and `avro` features.
 
 ## Columns
@@ -69,7 +69,7 @@ an error that names the attribute.
   `ClickHouseRow` trait and, in the `rowbinary` module, the Rust field each
   column type takes.
 - [ClickHouse sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse)
-  — configuration and `with_row`.
+  — configuration and `connect`.
 - [ClickHouse column types](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse/column-types)
   — the column types each format writes, including `Nested` columns named with
   `#[serde(rename)]`.

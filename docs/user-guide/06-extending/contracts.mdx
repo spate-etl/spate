@@ -89,7 +89,7 @@ hand them over.
 The two defaulted methods label the deserializer's metrics. A chain built with
 `with_metrics` reads `component_type` for its deserializer stage and passes the
 deserializer a `Meter` through `attach_metrics`.
-[Instrumenting connectors](instrumenting-connectors.mdx#from-a-built-in-source-sink-feed-backend-or-deserializer)
+[Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)
 covers both.
 
 Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload

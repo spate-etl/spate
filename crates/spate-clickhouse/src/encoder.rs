@@ -324,6 +324,10 @@ mod tests {
         let schema = NativeSchema::from_columns(&[("id", "UInt64"), ("name", "String")])
             .expect("schema builds");
         let mut enc = ClickHouseFormatEncoder::<Owned<Row>>::native(schema);
+        assert_eq!(
+            format!("{enc:?}"),
+            "ClickHouseFormatEncoder { format: Native, .. }"
+        );
         let rec = record(Row {
             id: 7,
             name: "x".into(),
@@ -352,6 +356,10 @@ mod tests {
     #[test]
     fn the_format_encoder_writes_rowbinary_rows_in_place() {
         let mut enc = ClickHouseFormatEncoder::<Owned<Row>>::row_binary(id_name());
+        assert_eq!(
+            format!("{enc:?}"),
+            "ClickHouseFormatEncoder { format: RowBinary, .. }"
+        );
         let rec = record(Row {
             id: 7,
             name: "x".into(),

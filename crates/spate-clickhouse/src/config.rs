@@ -306,11 +306,13 @@ impl ClickHouseSinkConfig {
         Ok(cfg)
     }
 
-    /// Checks the configuration rules: the shard topology, identifiers, the
-    /// pool sections' [`SinkPoolConfig::validate`] rules, the compression
-    /// level, reserved settings and `distributed_check`. It reads no file and
-    /// builds no client, so a `tls.root_ca` that cannot be loaded is refused by
-    /// [`ClickHouseSinkBuilder::new`], not here.
+    /// Checks the configuration rules: the shard topology, each replica URL's
+    /// scheme and credentials, identifiers, the pool sections'
+    /// [`SinkPoolConfig::validate`] rules, the compression level, reserved
+    /// settings, `distributed_check`, and a `tls.root_ca` set with no
+    /// `https://` URL to use it. It reads no file and builds no client, so a
+    /// `tls.root_ca` file that cannot be loaded is refused by
+    /// [`ClickHouseSinkBuilder::new`].
     ///
     /// # Errors
     ///

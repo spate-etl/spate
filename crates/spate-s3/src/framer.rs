@@ -9,7 +9,7 @@
 //!
 //! The record-boundary logic itself lives behind
 //! [`spate_core::framing::RecordFramer`], whose concrete impl is supplied by the
-//! chosen format (e.g. `spate-json`'s `NdjsonFramer`) via
+//! chosen format (e.g. `spate-json`'s `JsonLinesFramer`) via
 //! [`S3Source::with_framer`](crate::S3Source::with_framer); `spate-s3` owns no
 //! framing of its own. This module owns only the S3-specific parts:
 //! compression codec resolution by object-key extension, streaming
@@ -301,7 +301,7 @@ mod tests {
     use flate2::Compression as GzLevel;
     use flate2::write::GzEncoder;
     use proptest::prelude::*;
-    use spate_json::NdjsonFramer;
+    use spate_json::JsonLinesFramer;
 
     /// The records the framer frames from a whole decoded object in one push,
     /// used as the proptest oracle.
@@ -312,10 +312,10 @@ mod tests {
         std::iter::from_fn(|| framer.pop()).collect()
     }
 
-    /// An `NdjsonFramer` factory bounding each line at `cap`, for the tests
+    /// A `JsonLinesFramer` factory bounding each line at `cap`, for the tests
     /// that set the cap.
     fn line_factory(cap: usize) -> FramerFactory {
-        Arc::new(move || Box::new(NdjsonFramer::new(cap)))
+        Arc::new(move || Box::new(JsonLinesFramer::new(cap)))
     }
 
     /// Push `chunk` and pump it until the codec has consumed it all. Records

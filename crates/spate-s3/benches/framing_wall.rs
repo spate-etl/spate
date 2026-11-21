@@ -36,7 +36,7 @@
 //! x86_64 and 5% on aarch64. The gzip multi-member term clears 5% on x86_64
 //! only, and the zstd one clears it on both.
 //!
-//! Framing runs through `spate-json`'s `NdjsonFramer`, a dev-dependency, so a
+//! Framing runs through `spate-json`'s `JsonLinesFramer`, a dev-dependency, so a
 //! change to that framer shows up here too.
 //!
 //! Each case's byte total is the stored input it reads, compressed where the

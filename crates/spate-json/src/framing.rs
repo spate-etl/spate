@@ -1,6 +1,6 @@
 //! Streaming NDJSON record framing.
 //!
-//! [`NdjsonFramer`] is the JSON connector's
+//! [`JsonLinesFramer`] is the JSON connector's
 //! [`RecordFramer`](spate_core::framing::RecordFramer): it cuts a byte *stream*
 //! (an object streamed by `spate-s3`, an HTTP body, a file tail) into
 //! newline-delimited records, so a streaming source can hand the JSON
@@ -8,19 +8,19 @@
 //! assembly time:
 //!
 //! ```no_run
-//! # use spate_json::NdjsonFramer;
+//! # use spate_json::JsonLinesFramer;
 //! # struct S3Source;
 //! # impl S3Source {
 //! #     fn with_framer<F: Fn() -> Box<dyn spate_core::framing::RecordFramer> + Send + Sync>(self, _: F) -> Self { self }
 //! # }
 //! # let source = S3Source;
 //! let max_record_bytes = 64 << 20;
-//! let source = source.with_framer(move || Box::new(NdjsonFramer::new(max_record_bytes)));
+//! let source = source.with_framer(move || Box::new(JsonLinesFramer::new(max_record_bytes)));
 //! ```
 //!
 //! This is the source-side counterpart to the deserializer's in-memory
 //! [`ndjson`](crate::JsonFraming::Ndjson) framing, which splits a whole payload
-//! already resident in RAM (a Kafka message). `NdjsonFramer` is bounded and
+//! already resident in RAM (a Kafka message). `JsonLinesFramer` is bounded and
 //! chunk-fed instead, for byte streams that never fit in memory. A source that
 //! frames one record per payload pairs with the deserializer's `single` mode
 //! (the [`PerRecord`](spate_core::framing::FramingContract::PerRecord) contract).
@@ -47,7 +47,7 @@ use std::io;
 /// - Every line, blank or not, is held to `max_record_bytes` after its one
 ///   trailing `\r` is stripped.
 #[derive(Debug)]
-pub struct NdjsonFramer {
+pub struct JsonLinesFramer {
     /// Bytes of the current, not-yet-terminated line.
     partial: Vec<u8>,
     /// Completed records, in order.
@@ -61,12 +61,12 @@ pub struct NdjsonFramer {
     max_record_bytes: usize,
 }
 
-impl NdjsonFramer {
+impl JsonLinesFramer {
     /// A line framer bounding each line at `max_record_bytes` decoded bytes,
     /// not counting the `\r` of a CRLF line.
     #[must_use]
-    pub fn new(max_record_bytes: usize) -> NdjsonFramer {
-        NdjsonFramer {
+    pub fn new(max_record_bytes: usize) -> JsonLinesFramer {
+        JsonLinesFramer {
             partial: Vec::new(),
             ready: VecDeque::new(),
             decoded_bytes: 0,
@@ -120,7 +120,7 @@ impl NdjsonFramer {
     }
 }
 
-impl RecordFramer for NdjsonFramer {
+impl RecordFramer for JsonLinesFramer {
     fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.decoded_bytes += bytes.len() as u64;
         let mut rest = bytes;
@@ -181,9 +181,9 @@ pub(crate) mod tests {
         )
     }
 
-    /// Feed `chunks` through a fresh `NdjsonFramer` and collect every record.
+    /// Feed `chunks` through a fresh `JsonLinesFramer` and collect every record.
     fn frame_all(max: usize, chunks: &[&[u8]]) -> io::Result<Vec<Vec<u8>>> {
-        let mut f = NdjsonFramer::new(max);
+        let mut f = JsonLinesFramer::new(max);
         for chunk in chunks {
             f.push(chunk)?;
         }
@@ -217,7 +217,7 @@ pub(crate) mod tests {
 
     #[test]
     fn decoded_bytes_counts_every_fed_byte() {
-        let mut f = NdjsonFramer::new(TEST_CAP);
+        let mut f = JsonLinesFramer::new(TEST_CAP);
         f.push(b"one\n").unwrap();
         f.push(b"two").unwrap();
         f.finish().unwrap();
@@ -228,7 +228,7 @@ pub(crate) mod tests {
     fn a_line_over_the_record_cap_is_an_error_not_an_allocation() {
         // The third push carries the (never-terminated) line past the cap; the
         // error surfaces at the offending push, before the bytes are buffered.
-        let mut f = NdjsonFramer::new(8);
+        let mut f = JsonLinesFramer::new(8);
         f.push(b"1234").unwrap();
         f.push(b"5678").unwrap();
         let err = f.push(b"9").unwrap_err();
@@ -279,7 +279,7 @@ pub(crate) mod tests {
     #[test]
     fn record_framer_is_object_safe() {
         // Compiles only if the trait is dyn-compatible (the seam's contract).
-        let mut framer: Box<dyn RecordFramer> = Box::new(NdjsonFramer::new(TEST_CAP));
+        let mut framer: Box<dyn RecordFramer> = Box::new(JsonLinesFramer::new(TEST_CAP));
         framer.push(b"x\n").unwrap();
         framer.finish().unwrap();
         assert_eq!(framer.pop(), Some(b"x".to_vec()));
@@ -318,7 +318,7 @@ pub(crate) mod tests {
         /// The framer is a pure function of the byte stream: any two chunkings
         /// of the same bytes yield the reference framing, or the cap error.
         /// This determinism is what makes resume-by-record-index safe for
-        /// every streaming source that reuses `NdjsonFramer`. The cap sits
+        /// every streaming source that reuses `JsonLinesFramer`. The cap sits
         /// within two bytes of the longest line, so that line, CRLF or not,
         /// lands on each side of it.
         #[test]
@@ -344,7 +344,7 @@ pub(crate) mod tests {
             stream in arb_stream(),
             cap in 1..96usize,
         ) {
-            let delim = NdjsonFramer::new(cap)
+            let delim = JsonLinesFramer::new(cap)
                 .resync_delimiter()
                 .expect("NDJSON declares a resync delimiter");
             let whole = frame_all(cap, &[&stream]).ok();

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use spate::clickhouse::{
     self, ClickHouseNativeEncoder, ClickHouseRow, ClickHouseSinkConfig, DateTime64Millis, ShardKey,
 };
-use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
+use spate::json::{JsonDeserializerBuilder, JsonLinesFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
 use spate_example_lambda_s3::{BoxError, CONFIG, LOG_FILTER, MAX_RECORD_BYTES, handle_batch};
@@ -44,7 +44,7 @@ struct PageViewRow {
 fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
+        .with_framer(|| Box::new(JsonLinesFramer::new(MAX_RECORD_BYTES)));
     let deserializer = pipeline
         .config()
         .deserializer

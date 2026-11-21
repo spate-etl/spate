@@ -38,7 +38,7 @@
 //!
 //! Bodies are compressed in the fixture, never in the measured region, so
 //! these count decompression only. Framing is done with `spate-json`'s
-//! `NdjsonFramer` rather than a local copy: this crate ships no framer of its
+//! `JsonLinesFramer` rather than a local copy: this crate ships no framer of its
 //! own, and object storage carrying newline-delimited JSON is the pairing
 //! production runs.
 //!

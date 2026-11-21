@@ -5,7 +5,7 @@ use spate_core::clock::tokio::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{DepthOf, Feed, FeedErrorKind, Unit, wake_channel};
 use spate_core::pipeline::{ExitReport, ExitState};
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::{S3Source, SplitDescriptor};
 use spate_test::{FeedScript, HANG, ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
 use spate_test_s3_feed::{
@@ -224,7 +224,7 @@ fn pre_and_customize_reach_the_worker() {
         &file_source(&data, ""),
         SCRIPTED,
         |_| {},
-        |source| source.with_framer(|| Box::new(NdjsonFramer::new(16))),
+        |source| source.with_framer(|| Box::new(JsonLinesFramer::new(16))),
         CHECKPOINT,
         None,
     );
@@ -313,7 +313,7 @@ fn stalled_report() -> ExitReport {
     let (lister, _) = scripted_feed();
     S3Source::from_component_config(&config.source, rt.handle().clone())
         .unwrap()
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
         .list_once(config.feed.as_ref().unwrap(), Arc::new(lister))
         .unwrap();
 

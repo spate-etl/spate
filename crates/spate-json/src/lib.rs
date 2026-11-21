@@ -21,7 +21,7 @@
 //! Those three frame a payload already resident in memory (a Kafka message).
 //! For a **streaming** source that delivers an object in chunks (an
 //! `spate-s3` object, an HTTP body) the connector also owns the byte-stream
-//! framer: [`NdjsonFramer`] is a chunk-fed, bounded
+//! framer: [`JsonLinesFramer`] is a chunk-fed, bounded
 //! [`RecordFramer`](spate_core::framing::RecordFramer) the source runs to cut the
 //! stream into records, then hands each to the deserializer in `single` mode.
 //! Framing this way is a format concern, so it lives here rather than in the
@@ -83,7 +83,7 @@ mod metrics;
 pub use backend::BACKEND_ID;
 pub use config::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 pub use deser::{JsonSerdeDeserializer, JsonValueDeserializer};
-pub use framing::NdjsonFramer;
+pub use framing::JsonLinesFramer;
 
 /// Dynamically-typed JSON record, re-exported for the [`JsonValueDeserializer`]
 /// path. Unlike Avro's value type this is a stable 1.x dependency, so it does

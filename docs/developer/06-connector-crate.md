@@ -59,8 +59,6 @@ The trait's last word keeps the name short, and it matches how the workspace alr
 
 **Follow:** [`crates/spate-kafka/src/sink/encoder.rs`](repo:crates/spate-kafka/src/sink/encoder.rs).
 
-**Departs:** spate-json's `NdjsonFramer` ([#2336](https://github.com/spate-etl/spate/issues/2336)).
-
 **Checked by:** review.
 
 ### Suffix a config `Config` and a nested block `Section`

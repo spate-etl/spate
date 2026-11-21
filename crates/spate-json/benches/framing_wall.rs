@@ -1,6 +1,6 @@
 //! Wall time for streaming record framing.
 //!
-//! [`NdjsonFramer`] cuts a byte *stream* into newline-delimited records so a
+//! [`JsonLinesFramer`] cuts a byte *stream* into newline-delimited records so a
 //! streaming source can hand the deserializer one document per payload. This
 //! is the wall-clock half of what `framing_gungraun.rs` counts, over the same
 //! streams through the same loop; both drive `frame_stream` from
@@ -52,7 +52,7 @@
 //!
 //! [`BACKEND_ID`]: spate_json::BACKEND_ID
 //!
-//! [`NdjsonFramer`]: spate_json::NdjsonFramer
+//! [`JsonLinesFramer`]: spate_json::JsonLinesFramer
 
 use spate_bench::{Suite, bench_main};
 

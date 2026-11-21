@@ -12,7 +12,7 @@ use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{Feed, Unit};
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
 use spate_test::{
     PipelineRun, SinkScript, TestEncoder, capture_sink, passthrough_runtime, wait_until,
@@ -145,8 +145,8 @@ impl PipelineYaml {
 
 /// `spate-json`'s NDJSON framer under a 1 MiB record cap, which no suite
 /// reaches.
-pub(crate) fn ndjson_framer() -> NdjsonFramer {
-    NdjsonFramer::new(1 << 20)
+pub(crate) fn ndjson_framer() -> JsonLinesFramer {
+    JsonLinesFramer::new(1 << 20)
 }
 
 /// The default framer every suite wires into its source (NDJSON line framing).

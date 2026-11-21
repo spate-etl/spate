@@ -23,7 +23,7 @@ Two distinct steps turn source bytes into records:
   (an S3 backfill runs the format's framer over each object so it can checkpoint
   mid-object). A message source like Kafka does no framing, because the message
   boundary is the record boundary. Framing is a *format* concern, so the framer
-  is owned by the format crate (`spate-json`'s `NdjsonFramer`, ...) and wired
+  is owned by the format crate (`spate-json`'s `JsonLinesFramer`, ...) and wired
   into a streaming source in code, leaving the source format-agnostic.
 - **Deserialization** — decoding one framed payload into a typed record. This is
   also the *format*, and it is identical whatever the source: the same JSON or

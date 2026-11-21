@@ -60,8 +60,8 @@ pub(crate) use config::{FeedRole, KafkaFeedConfig};
 pub use publisher::KafkaFeedPublisher;
 
 use crate::context::SourceHooks;
-use crate::metrics::KafkaStatsMetrics;
-use crate::sink::metrics::KafkaSinkStatsMetrics;
+use crate::metrics::KafkaConsumerStatsMetrics;
+use crate::sink::metrics::KafkaProducerStatsMetrics;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
 use config::{BACKEND, NAME};
 use consumer::Driver;
@@ -261,10 +261,10 @@ pub(crate) struct Core {
     /// counts without holding the slot.
     metrics: Mutex<Option<Arc<KafkaFeedMetrics>>>,
     /// The consumer's statistics translator, drained on the consumer thread.
-    consumer_stats: Mutex<Option<KafkaStatsMetrics>>,
+    consumer_stats: Mutex<Option<KafkaConsumerStatsMetrics>>,
     /// The producer's statistics translator, updated in its `stats` hook on
     /// the poll thread, and on the consumer thread during the close flush.
-    producer_stats: Mutex<Option<KafkaSinkStatsMetrics>>,
+    producer_stats: Mutex<Option<KafkaProducerStatsMetrics>>,
     /// How many watermark calls the gate has begun, counted just before
     /// each `fetch_watermarks` and each `list_offset`.
     #[cfg(test)]
@@ -305,11 +305,11 @@ impl Core {
             .map(|m| Arc::new(KafkaFeedMetrics::new(m, &self.topics)));
         let (consumer, producer) = match cx.meter.filter(|_| self.statistics_enabled) {
             Some(meter) => (
-                Some(KafkaStatsMetrics::for_feed(
+                Some(KafkaConsumerStatsMetrics::for_feed(
                     meter.clone(),
                     cx.per_partition_detail,
                 )),
-                Some(KafkaSinkStatsMetrics::for_feed(meter)),
+                Some(KafkaProducerStatsMetrics::for_feed(meter)),
             ),
             None => (None, None),
         };

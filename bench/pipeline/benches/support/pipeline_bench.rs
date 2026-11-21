@@ -20,7 +20,7 @@ use spate_core::error::SinkError;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, PipelineRuntime, RuntimeOptions};
 use spate_core::sink::{KeyHashRouter, SealedBatch, ShardWriter, SinkParts, SinkPoolConfig};
-use spate_json::{JsonDeserializerBuilder, JsonSettings, NdjsonFramer};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, NdjsonFramer};
 use spate_s3::S3Source;
 use spate_s3::bench_seams::pack_members;
 use spate_test::PipelineRun;
@@ -277,7 +277,7 @@ impl Rig {
                 .expect("the source config")
                 .with_framer(|| Box::new(NdjsonFramer::new(MAX_LINE_BYTES)));
         let json =
-            JsonDeserializerBuilder::from_settings(JsonSettings::default()).build_serde::<Event>();
+            JsonDeserializerBuilder::new(JsonDeserializerConfig::default()).build_serde::<Event>();
         let schema = NativeSchema::from_columns(COLUMNS).expect("the schema builds");
         let written = Arc::new(Written::default());
         let mut pool = SinkPoolConfig::default();

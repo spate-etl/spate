@@ -19,7 +19,9 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::stable_key_hash;
-use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
+use spate_json::{
+    JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, NdjsonFramer, OnError,
+};
 use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::pin;
 
@@ -41,8 +43,8 @@ use orders::{BAD_EVERY, Corruption, Event, LineItem, RECORDS};
 /// What one payload through one deserializer produced: whether the call
 /// failed, and how many records reached the sink. The same two quantities
 /// every bench case asserts.
-fn drive(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
-    let mut deser = JsonDeserializerBuilder::from_settings(settings).build_serde::<LineItem>();
+fn drive(settings: JsonDeserializerConfig, payload: &[u8]) -> (bool, u64) {
+    let mut deser = JsonDeserializerBuilder::new(settings).build_serde::<LineItem>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink::default();
     let failed = deser
@@ -51,8 +53,8 @@ fn drive(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     (failed, sink.count)
 }
 
-fn drive_value(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
-    let mut deser = JsonDeserializerBuilder::from_settings(settings).build_value();
+fn drive_value(settings: JsonDeserializerConfig, payload: &[u8]) -> (bool, u64) {
+    let mut deser = JsonDeserializerBuilder::new(settings).build_value();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink::default();
     let failed = deser
@@ -61,12 +63,16 @@ fn drive_value(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     (failed, sink.count)
 }
 
-fn settings(framing: JsonFraming, on_error: OnError, reject_duplicate_keys: bool) -> JsonSettings {
-    JsonSettings {
-        framing,
-        on_error,
-        reject_duplicate_keys,
-    }
+fn settings(
+    framing: JsonFraming,
+    on_error: OnError,
+    reject_duplicate_keys: bool,
+) -> JsonDeserializerConfig {
+    let mut config = JsonDeserializerConfig::default();
+    config.framing = framing;
+    config.on_error = on_error;
+    config.reject_duplicate_keys = reject_duplicate_keys;
+    config
 }
 
 /// Feed `stream` through a fresh framer in `chunk`-sized pieces, popping as a
@@ -314,7 +320,7 @@ const STRING_SHARE_PCT: usize = 55;
 #[test]
 fn the_event_corpus_decodes_to_its_samples() {
     let mut deser =
-        JsonDeserializerBuilder::from_settings(settings(JsonFraming::Ndjson, OnError::Fail, false))
+        JsonDeserializerBuilder::new(settings(JsonFraming::Ndjson, OnError::Fail, false))
             .build_serde::<Event>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = EmitCollector::new();
@@ -563,12 +569,9 @@ fn the_two_corruptions_fail_for_different_reasons() {
 
     // And both still fail the decode, whichever backend is compiled in.
     let one = |bytes: &[u8]| {
-        let mut deser = JsonDeserializerBuilder::from_settings(settings(
-            JsonFraming::Single,
-            OnError::Fail,
-            false,
-        ))
-        .build_serde::<LineItem>();
+        let mut deser =
+            JsonDeserializerBuilder::new(settings(JsonFraming::Single, OnError::Fail, false))
+                .build_serde::<LineItem>();
         let (ack, _rx) = AckRef::test_pair();
         let mut sink = Sink::default();
         deser

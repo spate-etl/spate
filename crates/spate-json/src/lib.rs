@@ -15,7 +15,7 @@
 //!   isolation.
 //! - **`array`** — a top-level JSON array → one record per element, decoded in
 //!   a single pass. A malformed array is handled atomically by the configured
-//!   [error policy](JsonSettings); use `ndjson` with `on_error: skip` when you
+//!   [error policy](JsonDeserializerConfig); use `ndjson` with `on_error: skip` when you
 //!   need per-record isolation.
 //!
 //! Those three frame a payload already resident in memory (a Kafka message).
@@ -81,7 +81,7 @@ mod framing;
 mod metrics;
 
 pub use backend::BACKEND_ID;
-pub use config::{JsonConfigError, JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+pub use config::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 pub use deser::{JsonSerdeDeserializer, JsonValueDeserializer};
 pub use framing::NdjsonFramer;
 

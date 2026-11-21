@@ -12,7 +12,7 @@ use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
 use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
-use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
 use spate_test::{HANG, LogCapture, PipelineRun, TestEncoder, capture_sink, memory_source};
 use tracing::Level;
 
@@ -52,11 +52,11 @@ struct Strict {
 }
 
 fn builder(reject_duplicate_keys: bool) -> JsonDeserializerBuilder {
-    JsonDeserializerBuilder::from_settings(JsonSettings {
-        framing: JsonFraming::Single,
-        on_error: OnError::Skip,
-        reject_duplicate_keys,
-    })
+    let mut config = JsonDeserializerConfig::default();
+    config.framing = JsonFraming::Single;
+    config.on_error = OnError::Skip;
+    config.reject_duplicate_keys = reject_duplicate_keys;
+    JsonDeserializerBuilder::new(config)
 }
 
 /// Runs `good` and then `refused` through a pipeline on partition 3, so the

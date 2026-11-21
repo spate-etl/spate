@@ -46,7 +46,8 @@ pub(crate) struct S3SourceMetrics {
     objects_failed_etag_drift: Counter,
     objects_failed_undecodable: Counter,
     objects_failed_retries_exhausted: Counter,
-    /// The families the fetcher task counts as well as the lane.
+    /// The handles the fetcher task counts into. The lane counts bytes read
+    /// through them too.
     fetch: FetchCounters,
 }
 

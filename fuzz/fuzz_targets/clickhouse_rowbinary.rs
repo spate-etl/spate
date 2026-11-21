@@ -1,7 +1,7 @@
 //! RowBinary row encoding against a reference reader.
 //!
 //! RowBinary carries no column names, so a row's bytes are readable only by
-//! the layout the `spate_clickhouse::rowbinary` module documents. The target
+//! the layout the `spate_clickhouse` crate docs give for RowBinary. The target
 //! serializes a run of arbitrary rows into one buffer and reads them back with
 //! a reader written from that documented layout, asserting each field round
 //! trips and that the run consumes the buffer exactly. A width that drifts,
@@ -14,7 +14,7 @@ use arbitrary::Arbitrary;
 use bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
 use serde::Serialize;
-use spate_clickhouse::serialize_row;
+use spate_clickhouse::testing::serialize_row;
 
 /// One row covering the encodings the layout distinguishes: fixed-width
 /// integers and floats, a length-prefixed string, a `Nullable` prefix, a

@@ -22,8 +22,8 @@ use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};
 use serde_repr::Serialize_repr;
 use spate_clickhouse::{
-    ClickHouseRowBinaryEncoder, DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256,
-    MultiPolygon, Point, Polygon, Ring, Time64Millis, TimeSeconds, UInt256,
+    DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256, MultiPolygon, Point, Polygon, Ring,
+    Time64Millis, TimeSeconds, UInt256,
 };
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -223,8 +223,7 @@ async fn wide_type_table_round_trips() {
              settings: { input_format_binary_read_json_as_string: \"1\" }",
     )
     .await;
-    let schema = sink.schema();
-    let mut encoder = ClickHouseRowBinaryEncoder::<Owned<WideRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<WideRow>>();
     let batch =
         encode_batch(&mut encoder, vec![encoded_row()], "wide-1").expect("first-record check");
     sink.writer

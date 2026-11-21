@@ -13,7 +13,7 @@ use hyper::{Request, Response};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use spate_clickhouse::{ClickHouseNativeEncoder, Compression, serialize_row};
+use spate_clickhouse::Compression;
 use spate_core::error::ErrorClass;
 use spate_core::rng::SplitMix64;
 use std::sync::{Arc, Mutex};
@@ -36,29 +36,18 @@ fn coded<T>(
 where
     T: Serialize + Clone + Send + 'static,
 {
-    let mut native = (sink.format() == config::Format::Native).then(|| {
-        ClickHouseNativeEncoder::<Owned<T>>::new(sink.native_schema().expect("a Native schema"))
-    });
+    use spate_core::sink::RowEncoder;
+    let mut encoder = sink.encoder::<Owned<T>>();
     let raw: Vec<Bytes> = chunks
         .iter()
         .map(|chunk| {
             let mut buf = BytesMut::new();
-            match native.as_mut() {
-                Some(encoder) => {
-                    use spate_core::sink::RowEncoder;
-                    for row in *chunk {
-                        encoder
-                            .encode(&record(row.clone()), &mut buf)
-                            .expect("encode");
-                    }
-                    encoder.finish_chunk(&mut buf).expect("finish the block");
-                }
-                None => {
-                    for row in *chunk {
-                        serialize_row(row, &mut buf).expect("encode");
-                    }
-                }
+            for row in *chunk {
+                encoder
+                    .encode(&record(row.clone()), &mut buf)
+                    .expect("encode");
             }
+            encoder.finish_chunk(&mut buf).expect("finish the chunk");
             buf.freeze()
         })
         .collect();

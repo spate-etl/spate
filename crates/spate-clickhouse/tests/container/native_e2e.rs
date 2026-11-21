@@ -11,7 +11,7 @@
 
 use super::*;
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use spate_clickhouse::{ClickHouseNativeEncoder, DateTime64Millis, Decimal64};
+use spate_clickhouse::{DateTime64Millis, Decimal64};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use uuid::Uuid;
@@ -140,10 +140,7 @@ async fn native_format_round_trips_through_a_real_server() {
              `props`, `dims`, `pt`, `opt`) FORMAT Native"
     );
 
-    let native_schema = sink
-        .native_schema()
-        .expect("fetch native schema from system.columns");
-    let mut encoder = ClickHouseNativeEncoder::<Owned<NativeRow>>::new(native_schema);
+    let mut encoder = sink.encoder::<Owned<NativeRow>>();
     let sent = rows();
     let batch = encode_native_batch(&mut encoder, sent.clone(), "native-1").expect("encode");
     sink.writer
@@ -171,7 +168,6 @@ async fn native_format_round_trips_through_a_real_server() {
 async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     use spate_clickhouse::DateTime64Micros;
     use spate_core::error::ErrorClass;
-    use std::sync::Arc;
 
     let srv = bare_server("native-secret3").await;
     srv.admin
@@ -196,8 +192,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
         "format: native\nuser: default\npassword: native-secret3\n",
     )
     .await;
-    let schema = sink.native_schema().expect("fetch native schema");
-    let mut enc = ClickHouseNativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
+    let mut enc = sink.encoder::<Owned<MilliRow>>();
     let err = encode_native_batch(
         &mut enc,
         vec![MilliRow {
@@ -222,7 +217,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
         ts: DateTime64Micros,
     }
     const TS_MICROS: i64 = 1_700_000_000_123_456;
-    let mut enc = ClickHouseNativeEncoder::<Owned<MicroRow>>::new(schema);
+    let mut enc = sink.encoder::<Owned<MicroRow>>();
     let batch = encode_native_batch(
         &mut enc,
         vec![MicroRow {
@@ -267,8 +262,7 @@ async fn native_lowcardinality_composites_render_correctly() {
         "format: native\nuser: default\npassword: native-secret2\n",
     )
     .await;
-    let native_schema = sink.native_schema().expect("native schema");
-    let mut encoder = ClickHouseNativeEncoder::<Owned<NativeRow>>::new(native_schema);
+    let mut encoder = sink.encoder::<Owned<NativeRow>>();
     let batch = encode_native_batch(&mut encoder, rows(), "native-2").expect("encode");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)

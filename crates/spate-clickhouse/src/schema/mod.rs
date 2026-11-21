@@ -79,12 +79,11 @@ pub enum SchemaError {
     Columns(String),
 }
 
-/// The validated, struct-ordered expected schema. Produced by
-/// [`connect`](crate::ClickHouseSinkBuilder::connect); consumed by
-/// [`crate::ClickHouseRowBinaryEncoder::new`] for the first-record check and by
-/// the writer for its wire header. Opaque: holds no `clickhouse` crate types.
+/// The validated, struct-ordered expected schema, produced by
+/// [`connect`](crate::ClickHouseSinkBuilder::connect). The encoders' first-record
+/// check and the writer's wire header read it.
 #[derive(Debug)]
-pub struct RowSchema {
+pub(crate) struct RowSchema {
     /// Which encoder's rules the first-record check applies.
     pub(crate) wire: Wire,
     pub(crate) table: String,
@@ -306,10 +305,20 @@ pub(crate) async fn validate(
                 ));
             }
             Some(c) => {
+                // The bound comes first: the parse and the Native layout
+                // recurse once per nesting level of a type the server sent.
                 if let Some(why) = typeparse::out_of_bounds(&c.type_) {
                     findings.push(format!("declared column `{col}` {why}"));
                 } else if let Some(msg) = aggregate_function_remedy(col, &c.type_) {
                     findings.push(msg);
+                } else if check.wire == Wire::Native
+                    && !crate::native::lays_out(&typeparse::parse(&c.type_))
+                {
+                    findings.push(format!(
+                        "declared column `{col}` has type `{}`, which the Native format \
+                         does not support",
+                        shown_type(&c.type_)
+                    ));
                 }
             }
         }

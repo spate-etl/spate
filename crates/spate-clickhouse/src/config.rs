@@ -10,7 +10,9 @@
 
 use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
+use crate::encoder::ClickHouseFormatEncoder;
 use crate::http::StartupBound;
+use crate::native::NativeSchema;
 use crate::router::{ClickHouseDistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
@@ -167,9 +169,8 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
 /// `FORMAT RowBinaryWithNamesAndTypes` with a header naming each column and
 /// its type, and a Native block carries the same per column, so the server
 /// checks the schema on every insert rather than mapping bytes by position.
-/// Pair Native with [`crate::ClickHouseNativeEncoder`] on the chain (via
-/// [`ClickHouseSink::native_schema`]); RowBinary pairs with
-/// [`crate::ClickHouseRowBinaryEncoder`].
+/// [`ClickHouseSink::encoder`] hands out the encoder that writes the
+/// configured format.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -716,8 +717,10 @@ impl ClickHouseSinkBuilder {
     /// [`SchemaError::Columns`] when `F::COLUMNS` cannot produce an `INSERT`
     /// or its header cannot be compressed, [`SchemaError::Fetch`] when a
     /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
-    /// table is missing, the replicas disagree or a declared column does not
-    /// fit it, and [`SchemaError::Settings`] when a replica answers the
+    /// table is missing, the replicas disagree, a declared column does not
+    /// fit it, or, under `format: native`, a declared column has a type the
+    /// Native format does not support, and [`SchemaError::Settings`] when a
+    /// replica answers the
     /// settings check with an error. A replica that gives a request no
     /// answer within `timeouts.startup` fails that request's variant,
     /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
@@ -737,6 +740,13 @@ impl ClickHouseSinkBuilder {
             columns: F::COLUMNS,
         };
         let schema = schema::validate(&check, &self.endpoints, &self.startup).await?;
+        let encoding = match self.cfg.format {
+            Format::RowBinary => Encoding::RowBinary(Arc::clone(&schema)),
+            Format::Native => Encoding::Native(
+                NativeSchema::from_row_schema(&schema)
+                    .expect("schema validation refuses a column Native cannot lay out"),
+            ),
+        };
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
         let frame_codec = BlockCodec::factory(self.cfg.compression);
@@ -782,8 +792,7 @@ impl ClickHouseSinkBuilder {
             endpoints: self.endpoints,
             pool: self.pool,
             frame_codec,
-            format: self.cfg.format,
-            schema,
+            encoding,
             probe_endpoints: self.probe_endpoints,
             shard_weights: self.shard_weights,
             distributed: self.distributed,
@@ -812,12 +821,11 @@ pub struct ClickHouseSink {
     pub endpoints: Vec<Vec<ClickHouseEndpoint>>,
     /// Pool knobs mapped onto the framework's configuration.
     pub pool: SinkPoolConfig,
-    /// The configured insert wire format.
-    format: Format,
     /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
     frame_codec: Option<FrameCodecFactory>,
-    /// The live table's columns, fetched at `connect`.
-    schema: Arc<RowSchema>,
+    /// The configured wire format, with the live table's columns fetched at
+    /// `connect`.
+    encoding: Encoding,
     /// An independent client set for readiness probing: sharing the insert
     /// clients would report the write path healthy because probing keeps
     /// its connections warm.
@@ -828,20 +836,43 @@ pub struct ClickHouseSink {
     distributed: Option<distributed::DistributedCheck>,
 }
 
-impl ClickHouseSink {
-    /// The live table's columns, in the row struct's field order, as
-    /// [`connect`](ClickHouseSinkBuilder::connect) fetched them. Hand it to
-    /// [`crate::ClickHouseRowBinaryEncoder::new`] for the first-record struct
-    /// check.
-    #[must_use]
-    pub fn schema(&self) -> Arc<RowSchema> {
-        Arc::clone(&self.schema)
-    }
+/// What the sink's encoders are built from, fixed at `connect`.
+#[derive(Debug)]
+enum Encoding {
+    RowBinary(Arc<RowSchema>),
+    Native(Arc<NativeSchema>),
+}
 
+impl ClickHouseSink {
     /// The configured insert wire format.
     #[must_use]
     pub fn format(&self) -> Format {
-        self.format
+        match self.encoding {
+            Encoding::RowBinary(_) => Format::RowBinary,
+            Encoding::Native(_) => Format::Native,
+        }
+    }
+
+    /// The encoder for this sink's chain. It writes the configured `format`
+    /// and checks each pipeline thread's first record against the table's
+    /// columns as [`connect`](ClickHouseSinkBuilder::connect) fetched them.
+    ///
+    /// Take each sink's encoder from that sink: a chain whose encoder came
+    /// from a sink with another `format` sends bodies its writer cannot
+    /// insert.
+    ///
+    /// `F` is not inferable where the encoder is passed to the chain, so
+    /// name it: `sink.encoder::<Owned<OrderRow>>()`.
+    #[must_use]
+    pub fn encoder<F>(&self) -> ClickHouseFormatEncoder<F>
+    where
+        F: RecFamily,
+        for<'b> F::Rec<'b>: serde::Serialize,
+    {
+        match &self.encoding {
+            Encoding::RowBinary(schema) => ClickHouseFormatEncoder::row_binary(Arc::clone(schema)),
+            Encoding::Native(schema) => ClickHouseFormatEncoder::native(Arc::clone(schema)),
+        }
     }
 
     /// The frame codec that turns each sealed chunk into one compressed
@@ -858,13 +889,6 @@ impl ClickHouseSink {
     #[must_use]
     pub fn frame_codec(&self) -> Option<FrameCodecFactory> {
         self.frame_codec.clone()
-    }
-
-    /// A [`NativeSchema`](crate::native::NativeSchema) over the fetched
-    /// columns, for a [`crate::ClickHouseNativeEncoder`]. Fails for a column
-    /// type the Native encoder cannot lay out, before any row is encoded.
-    pub fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, crate::NativeError> {
-        crate::native::NativeSchema::from_row_schema(&self.schema)
     }
 
     /// A readiness probe over every replica of every shard, using the

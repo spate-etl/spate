@@ -7,14 +7,37 @@
 //! rows that answer the first, for `clickhouse::test::handlers::provide`, and
 //! any row answers the second.
 //!
+//! It also exposes the encoders under the sink's format encoder, and the
+//! RowBinary serializer, for benches, tests and fuzzing that encode without a
+//! table.
+//!
 //! Behind the off-by-default `testing` feature: the rows implement a
 //! `clickhouse` 0.x trait, which this crate's public API otherwise avoids
 //! entirely, and no stability promise attaches to them.
 
 use spate_core::sink::FrameCodecFactory;
 
-use crate::Compression;
+pub use crate::encoder::ClickHouseRowBinaryEncoder;
+pub use crate::native::{ClickHouseNativeEncoder, NativeError, NativeSchema};
+pub use crate::rowbinary::{RowBinaryError, serialize_row};
 pub use crate::schema::ColumnRow;
+use crate::{ClickHouseFormatEncoder, Compression};
+
+/// The format encoder over a Native encoder, as the sink hands it out under
+/// `format: native`.
+#[must_use]
+pub fn native_format_encoder<F>(enc: ClickHouseNativeEncoder<F>) -> ClickHouseFormatEncoder<F> {
+    ClickHouseFormatEncoder::from_native(enc)
+}
+
+/// The format encoder over a RowBinary encoder, as the sink hands it out under
+/// `format: rowbinary`.
+#[must_use]
+pub fn rowbinary_format_encoder<F>(
+    enc: ClickHouseRowBinaryEncoder<F>,
+) -> ClickHouseFormatEncoder<F> {
+    ClickHouseFormatEncoder::from_row_binary(enc)
+}
 
 /// The frame codec for `compression`, or `None` under
 /// `off`.

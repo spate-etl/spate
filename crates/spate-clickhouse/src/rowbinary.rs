@@ -1,112 +1,7 @@
-//! A serde `Serializer` producing ClickHouse [RowBinary].
-//!
-//! The `clickhouse` crate's own row serializer is crate-private, so
-//! `spate-clickhouse` ships its own. Wire semantics mirror the
-//! crate's (its deserializer is used to read rows back in tests, so
-//! compatibility is proven by round-trips):
-//!
-//! | Rust / serde type | RowBinary encoding |
-//! |---|---|
-//! | `bool` | 1 byte, `0`/`1` |
-//! | `i8..i128`, `u8..u128` | little-endian fixed width |
-//! | `f32`, `f64` | little-endian IEEE 754 |
-//! | `String`, `&str` | LEB128 byte length + UTF-8 bytes (`String`) |
-//! | `serde_bytes`-style `&[u8]` | LEB128 length + bytes (`String`) |
-//! | `Option<T>` (T not itself `Option`) | 1 prefix byte: `1` = NULL, `0` = value follows (`Nullable(T)`) |
-//! | `Vec<T>` / slices (seq) | LEB128 element count + elements (`Array(T)`) |
-//! | tuples, `[T; N]`, tuple structs | elements back-to-back, no length (`Tuple`, `FixedString(N)` for `[u8; N]`) |
-//! | structs | fields in **declaration order**, no header |
-//! | maps | LEB128 entry count + alternating key, value (`Map(K, V)`) |
-//! | newtype structs | transparent |
-//! | newtype enum variants | 1 discriminant byte (serde `variant_index`) + value (`Variant`) |
-//! | `char`, `()`, unit structs/variants, struct/tuple variants, `Option<Option<T>>` | **unsupported** — record-level error |
-//!
-//! ## Column-type coverage beyond the primitives
-//!
-//! | ClickHouse type | Rust field |
-//! |---|---|
-//! | `Date` / `Date32` | [`DateDays`](crate::DateDays) / [`Date32Days`](crate::Date32Days), or [⚠](crate::serde) `chrono::NaiveDate` / `time::Date` via [`crate::serde`] (feature-gated) |
-//! | `DateTime` | [`DateTimeSeconds`], or [⚠](crate::serde) `chrono::DateTime<Utc>` / `time::OffsetDateTime` via [`crate::serde`] |
-//! | `DateTime64(0/3/6/9)` | [`DateTime64Secs`](crate::DateTime64Secs) / [`DateTime64Millis`] / [`DateTime64Micros`](crate::DateTime64Micros) / [`DateTime64Nanos`](crate::DateTime64Nanos), or [⚠](crate::serde) the `datetime64::*` serde modules |
-//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or [⚠](crate::serde) the `time`/`time64::*` serde modules (server ≥ 25.6; where required, set `enable_time_time64_type=1` for `CREATE TABLE`; inserts need no such setting) |
-//! | `UUID` | [⚠](crate::serde) `uuid::Uuid` with `#[serde(with = "spate_clickhouse::serde::uuid")]` (feature `uuid`) |
-//! | `IPv4` | [⚠](crate::serde) `std::net::Ipv4Addr` with `#[serde(with = "spate_clickhouse::serde::ipv4")]` |
-//! | `IPv6` | `std::net::Ipv6Addr` bare (its default impl — 16 network-order bytes — is correct) |
-//! | `Enum8` / `Enum16` | `serde_repr` enums: `#[derive(Serialize_repr)] #[repr(i8)]` (or `i16`) |
-//! | `Decimal(P, S)` | [`Decimal32<S>`](crate::Decimal32) for precision 9 and below, [`Decimal64<S>`](crate::Decimal64) for 10 through 18, [`Decimal128<S>`](crate::Decimal128) for 19 through 38 (or the matching raw int); `rust_decimal` conversions behind the `rust_decimal` feature |
-//! | `Int256` / `UInt256` | [`Int256`](crate::Int256) / [`UInt256`](crate::UInt256) (32 raw LE bytes) |
-//! | `JSON` | a `String` of JSON text **plus** the per-insert setting `input_format_binary_read_json_as_string: "1"` (see the crate docs' wiring example) |
-//! | `LowCardinality(T)` | the plain `T` — transparent on insert; the server builds the dictionary |
-//! | Geo (`Point`, `Ring`, `LineString`, `Polygon`, ...) | the [`Point`](crate::Point)/[`Ring`](crate::Ring)/... aliases (tuples and `Vec`s of `Float64`) |
-//! | `Dynamic`, `AggregateFunction(...)`, `Decimal256` | **unsupported** — no serde shape maps to them (`Decimal256`: scale manually into an [`Int256`](crate::Int256)) |
-//!
-//! ⚠ marks a field type whose bare `Serialize` impl encodes successfully
-//! into bytes the column cannot read. [`crate::serde`] lists them and the
-//! attribute each one needs.
-//!
-//! A `Decimal(P, S)` column's precision picks its wire width, so each
-//! wrapper covers a band rather than an upper bound. A `Decimal(9, 2)`
-//! column is four bytes wide and takes `Decimal32<2>`, where `Decimal64<2>`
-//! writes eight and shifts every following column.
-//!
-//! ## The wire contract is field order
-//!
-//! RowBinary carries no column names: the `INSERT INTO t (a, b, c)` column
-//! list must match the struct's field declaration order exactly. Reordering
-//! struct fields is a breaking change to the pipeline's wire format.
-//! Column-type niceties (e.g. `DateTime64(3)` is an `Int64` of milliseconds
-//! on the wire) are handled with plain integer fields, the newtype wrappers
-//! above, or the [`crate::serde`] field attributes.
-//!
-//! ## Unsupported serde attributes (they misalign columns)
-//!
-//! Because rows are positional and fixed-width, several serde attributes
-//! that make a struct emit a variable or unexpected number of fields are
-//! **not supported** on row types:
-//!
-//! - **`#[serde(skip)]` / `#[serde(skip_serializing_if = ...)]`** — a skipped
-//!   field emits *fewer* columns for some rows, shifting every following
-//!   byte into the wrong column. This serializer **cannot reliably detect
-//!   it**: serde reports the already-reduced field count to
-//!   `serialize_struct`, so a short row looks self-consistent. Never put a
-//!   skip attribute on a row struct; model absent values as `Option<T>`
-//!   (`Nullable`) instead. (A `Serialize` impl that *lies* about its field
-//!   count, declaring N but writing a different number, is caught with
-//!   [`RowBinaryError::FieldCountMismatch`].)
-//! - **`#[serde(flatten)]`** — serde lowers a flattened struct to a
-//!   length-less map; rejected with [`RowBinaryError::FlattenUnsupported`].
-//!   Inline the fields into the row struct in column order instead.
-//! - **internally/adjacently-tagged enums (`#[serde(tag = ...)]`)** — emit
-//!   the tag as a phantom string column. Map enums to an explicit integer or
-//!   `String` column, or use a newtype-variant `Variant` (below).
-//!
-//! ## `Variant` discriminant ordering
-//!
-//! A newtype enum variant writes serde's `variant_index`, the enum's
-//! **declaration order**, as the `Variant` discriminant byte. ClickHouse
-//! does **not** use declaration order: it sorts a `Variant(T1, T2, ...)`'s
-//! member types **alphabetically by type name** and numbers the
-//! discriminators in that sorted order. There is no way to infer that
-//! mapping here, so **you must declare your Rust enum variants in the same
-//! order ClickHouse will sort the column's types.**
-//!
-//! For a `Variant(Int64, String)` column (ClickHouse order: `Int64` = 0,
-//! `String` = 1, sorted alphabetically), declare:
-//!
-//! ```
-//! # use serde::Serialize;
-//! #[derive(Serialize)]
-//! enum Payload {
-//!     Num(i64),     // variant_index 0 -> Int64
-//!     Text(String), // variant_index 1 -> String
-//! }
-//! # let _ = (Payload::Num(0), Payload::Text(String::new()));
-//! ```
-//!
-//! Also note: `Option<Enum>` against such a column emits the `Nullable`
-//! `0`/`1` prefix, but ClickHouse encodes a `Variant` NULL as discriminant
-//! `255` and forbids `Nullable(Variant)`, so a nullable variant column is
-//! not representable; use the `Variant`'s own NULL support instead.
+//! A serde `Serializer` producing ClickHouse [RowBinary]. The `clickhouse`
+//! crate's own row serializer is crate-private, so this crate ships its own,
+//! with the crate's wire semantics: tests read rows back with its
+//! deserializer. The crate docs carry the type mapping.
 //!
 //! [RowBinary]: https://clickhouse.com/docs/en/interfaces/formats#rowbinary
 
@@ -187,8 +82,6 @@ pub fn serialize_row<T: Serialize + ?Sized>(
         top_written: 0,
     })
 }
-
-pub use crate::types::{DateTime64Millis, DateTimeSeconds};
 
 struct RowBinarySer<'a> {
     buf: &'a mut BytesMut,
@@ -574,6 +467,7 @@ impl<'a, 'b> ser::SerializeStruct for &'a mut RowBinarySer<'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DateTime64Millis, DateTimeSeconds};
     use serde::Serialize;
 
     fn enc<T: Serialize>(v: &T) -> Vec<u8> {

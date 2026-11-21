@@ -1,6 +1,6 @@
 //! ClickHouse **Native** (columnar, block-framed) encoder.
 //!
-//! Where [`crate::rowbinary`] streams rows, Native transposes a chunk of rows
+//! Where RowBinary streams rows, Native transposes a chunk of rows
 //! into per-column buffers and emits one self-describing **block**:
 //! ```text
 //! [VarUInt num_columns][VarUInt num_rows]
@@ -27,7 +27,9 @@ mod dispatch;
 pub(crate) mod leaf;
 mod lowcard;
 
-use crate::schema::typeparse::{self, ChType};
+use crate::schema::typeparse::ChType;
+#[cfg(any(test, feature = "testing"))]
+use crate::schema::typeparse::parse;
 use crate::schema::{RowSchema, probe};
 use bytes::BytesMut;
 use column::ColumnWriter;
@@ -155,7 +157,7 @@ impl NativeSchema {
     /// with the table's declared precision (`DateTime64Millis` into
     /// `DateTime64(6)`) fails on the first record instead of silently landing
     /// wrong timestamps.
-    pub fn from_row_schema(schema: &RowSchema) -> Result<Arc<NativeSchema>, NativeError> {
+    pub(crate) fn from_row_schema(schema: &RowSchema) -> Result<Arc<NativeSchema>, NativeError> {
         Self::from_expected(RowSchema {
             wire: crate::schema::Wire::Native,
             table: schema.table.clone(),
@@ -186,19 +188,18 @@ impl NativeSchema {
     /// Build a schema from `(column name, ClickHouse type string)` pairs,
     /// e.g. `[("id", "UInt64"), ("tags", "Array(LowCardinality(String))")]`.
     ///
-    /// The normal path is [`ClickHouseSink::native_schema`](crate::ClickHouseSink::native_schema),
-    /// which takes the real types from `system.columns`. Use this only when
-    /// the schema is known statically; the type strings must match the
-    /// server's column types exactly, or the server will reject the block.
-    /// The first-record check then compares the row against the types named
-    /// here rather than against the table.
+    /// For benches, tests and fuzzing, where no table exists. The type strings
+    /// must match the server's column types exactly, or the server rejects
+    /// the block. The first-record check compares the row against the types
+    /// named here.
+    #[cfg(any(test, feature = "testing"))]
     pub fn from_columns(specs: &[(&str, &str)]) -> Result<Arc<NativeSchema>, NativeError> {
         Self::from_expected(RowSchema {
             wire: crate::schema::Wire::Native,
             table: "<static schema>".into(),
             columns: specs
                 .iter()
-                .map(|(n, t)| ((*n).to_string(), typeparse::parse(t), (*t).to_string()))
+                .map(|(n, t)| ((*n).to_string(), parse(t), (*t).to_string()))
                 .collect(),
         })
     }
@@ -215,6 +216,11 @@ impl NativeSchema {
             })
             .collect()
     }
+}
+
+/// Whether the Native encoder can lay out a column of type `ty`.
+pub(crate) fn lays_out(ty: &ChType) -> bool {
+    ColumnWriter::build(ty).is_ok()
 }
 
 /// Encodes a record family's `Serialize` rows into the ClickHouse Native
@@ -280,11 +286,6 @@ impl<F> ClickHouseNativeEncoder<F> {
                 .iter()
                 .map(ColumnWriter::byte_len)
                 .sum::<usize>()
-    }
-
-    /// Build directly from a validated [`RowSchema`].
-    pub fn from_row_schema(schema: &RowSchema) -> Result<Self, NativeError> {
-        Ok(Self::new(NativeSchema::from_row_schema(schema)?))
     }
 
     fn finalize_block(&mut self, buf: &mut BytesMut) {

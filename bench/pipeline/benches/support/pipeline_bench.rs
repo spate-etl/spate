@@ -13,7 +13,7 @@
 )]
 
 use serde::Serialize;
-use spate_clickhouse::{ClickHouseNativeEncoder, NativeSchema};
+use spate_clickhouse::testing::{ClickHouseNativeEncoder, NativeSchema};
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::error::SinkError;

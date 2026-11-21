@@ -44,8 +44,7 @@ async fn a_same_width_alter_is_rejected_rather_than_silently_miswritten() {
         "user: default\npassword: drift-secret\n",
     )
     .await;
-    let mut encoder =
-        spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<DriftRow>>::new(sink.schema());
+    let mut encoder = sink.encoder::<Owned<DriftRow>>();
 
     let batch = encode_batch(&mut encoder, vec![row(1)], "drift-1").expect("encode");
     sink.writer

@@ -70,11 +70,7 @@ async fn nested_native_format_round_trips_through_a_real_server() {
         "INSERT INTO `nested_native` (`id`, `tags.key`, `tags.value`) FORMAT Native"
     );
 
-    let native_schema = sink
-        .native_schema()
-        .expect("fetch native schema from system.columns");
-    let mut encoder =
-        spate_clickhouse::ClickHouseNativeEncoder::<Owned<NestedRow>>::new(native_schema);
+    let mut encoder = sink.encoder::<Owned<NestedRow>>();
     let sent = rows();
     let batch = encode_native_batch(&mut encoder, sent.clone(), "nested-native-1").expect("encode");
     sink.writer
@@ -119,8 +115,7 @@ async fn nested_rowbinary_format_round_trips_through_a_real_server() {
 
     // The flattened columns are ordinary `Array(String)`, so the
     // `Vec<String>` fields pass the per-position type check.
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<NestedRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<NestedRow>>();
     let sent = rows();
     let batch = encode_batch(&mut encoder, sent.clone(), "nested-rowbinary-1").expect("encode");
     sink.writer

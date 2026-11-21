@@ -12,7 +12,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use spate_clickhouse::{ClickHouseNativeEncoder, NativeError, NativeSchema};
+use spate_clickhouse::testing::{ClickHouseNativeEncoder, NativeError, NativeSchema};
 
 fuzz_target!(|specs: Vec<(String, String)>| {
     let columns: Vec<(&str, &str)> = specs

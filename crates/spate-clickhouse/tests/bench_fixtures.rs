@@ -12,10 +12,10 @@
 //! slowest, takes under two seconds in the dev profile.
 
 use bytes::BytesMut;
-use spate_clickhouse::{
-    ClickHouseDistributedRouter, ClickHouseNativeEncoder, ClickHouseRow,
-    ClickHouseRowBinaryEncoder, Compression, NativeSchema, ShardKey,
+use spate_clickhouse::testing::{
+    ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, NativeSchema,
 };
+use spate_clickhouse::{ClickHouseDistributedRouter, ClickHouseRow, Compression, ShardKey};
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
 use spate_test::record;

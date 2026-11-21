@@ -49,7 +49,7 @@
 // `spate-ch1-<nonce>` rather than a fixed `ch-shard-0`.
 
 use super::*;
-use spate_clickhouse::{ClickHouseDistributedRouter, ClickHouseRowBinaryEncoder, ShardKey};
+use spate_clickhouse::{ClickHouseDistributedRouter, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckRef, Checkpointer};
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
@@ -463,7 +463,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let router = sink.router::<Owned<LineRow>>(sku_key);
     let pool_cfg = sink.pool;
     let writer = Arc::new(sink.writer.clone());
-    let schema = sink.schema();
+    let encoder = sink.encoder::<Owned<LineRow>>();
     let codec = sink.frame_codec();
     let endpoints = sink.endpoints; // partial move; the rest of `sink` drops at scope end
 
@@ -477,7 +477,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let mut driver = chain(BatchDeser)
         .flat_map::<Owned<LineRow>, _>(explode)
         .sink(
-            ClickHouseRowBinaryEncoder::<Owned<LineRow>>::new(schema),
+            encoder,
             router,
             ChunkConfig::default(),
             queues,

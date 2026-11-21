@@ -71,7 +71,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Serialize;
-use spate::clickhouse::{self, ClickHouseRow, ClickHouseRowBinaryEncoder};
+use spate::clickhouse::{self, ClickHouseRow};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{TestDeserializer, memory_source};
@@ -138,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?
         .connect::<Owned<OrderRollup>>(),
     )?;
-    let encoder = ClickHouseRowBinaryEncoder::<Owned<OrderRollup>>::new(sink.schema());
+    let encoder = sink.encoder::<Owned<OrderRollup>>();
 
     // ── Chain: bytes -> OrderRollup -> RowBinary -> Null table ─────────────
     let runtime = pipeline

@@ -26,8 +26,8 @@
 //! a little-endian `UInt32`, and both date/time crates emit string forms
 //! where every date and time column is a fixed-width integer. Omitting the
 //! attribute is silent data corruption, not an error. The sink's
-//! first-record check catches the shape-level cases; the docs table in
-//! [`crate::rowbinary`] is the authoritative mapping.
+//! first-record check catches the shape-level cases; the
+//! [row types](crate#row-types) table is the authoritative mapping.
 //!
 //! Wire semantics are rewritten from `clickhouse`'s `src/serde.rs`,
 //! which is `MIT OR Apache-2.0`; this crate takes the Apache-2.0 branch, the

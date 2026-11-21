@@ -8,7 +8,11 @@
 
 use bytes::BytesMut;
 use serde::Serialize;
-use spate_clickhouse::{ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, NativeSchema};
+use spate_clickhouse::ClickHouseFormatEncoder;
+use spate_clickhouse::testing::{
+    ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, NativeSchema, native_format_encoder,
+    rowbinary_format_encoder,
+};
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::Owned;
 use spate_core::record::{PartitionId, Record, RecordMeta};
@@ -75,10 +79,10 @@ where
 fn native_rig<T: Serialize + Send + 'static>(
     cols: &[(&str, &str)],
     payloads: Vec<T>,
-) -> Rig<ClickHouseNativeEncoder<Owned<T>>, T> {
+) -> Rig<ClickHouseFormatEncoder<Owned<T>>, T> {
     let schema = NativeSchema::from_columns(cols).expect("native schema builds");
     Rig {
-        enc: ClickHouseNativeEncoder::<Owned<T>>::new(schema),
+        enc: native_format_encoder(ClickHouseNativeEncoder::<Owned<T>>::new(schema)),
         records: payloads.into_iter().map(record).collect(),
         buf: BytesMut::with_capacity(1 << 20),
     }
@@ -86,31 +90,31 @@ fn native_rig<T: Serialize + Send + 'static>(
 
 fn rowbinary_rig<T: Serialize + Send + 'static>(
     payloads: Vec<T>,
-) -> Rig<ClickHouseRowBinaryEncoder<Owned<T>>, T> {
+) -> Rig<ClickHouseFormatEncoder<Owned<T>>, T> {
     Rig {
-        enc: ClickHouseRowBinaryEncoder::<Owned<T>>::unchecked(),
+        enc: rowbinary_format_encoder(ClickHouseRowBinaryEncoder::<Owned<T>>::unchecked()),
         records: payloads.into_iter().map(record).collect(),
         buf: BytesMut::with_capacity(1 << 20),
     }
 }
 
-pub(crate) fn native_events() -> Rig<ClickHouseNativeEncoder<Owned<EventRow>>, EventRow> {
+pub(crate) fn native_events() -> Rig<ClickHouseFormatEncoder<Owned<EventRow>>, EventRow> {
     native_rig(&rows::event_columns(), rows::events(ROWS))
 }
 
-pub(crate) fn native_metrics() -> Rig<ClickHouseNativeEncoder<Owned<MetricRow>>, MetricRow> {
+pub(crate) fn native_metrics() -> Rig<ClickHouseFormatEncoder<Owned<MetricRow>>, MetricRow> {
     native_rig(&rows::metric_columns(), rows::metrics(ROWS))
 }
 
-pub(crate) fn native_exotic() -> Rig<ClickHouseNativeEncoder<Owned<ExoticRow>>, ExoticRow> {
+pub(crate) fn native_exotic() -> Rig<ClickHouseFormatEncoder<Owned<ExoticRow>>, ExoticRow> {
     native_rig(&rows::exotic_columns(), rows::exotic(ROWS))
 }
 
-pub(crate) fn rowbinary_events() -> Rig<ClickHouseRowBinaryEncoder<Owned<EventRow>>, EventRow> {
+pub(crate) fn rowbinary_events() -> Rig<ClickHouseFormatEncoder<Owned<EventRow>>, EventRow> {
     rowbinary_rig(rows::events(ROWS))
 }
 
-pub(crate) fn rowbinary_metrics() -> Rig<ClickHouseRowBinaryEncoder<Owned<MetricRow>>, MetricRow> {
+pub(crate) fn rowbinary_metrics() -> Rig<ClickHouseFormatEncoder<Owned<MetricRow>>, MetricRow> {
     rowbinary_rig(rows::metrics(ROWS))
 }
 
@@ -118,6 +122,6 @@ pub(crate) fn rowbinary_metrics() -> Rig<ClickHouseRowBinaryEncoder<Owned<Metric
     dead_code,
     reason = "the counted tier and the allocation snapshot run `exotic` through Native only"
 )]
-pub(crate) fn rowbinary_exotic() -> Rig<ClickHouseRowBinaryEncoder<Owned<ExoticRow>>, ExoticRow> {
+pub(crate) fn rowbinary_exotic() -> Rig<ClickHouseFormatEncoder<Owned<ExoticRow>>, ExoticRow> {
     rowbinary_rig(rows::exotic(ROWS))
 }

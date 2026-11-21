@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use spate_clickhouse::ClickHouseRowBinaryEncoder;
+use spate_clickhouse::testing::ClickHouseRowBinaryEncoder;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::ops::chain_owned;

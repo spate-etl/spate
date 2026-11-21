@@ -71,7 +71,7 @@ struct RowBinaryEncoder;
 
 impl RowEncoder<Owned<SkuRow>> for RowBinaryEncoder {
     fn encode<'buf>(&mut self, rec: &Record<SkuRow>, buf: &mut BytesMut) -> Result<(), SinkError> {
-        spate_clickhouse::serialize_row(&rec.payload, buf)
+        spate_clickhouse::testing::serialize_row(&rec.payload, buf)
             .map_err(|e| SinkError::record_level(e.to_string()))
     }
 }

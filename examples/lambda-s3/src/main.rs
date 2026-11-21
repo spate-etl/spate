@@ -16,9 +16,7 @@ use aws_lambda_events::event::sqs::SqsEvent;
 use lambda_runtime::{Error, LambdaEvent};
 use metrics_cloudwatch_embedded::lambda::handler;
 use serde::{Deserialize, Serialize};
-use spate::clickhouse::{
-    self, ClickHouseNativeEncoder, ClickHouseRow, ClickHouseSinkConfig, DateTime64Millis, ShardKey,
-};
+use spate::clickhouse::{self, ClickHouseRow, ClickHouseSinkConfig, DateTime64Millis, ShardKey};
 use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
@@ -58,7 +56,7 @@ fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
         clickhouse::ClickHouseSinkBuilder::new(sink_config)?.connect::<Owned<PageViewRow>>(),
     )?;
     let router = sink.router::<Owned<PageViewRow>>(|row| ShardKey::U64(row.user_id));
-    let encoder = ClickHouseNativeEncoder::<Owned<PageViewRow>>::new(sink.native_schema()?);
+    let encoder = sink.encoder::<Owned<PageViewRow>>();
     let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
         let chunk = ctx.chunk();
         let deser = JsonDeserializerBuilder::from_component_config(&deserializer)

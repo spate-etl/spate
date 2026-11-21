@@ -19,7 +19,7 @@ use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::ConnectError;
 use spate_core::feed::{Feed, STOP_RESERVE, Unit, wake_channel};
 use spate_core::pipeline::ExitState;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::S3Source;
 use spate_sqs::SqsFeed;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
@@ -730,7 +730,7 @@ fn list_once(data: &Path, feed_section: &str) {
         SqsFeed::connect_with_static_credentials(&section, rt.handle(), "test", "test").unwrap();
     S3Source::from_component_config(&config.source, rt.handle().clone())
         .unwrap()
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
         .list_once(&section, Arc::new(feed))
         .unwrap();
 }

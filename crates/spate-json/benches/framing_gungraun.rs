@@ -1,6 +1,6 @@
 //! Instruction counts for streaming record framing (gungraun).
 //!
-//! [`NdjsonFramer`] is this crate's [`RecordFramer`]: it cuts a byte *stream*
+//! [`JsonLinesFramer`] is this crate's [`RecordFramer`]: it cuts a byte *stream*
 //! into newline-delimited records so a streaming source can hand the
 //! deserializer one document per payload. It is the source-side counterpart to
 //! the in-memory `ndjson` framing the decode bench measures, and a different

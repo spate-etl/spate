@@ -20,7 +20,7 @@ use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::stable_key_hash;
 use spate_json::{
-    JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, NdjsonFramer, OnError,
+    JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonLinesFramer, OnError,
 };
 use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::pin;
@@ -79,7 +79,7 @@ fn settings(
 /// source does, and return the record count and the framed byte total, the
 /// pair `framing_gungraun.rs` asserts.
 fn frame(stream: &[u8], chunk: usize) -> (usize, usize) {
-    let mut framer = NdjsonFramer::new(frame_rig::MAX_RECORD_BYTES);
+    let mut framer = JsonLinesFramer::new(frame_rig::MAX_RECORD_BYTES);
     let (mut records, mut bytes) = (0usize, 0usize);
     for piece in stream.chunks(chunk) {
         framer.push(piece).expect("inside the record cap");
@@ -777,7 +777,7 @@ fn every_framed_line_is_a_json_document_of_the_declared_width() {
         (lines::WIDE_RECORDS, lines::WIDE_LINE_BYTES),
     ] {
         let stream = lines::stream(records, width, Eol::Lf, 0);
-        let mut framer = NdjsonFramer::new(frame_rig::MAX_RECORD_BYTES);
+        let mut framer = JsonLinesFramer::new(frame_rig::MAX_RECORD_BYTES);
         framer.push(&stream).unwrap();
         framer.finish().unwrap();
         let mut seen = 0;

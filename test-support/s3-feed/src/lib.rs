@@ -20,7 +20,7 @@ use spate_core::feed::{
 };
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::SinkPoolConfig;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
     HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
@@ -286,7 +286,7 @@ pub fn launch_customized<F: Feed + 'static>(
     let source = customize(
         S3Source::from_component_config(&pipeline.config().source, io)
             .unwrap()
-            .with_framer(|| Box::new(NdjsonFramer::new(1 << 20))),
+            .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20))),
     );
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 1;

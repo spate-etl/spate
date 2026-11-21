@@ -4,7 +4,7 @@
 #![allow(dead_code, reason = "each test binary uses a different subset")]
 
 use serde::Deserialize;
-use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
+use spate::json::{JsonDeserializerBuilder, JsonLinesFramer};
 use spate::prelude::*;
 use spate::s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_example_lambda_s3::{BoxError, MAX_RECORD_BYTES, Message};
@@ -80,7 +80,7 @@ pub(crate) fn assemble(
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml)?)?;
         let source =
             S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-                .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
+                .with_framer(|| Box::new(JsonLinesFramer::new(MAX_RECORD_BYTES)));
         let section = pipeline
             .config()
             .deserializer

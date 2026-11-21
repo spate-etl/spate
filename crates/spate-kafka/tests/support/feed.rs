@@ -18,7 +18,7 @@ use spate_core::feed::{
     ConnectError, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, Feed, FeedError,
     FeedErrorKind, Unit, wake_channel,
 };
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_s3::S3Source;
 use spate_test::{HANG, SinkScript, WriteOutcome, wait_until};
@@ -673,7 +673,7 @@ pub(crate) fn list_once(
     let config = PipelineConfig::from_str(&pipeline_yaml(&source, section_yaml)).unwrap();
     S3Source::from_component_config(&config.source, io.handle().clone())
         .unwrap()
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
         .list_once(config.feed.as_ref().unwrap(), Arc::new(publisher.unwrap()))
         .unwrap();
 }

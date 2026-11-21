@@ -21,7 +21,7 @@ use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Recei
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, PipelineRuntime, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SealedBatch, ShardWriter, SinkParts, SinkPoolConfig};
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{BytesPassthrough, PipelineRun, TestEncoder};
 use std::fmt;
@@ -131,7 +131,7 @@ impl Rig {
         });
         let source = S3Source::from_component_config(&pipeline.config().source, io)
             .expect("the source config")
-            .with_framer(|| Box::new(NdjsonFramer::new(LINE_BYTES)))
+            .with_framer(|| Box::new(JsonLinesFramer::new(LINE_BYTES)))
             .with_store(store)
             .with_feed(Arc::clone(&feed) as Arc<dyn Feed>);
         let rows = Arc::new(AtomicU64::new(0));

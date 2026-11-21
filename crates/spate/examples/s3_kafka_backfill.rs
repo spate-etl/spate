@@ -38,7 +38,7 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use spate::NO_EVENT_TIME_MS;
 use spate::feed::{Feed, Unit};
-use spate::json::NdjsonFramer;
+use spate::json::JsonLinesFramer;
 use spate::kafka::feed::KafkaFeed;
 use spate::prelude::*;
 use spate::s3::{DescriptorObject, S3Source, SplitDescriptor};
@@ -168,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("published {OBJECTS} units");
 
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)));
     let (sink, script) = capture_sink(1, 1);
     let runtime = pipeline
         .sink(sink)?

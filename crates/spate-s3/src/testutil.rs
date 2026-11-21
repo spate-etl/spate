@@ -1,13 +1,13 @@
 //! Test-only framer and store wrapper shared across the crate's unit tests.
 
 use spate_core::framing::RecordFramer;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `spate-json`'s NDJSON framer under a 1 MiB record cap, which no unit test
 /// reaches.
 pub(crate) fn ndjson_framer() -> Box<dyn RecordFramer> {
-    Box::new(NdjsonFramer::new(1 << 20))
+    Box::new(JsonLinesFramer::new(1 << 20))
 }
 
 /// Answers a GET for the path, or `None` to read the inner store.

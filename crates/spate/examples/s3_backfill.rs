@@ -13,7 +13,7 @@
 //! Object storage here is a local directory (`file://`); against real S3
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
 //! through the `store` map. The S3 source is format-agnostic: we wire the
-//! format's framer into it in code, here `spate-json`'s [`NdjsonFramer`], so
+//! format's framer into it in code, here `spate-json`'s [`JsonLinesFramer`], so
 //! it hands each NDJSON line to the chain as one payload, and
 //! `for_source_framing` then derives the JSON deserializer's `single`
 //! granularity from the source instead of it being hand-set.
@@ -32,7 +32,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
-use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
+use spate::json::{JsonDeserializerBuilder, JsonLinesFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
 use spate_test::{TestEncoder, capture_sink};
@@ -86,7 +86,7 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
     // ANCHOR: framer
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(64 << 20)));
+        .with_framer(|| Box::new(JsonLinesFramer::new(64 << 20)));
     // ANCHOR_END: framer
     // ANCHOR_END: source
     let deser_section = pipeline

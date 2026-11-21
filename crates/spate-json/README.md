@@ -70,7 +70,7 @@ yields no records and no error. Every record decoded from one payload carries
 that payload's offset.
 
 A source that frames its own byte stream, such as the S3 source, takes this
-crate's `NdjsonFramer`. It is a bounded, chunk-fed framer: the source feeds it
+crate's `JsonLinesFramer`. It is a bounded, chunk-fed framer: the source feeds it
 an object in chunks, and it cuts a record at each `\n`, strips one trailing `\r`
 and skips blank lines. A line longer than the bound it is built with, not
 counting that `\r`, is an error. `S3Source::with_framer` takes a factory that builds one per object, and
@@ -151,13 +151,13 @@ their labels.
 - [JSON format page](https://spate.kainth.dev/docs/user-guide/connectors/formats/json)
   — every key, the framings, both backends and the metric family.
 - [API documentation on docs.rs](https://docs.rs/spate-json) — the builder, both
-  deserializers, the config types and `NdjsonFramer`.
+  deserializers, the config types and `JsonLinesFramer`.
 - [`json_skip_bad_records.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/json_skip_bad_records.rs)
   — one NDJSON payload with a malformed line skipped and counted, with nothing
   installed
   (`cargo run -p spate --features json --example json_skip_bad_records`).
 - [`s3_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_backfill.rs)
-  — `NdjsonFramer` wired into the S3 source over a staged local directory
+  — `JsonLinesFramer` wired into the S3 source over a staged local directory
   (`cargo run -p spate --features s3,json --example s3_backfill`).
 - [Decoding records](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#decoding-records)
   — how the S3 source runs a format's framer.

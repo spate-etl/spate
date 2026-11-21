@@ -25,7 +25,7 @@ use flate2::Compression as GzLevel;
 use flate2::write::GzEncoder;
 use libfuzzer_sys::fuzz_target;
 use spate_core::framing::RecordFramer;
-use spate_json::NdjsonFramer;
+use spate_json::JsonLinesFramer;
 use spate_s3::Compression;
 use spate_s3::fuzz_seams::frame_object;
 use std::io::{self, Write};
@@ -48,10 +48,10 @@ struct Input {
     cuts: Vec<u16>,
 }
 
-/// `NdjsonFramer` with the bytes the decompressor delivered folded into a
+/// `JsonLinesFramer` with the bytes the decompressor delivered folded into a
 /// digest before the framer sees them.
 struct Recording {
-    inner: NdjsonFramer,
+    inner: JsonLinesFramer,
     /// FNV-1a over the decoded stream, shared with the target because the
     /// framer is built inside the framing run.
     hash: Arc<AtomicU64>,
@@ -109,7 +109,7 @@ fn frame(policy: Compression, key: &str, cap: usize, chunks: &[&[u8]]) -> Run {
     let (hash_out, bytes_out) = (Arc::clone(&hash), Arc::clone(&bytes));
     let (records, outcome) = frame_object(policy, key, chunks, move || {
         Box::new(Recording {
-            inner: NdjsonFramer::new(cap),
+            inner: JsonLinesFramer::new(cap),
             hash: Arc::clone(&hash),
             bytes: Arc::clone(&bytes),
         })

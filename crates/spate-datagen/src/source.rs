@@ -9,7 +9,7 @@
 use crate::config::DatagenSourceConfig;
 use crate::encode::Encoder;
 use crate::lane::{DatagenLane, LaneParts, Shared, park};
-use crate::metrics::DatagenMetrics;
+use crate::metrics::DatagenSourceMetrics;
 use crate::plan::EventPlan;
 use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::SyncClock;
@@ -29,7 +29,7 @@ struct OpenState {
     issuer: AckIssuer,
     shared: Arc<Shared>,
     encoder: Arc<Encoder>,
-    metrics: Option<DatagenMetrics>,
+    metrics: Option<DatagenSourceMetrics>,
     /// Per-lane event budgets, summing to `count`. `None` when unbounded.
     budgets: Option<Vec<u64>>,
 }
@@ -139,7 +139,7 @@ impl Source for DatagenSource {
             shared: Arc::new(Shared::new(partitions, budgets.as_deref())),
             encoder: Arc::new(Encoder::new(self.config.encoding)?),
             metrics: ctx.meter.as_ref().map(|meter| {
-                DatagenMetrics::new(meter, self.config.partitions, ctx.per_partition_detail)
+                DatagenSourceMetrics::new(meter, self.config.partitions, ctx.per_partition_detail)
             }),
             budgets,
         });
@@ -159,7 +159,7 @@ impl Source for DatagenSource {
                         issuer: state.issuer.clone(),
                         plan: EventPlan::new(&config, index),
                         encoder: Arc::clone(&state.encoder),
-                        counters: state.metrics.as_ref().map(DatagenMetrics::counters),
+                        counters: state.metrics.as_ref().map(DatagenSourceMetrics::counters),
                         shared: Arc::clone(&state.shared),
                         budget: state
                             .budgets
@@ -201,7 +201,7 @@ impl Source for DatagenSource {
                 .iter()
                 .map(|o| o.load(Ordering::Acquire))
                 .sum();
-            metrics.publish(remaining, open);
+            metrics.set_progress(remaining, open);
         }
 
         let finished = bounded
@@ -560,9 +560,12 @@ mod tests {
         // out, so everything counted here belongs to the first.
         let mut released = 0;
         while let Some(mut batch) = lanes[0].poll(8, POLL).unwrap() {
+            let before = released;
             while batch.next_payload().is_some() {
                 released += 1;
             }
+            // An empty batch would keep this loop polling forever.
+            assert!(released > before, "an empty batch after {released} events");
         }
         assert_eq!(released, 50, "the whole quota, not one max_records batch");
     }

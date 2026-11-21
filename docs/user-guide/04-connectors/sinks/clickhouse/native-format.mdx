@@ -47,10 +47,11 @@ egress / wire size is the constraint (cross-region, metered links).
 RowBinary's row encode is near-memcpy-fast and hard to beat.
 
 Native also encodes a narrower set of column types. Under `format: native`,
-building the sink refuses a column of any other type, before any row is sent. What `rowbinary` does with a column Native
-refuses varies by type, and some it refuses too, so a table holding one is a
-question for [ClickHouse column types](./column-types.mdx) rather than for the
-CPU trade above.
+building the sink refuses a column of any other type, before any row is sent.
+What `rowbinary` does with a column Native refuses varies by type, and some it
+refuses too, so a table holding one is a question for
+[ClickHouse column types](./column-types.mdx) rather than for the CPU trade
+above.
 
 ## Enabling it
 

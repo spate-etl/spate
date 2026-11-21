@@ -55,8 +55,8 @@ per-entry.
 
 Each table is an ordinary `ClickHouseSink`, built from its named config section,
 handing out its own encoder (from *its* `system.columns` and *its* `format`) and
-its own shard router before `add_sink(name, ...)` moves it into its worker pool. That is the
-single-sink wiring, N times. The whole program is
+its own shard router before `add_sink(name, ...)` moves it into its worker pool.
+That is the single-sink wiring, N times. The whole program is
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs); it
 needs a Kafka topic of Avro storefront-event messages and both target tables,
 and runs with

@@ -232,11 +232,11 @@ names the replica and carries the server's `UNKNOWN_SETTING` message.
 
 Encoding is CPU work, so it happens on the pipeline threads. The sink's
 `RowEncoder`, from `sink.encoder()`, writes each row in the format the `format`
-key names. Its type parameter is the record *family*, not the row type, so
-owned rows are wrapped as `Owned<Row>` (e.g. `sink.encoder::<Owned<OrderRow>>()`),
-while the encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O
-runtime only merge frames, seal batches, and drive inserts; they never touch a
-record.
+key names. Its type parameter is the record *family*, not the row type, so owned
+rows are wrapped as `Owned<Row>` (e.g. `sink.encoder::<Owned<OrderRow>>()`),
+while the encode path itself needs only `Row: serde::Serialize`. Sink workers on
+the I/O runtime only merge frames, seal batches, and drive inserts; they never
+touch a record.
 
 :::warning
 The rows themselves carry no column names; position is everything. The row

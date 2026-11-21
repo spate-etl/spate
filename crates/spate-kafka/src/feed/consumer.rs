@@ -304,11 +304,8 @@ pub(crate) fn run(mut d: Driver) {
         d.resend_due();
         // Confirmed tombstones finish their offsets before the last commit.
         // The flush polls the producer from this thread, beside the
-        // producer's own poll thread. Each report is still taken once, and
-        // an error event's two callbacks run on the thread that popped it,
-        // but two pollers' callbacks can interleave on the producer
-        // context's one unpaired-error slot, so within this window a
-        // producer error can be logged twice.
+        // producer's own poll thread, and each report or error event is
+        // taken by one of the two.
         flush_writes(&core, &d.producer, wait)
     };
     let until = d.last_deadline(close.as_ref());

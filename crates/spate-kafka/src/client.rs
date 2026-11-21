@@ -682,7 +682,7 @@ pub(crate) struct PendingCommit<C: ConsumerContext + 'static> {
 }
 
 // SAFETY: librdkafka's API may be called from any thread
-// (librdkafka 2.12.1 INTRODUCTION.md, "Threads and callbacks"), and the queue
+// (librdkafka INTRODUCTION.md, "Threads and callbacks"), and the queue
 // is owned by one value, used by one thread at a time.
 unsafe impl<C: ConsumerContext + 'static> Send for PendingCommit<C> {}
 

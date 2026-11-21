@@ -308,8 +308,7 @@ mod tests {
                 .set("bootstrap.servers", "localhost:1")
                 .set(key, &value)
                 .build::<BaseConsumer>()
-                .err()
-                .expect("value is rejected");
+                .expect_err("value is rejected");
             let msg = redacted_client_error(&err);
             assert!(!msg.contains("unter2"), "{key}: {msg}");
         }
@@ -323,8 +322,7 @@ mod tests {
             .set("bootstrap.servers", "localhost:1")
             .set("auto.offset.reset", "hunter2")
             .build::<BaseConsumer>()
-            .err()
-            .expect("value is rejected");
+            .expect_err("value is rejected");
         assert!(
             redacted_client_error(&err).contains("auto.offset.reset"),
             "{err}"

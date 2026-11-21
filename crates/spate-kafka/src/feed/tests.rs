@@ -681,15 +681,15 @@ fn a_unit_is_written_with_its_count() {
     );
 }
 
-/// Pins that the feed producer's context logs each error event once when it
-/// arrives as the identical pair of callbacks rdkafka makes.
+/// Pins that the feed producer's context logs each error callback once, a
+/// repeat of the previous one included.
 #[test]
 fn a_producer_error_event_is_logged_once() {
     use crate::client::Hooks;
     const DOWN: &str = "1/1 brokers are down";
     let context = FeedProducerHooks::new(Arc::new(core(10)));
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-        for _ in 0..4 {
+        for _ in 0..2 {
             context.error(KafkaError::Global(C::AllBrokersDown), DOWN, None);
         }
     });

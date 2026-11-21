@@ -4,10 +4,9 @@
 use super::Core;
 use super::write::{Failure, Write};
 use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
-use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::statistics::Statistics;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// The context the feed's producer runs under.
 pub(crate) type FeedProducerContext = SpateContext<FeedProducerHooks>;
@@ -17,36 +16,11 @@ pub(crate) type FeedProducerContext = SpateContext<FeedProducerHooks>;
 #[derive(Debug)]
 pub(crate) struct FeedProducerHooks {
     core: Arc<Core>,
-    /// The last error callback, until the identical call that repeats it.
-    unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
 
 impl FeedProducerHooks {
     pub(crate) fn new(core: Arc<Core>) -> FeedProducerHooks {
-        FeedProducerHooks {
-            core,
-            unpaired_error: Mutex::new(None),
-        }
-    }
-
-    /// Whether this error callback repeats the previous one, which it then
-    /// consumes. rdkafka's producer poll hands each error event to the
-    /// context twice in a row on the poll thread;
-    /// `rdkafka_delivers_each_producer_error_twice` pins that. The flush a
-    /// stopping feed runs on its consumer thread is a second poller, whose
-    /// callbacks can interleave with the poll thread's on this one slot, so
-    /// within that flush an error can be logged twice.
-    fn repeats_previous(&self, code: Option<RDKafkaErrorCode>, reason: &str) -> bool {
-        let mut unpaired = self.unpaired_error.lock().expect("unpaired error lock");
-        if unpaired
-            .as_ref()
-            .is_some_and(|(c, r)| *c == code && r == reason)
-        {
-            *unpaired = None;
-            return true;
-        }
-        *unpaired = Some((code, reason.to_owned()));
-        false
+        FeedProducerHooks { core }
     }
 }
 
@@ -60,12 +34,8 @@ impl Hooks for FeedProducerHooks {
     /// error before it purges the queue, so the latch is in place when the
     /// purged writes settle and every later publish fails with the cause.
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str, instance: Option<usize>) {
-        let code = error.rdkafka_error_code();
-        if self.repeats_previous(code, reason) {
-            return;
-        }
         log_error(&error, reason, instance);
-        match code {
+        match error.rdkafka_error_code() {
             Some(code) if crate::error::ends_idempotent_producer(code) => {
                 self.core
                     .latch(&format!("the feed's producer stopped: {reason}"));

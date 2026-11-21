@@ -973,3 +973,13 @@ mod block_size {
         }
     }
 }
+
+#[test]
+fn debug_names_the_type_with_its_column_and_row_counts() {
+    let enc =
+        ClickHouseNativeEncoder::<Owned<u64>>::new(schema(&[("id", "UInt64"), ("name", "String")]));
+    assert_eq!(
+        format!("{enc:?}"),
+        "ClickHouseNativeEncoder { columns: 2, rows: 0 }"
+    );
+}

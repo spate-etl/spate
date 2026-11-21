@@ -372,4 +372,14 @@ mod tests {
             (ABC_HASH % 2) as usize,
         );
     }
+
+    #[test]
+    fn debug_names_the_type_with_its_interval_ends() {
+        let router =
+            ClickHouseDistributedRouter::<OwnedBytes>::new(first_byte_key, &[9, 10]).unwrap();
+        assert_eq!(
+            format!("{router:?}"),
+            "ClickHouseDistributedRouter { ends: [9, 19], uniform: false, .. }"
+        );
+    }
 }

@@ -22,7 +22,7 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::sink::ShardWriter;
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
-use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_kafka::{KafkaSink, KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
 use spate_test_support::{SingleBroker, TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
@@ -160,7 +160,7 @@ fn connector_clients(brokers: &str, ca_location: &str) {
     let mut sink_cfg = KafkaSinkConfig::new(brokers, TOPIC);
     sink_cfg.statistics_interval = Duration::ZERO;
     sink_cfg.rdkafka = tls.clone();
-    let sink = spate_kafka::sink::build(sink_cfg).expect("sink build");
+    let sink = KafkaSink::new(sink_cfg).expect("sink build");
     let batch = sealed(
         &mut sink.encoder_bytes(),
         (0..RECORDS).map(|i| format!("tls-{i}")),

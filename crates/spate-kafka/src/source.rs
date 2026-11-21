@@ -2009,7 +2009,7 @@ impl Source for KafkaSource {
             return Err(SourceError::fatal("open() called twice"));
         }
         // Enforce the passthrough guard (and the whole denylist) before any
-        // client is created. The sink's choke point is `build()`; `open()` is
+        // client is created. The sink's choke point is its constructors; `open()` is
         // the source's, catching programmatic construction via
         // `KafkaSource::new` that bypasses `from_component_config`'s validation.
         self.config

@@ -72,7 +72,7 @@ impl Rig {
         config
             .rdkafka
             .insert("linger.ms".to_owned(), "0".to_owned());
-        let sink = spate_kafka::sink::build(config).expect("sink build");
+        let sink = KafkaSink::new(config).expect("sink build");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

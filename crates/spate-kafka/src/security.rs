@@ -8,10 +8,11 @@
 //! with SSL/SASL support, which is the crate's off-by-default `tls` feature.
 //!
 //! Without the feature, librdkafka rejects a security request only when the
-//! client is created: the sink eagerly in `build()`, the source in `open()`.
-//! Both call this guard from `validate()` before that point (the source also
-//! at config-load via `from_component_config`), so a misconfiguration fails
-//! identically with an actionable message instead of late and asymmetrically.
+//! client is created: the sink eagerly in its constructors, the source in
+//! `open()`. Both call this guard from `validate()` before that point, and
+//! both again at config-load via their config's `from_component_config`, so a
+//! misconfiguration fails identically with an actionable message instead of
+//! late and asymmetrically.
 
 use spate_core::config::{ConfigError, SectionPath};
 use std::collections::BTreeMap;

@@ -55,7 +55,7 @@ fn sink_config(brokers: &str, extra: &str) -> KafkaSinkConfig {
 }
 
 fn sink(brokers: &str, extra: &str) -> KafkaSink {
-    spate_kafka::sink::build(sink_config(brokers, extra)).expect("sink build")
+    KafkaSink::new(sink_config(brokers, extra)).expect("sink build")
 }
 
 /// Read `n` messages back from the mock cluster (order within the single
@@ -479,7 +479,7 @@ const DELIVERY_GRACE: Duration = Duration::from_secs(5);
 
 /// A sink whose writer runs its deadlines on `io_clock`.
 fn sink_on(brokers: &str, extra: &str, io_clock: Arc<dyn IoClock + RefUnwindSafe>) -> KafkaSink {
-    spate_kafka::sink::build_on_clocks(sink_config(brokers, extra), Arc::new(SystemClock), io_clock)
+    KafkaSink::new_on_clocks(sink_config(brokers, extra), Arc::new(SystemClock), io_clock)
         .expect("sink build")
 }
 

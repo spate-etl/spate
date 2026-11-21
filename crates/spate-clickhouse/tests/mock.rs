@@ -206,7 +206,7 @@ async fn matching_schema_passes_and_first_record_encodes() {
 
     // The first-record struct check passes and the bytes are the row's alone:
     // the header is the writer's, not the encoder's.
-    let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<TestRow>>::with_schema(schema);
+    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<TestRow>>::new(schema);
     let row = TestRow {
         id: 7,
         name: "x".into(),
@@ -241,7 +241,8 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
     answer_build(&mock, matching_columns());
     let schema = sink_for(mock.url()).await.schema();
 
-    let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<WrongOrder>>::with_schema(schema);
+    let mut encoder =
+        spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<WrongOrder>>::new(schema);
     let err = encoder
         .encode(
             &record(WrongOrder {
@@ -280,7 +281,7 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
     let schema = sink_for(mock.url()).await.schema();
-    let err = spate_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
+    let err = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<WrongType>>::new(schema)
         .encode(&record(wrong), &mut BytesMut::new())
         .expect_err("the type check runs on every sink");
     let reason = err.reason();
@@ -293,7 +294,7 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
 
 #[tokio::test]
 async fn the_native_encoder_checks_wrapper_scale_against_the_fetched_precision() {
-    use spate_clickhouse::{DateTime64Millis, NativeEncoder};
+    use spate_clickhouse::{ClickHouseNativeEncoder, DateTime64Millis};
     use spate_core::sink::RowEncoder;
 
     #[derive(Clone, Serialize, ClickHouseRow)]
@@ -335,7 +336,7 @@ shards:
         .await
         .native_schema()
         .expect("build native schema");
-    let err = NativeEncoder::<Owned<EventRow>>::new(schema)
+    let err = ClickHouseNativeEncoder::<Owned<EventRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     let reason = err.reason();
@@ -355,14 +356,14 @@ shards:
         .await
         .native_schema()
         .expect("build native schema");
-    NativeEncoder::<Owned<EventRow>>::new(schema)
+    ClickHouseNativeEncoder::<Owned<EventRow>>::new(schema)
         .encode(&record(row), &mut BytesMut::new())
         .expect("matching precision encodes");
 }
 
 #[tokio::test]
 async fn both_encoders_check_decimal_scale_against_the_fetched_column() {
-    use spate_clickhouse::{ClickHouseEncoder, Decimal64, NativeEncoder};
+    use spate_clickhouse::{ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, Decimal64};
     use spate_core::sink::RowEncoder;
 
     #[derive(Clone, Serialize, ClickHouseRow)]
@@ -412,7 +413,7 @@ shards:
     let mock = Mock::new();
     answer_build(&mock, mismatched_columns());
     let schema = price_sink(mock.url(), "rowbinary").await.schema();
-    let err = ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
+    let err = ClickHouseRowBinaryEncoder::<Owned<PriceRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
@@ -424,7 +425,7 @@ shards:
         .await
         .native_schema()
         .expect("build native schema");
-    let err = NativeEncoder::<Owned<PriceRow>>::new(schema)
+    let err = ClickHouseNativeEncoder::<Owned<PriceRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
@@ -435,7 +436,7 @@ shards:
     let mock = Mock::new();
     answer_build(&mock, agreeing());
     let schema = price_sink(mock.url(), "rowbinary").await.schema();
-    ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
+    ClickHouseRowBinaryEncoder::<Owned<PriceRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect("rowbinary encodes an agreeing scale");
 
@@ -445,7 +446,7 @@ shards:
         .await
         .native_schema()
         .expect("build native schema");
-    NativeEncoder::<Owned<PriceRow>>::new(schema)
+    ClickHouseNativeEncoder::<Owned<PriceRow>>::new(schema)
         .encode(&record(row), &mut BytesMut::new())
         .expect("native encodes an agreeing scale");
 }

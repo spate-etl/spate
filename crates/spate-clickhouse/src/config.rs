@@ -11,7 +11,7 @@
 use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
 use crate::http::StartupBound;
-use crate::router::{DistributedRouter, KeyExtractor};
+use crate::router::{ClickHouseDistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytes::Bytes;
@@ -167,9 +167,9 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
 /// `FORMAT RowBinaryWithNamesAndTypes` with a header naming each column and
 /// its type, and a Native block carries the same per column, so the server
 /// checks the schema on every insert rather than mapping bytes by position.
-/// Pair Native with [`crate::NativeEncoder`] on the chain (via
+/// Pair Native with [`crate::ClickHouseNativeEncoder`] on the chain (via
 /// [`ClickHouseSink::native_schema`]); RowBinary pairs with
-/// [`crate::ClickHouseEncoder`].
+/// [`crate::ClickHouseRowBinaryEncoder`].
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -790,15 +790,15 @@ impl ClickHouseSinkBuilder {
         })
     }
 
-    /// A [`DistributedRouter`] over the configured shard topology, before the
-    /// schema fetch. Same placement as [`ClickHouseSink::router`], which is
-    /// the one to use once the sink exists.
+    /// A [`ClickHouseDistributedRouter`] over the configured shard topology,
+    /// before the schema fetch. Same placement as [`ClickHouseSink::router`],
+    /// which is the one to use once the sink exists.
     ///
     /// `F` is not inferable from the extractor fn item, so name it:
     /// `builder.router::<Owned<OrderLineRow>>(order_key)`.
     #[must_use]
-    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
-        DistributedRouter::new(extract, &self.shard_weights)
+    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> ClickHouseDistributedRouter<F> {
+        ClickHouseDistributedRouter::new(extract, &self.shard_weights)
             .expect("config validation guarantees at least one shard and weights >= 1")
     }
 }
@@ -831,7 +831,7 @@ pub struct ClickHouseSink {
 impl ClickHouseSink {
     /// The live table's columns, in the row struct's field order, as
     /// [`connect`](ClickHouseSinkBuilder::connect) fetched them. Hand it to
-    /// [`crate::ClickHouseEncoder::with_schema`] for the first-record struct
+    /// [`crate::ClickHouseRowBinaryEncoder::new`] for the first-record struct
     /// check.
     #[must_use]
     pub fn schema(&self) -> Arc<RowSchema> {
@@ -861,8 +861,8 @@ impl ClickHouseSink {
     }
 
     /// A [`NativeSchema`](crate::native::NativeSchema) over the fetched
-    /// columns, for a [`crate::NativeEncoder`]. Fails for a column type the
-    /// Native encoder cannot lay out, before any row is encoded.
+    /// columns, for a [`crate::ClickHouseNativeEncoder`]. Fails for a column
+    /// type the Native encoder cannot lay out, before any row is encoded.
     pub fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, crate::NativeError> {
         crate::native::NativeSchema::from_row_schema(&self.schema)
     }
@@ -875,7 +875,7 @@ impl ClickHouseSink {
         endpoint_probe(self.writer.clone(), Arc::clone(&self.probe_endpoints))
     }
 
-    /// A [`DistributedRouter`] over this sink's shard topology and
+    /// A [`ClickHouseDistributedRouter`] over this sink's shard topology and
     /// configured weights. Its placement matches a `Distributed` table with
     /// sharding expression `xxHash64(<key column>)`. Infallible: the weights
     /// were validated at [`ClickHouseSinkBuilder::new`].
@@ -884,8 +884,8 @@ impl ClickHouseSink {
     /// projections are not injective), so name it:
     /// `sink.router::<Owned<OrderLineRow>>(order_key)`.
     #[must_use]
-    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
-        DistributedRouter::new(extract, &self.shard_weights)
+    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> ClickHouseDistributedRouter<F> {
+        ClickHouseDistributedRouter::new(extract, &self.shard_weights)
             .expect("config validation guarantees at least one shard and weights >= 1")
     }
 

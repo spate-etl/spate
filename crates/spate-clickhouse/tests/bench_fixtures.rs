@@ -13,8 +13,8 @@
 
 use bytes::BytesMut;
 use spate_clickhouse::{
-    ClickHouseEncoder, ClickHouseRow, Compression, DistributedRouter, NativeEncoder, NativeSchema,
-    ShardKey,
+    ClickHouseDistributedRouter, ClickHouseNativeEncoder, ClickHouseRow,
+    ClickHouseRowBinaryEncoder, Compression, NativeSchema, ShardKey,
 };
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
@@ -60,19 +60,19 @@ fn the_native_schemas_match_their_row_structs() {
 
     assert!(
         drive(
-            NativeEncoder::<Owned<_>>::new(events),
+            ClickHouseNativeEncoder::<Owned<_>>::new(events),
             rows::events(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            NativeEncoder::<Owned<_>>::new(metrics),
+            ClickHouseNativeEncoder::<Owned<_>>::new(metrics),
             rows::metrics(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            NativeEncoder::<Owned<_>>::new(exotic),
+            ClickHouseNativeEncoder::<Owned<_>>::new(exotic),
             rows::exotic(rows::ROWS)
         ) > 0
     );
@@ -82,19 +82,19 @@ fn the_native_schemas_match_their_row_structs() {
 fn rowbinary_encodes_every_schema() {
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
         ) > 0
     );
@@ -119,7 +119,7 @@ fn the_corpora_are_pinned_across_revisions() {
 
     assert_eq!(
         pin(&encoded(
-            NativeEncoder::<Owned<_>>::new(events),
+            ClickHouseNativeEncoder::<Owned<_>>::new(events),
             rows::events(rows::ROWS)
         )),
         (116_573, 0xb930_6600_3332_22dc),
@@ -127,7 +127,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&encoded(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
         )),
         (125_738, 0x90da_ab4d_e84c_9ce2),
@@ -135,7 +135,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&encoded(
-            NativeEncoder::<Owned<_>>::new(metrics),
+            ClickHouseNativeEncoder::<Owned<_>>::new(metrics),
             rows::metrics(rows::ROWS)
         )),
         (92_204, 0xda21_51a2_dc51_84fd),
@@ -143,7 +143,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&encoded(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
         )),
         (92_000, 0x2d64_63ee_8d8c_ef84),
@@ -151,7 +151,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&encoded(
-            NativeEncoder::<Owned<_>>::new(exotic),
+            ClickHouseNativeEncoder::<Owned<_>>::new(exotic),
             rows::exotic(rows::ROWS)
         )),
         (174_724, 0xdb49_5aea_6386_ce53),
@@ -159,7 +159,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&encoded(
-            ClickHouseEncoder::<Owned<_>>::unchecked(),
+            ClickHouseRowBinaryEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
         )),
         (170_463, 0x2a87_b850_18c1_31ea),
@@ -210,7 +210,7 @@ fn the_routing_corpora_are_pinned_across_revisions() {
         digest(
             short
                 .iter()
-                .map(|k| DistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
+                .map(|k| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
         ),
         0x30fe_fce2_a8f4_e239,
         "str_short"
@@ -218,7 +218,7 @@ fn the_routing_corpora_are_pinned_across_revisions() {
     assert_eq!(
         digest(
             long.iter()
-                .map(|k| DistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
+                .map(|k| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
         ),
         0x0cef_330d_2fc7_cb2e,
         "str_long"
@@ -227,7 +227,7 @@ fn the_routing_corpora_are_pinned_across_revisions() {
         digest(
             blobs
                 .iter()
-                .map(|b| DistributedRouter::<Keys>::hash_key(ShardKey::Bytes(b)))
+                .map(|b| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::Bytes(b)))
         ),
         0x3957_2f43_7510_81a1,
         "blob"
@@ -235,7 +235,7 @@ fn the_routing_corpora_are_pinned_across_revisions() {
     assert_eq!(
         digest(
             u64s.iter()
-                .map(|v| DistributedRouter::<Keys>::hash_key(ShardKey::U64(*v)))
+                .map(|v| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::U64(*v)))
         ),
         0xe556_8701_4100_be0e,
         "u64"
@@ -243,7 +243,7 @@ fn the_routing_corpora_are_pinned_across_revisions() {
     assert_eq!(
         digest(
             u32s.iter()
-                .map(|v| DistributedRouter::<Keys>::hash_key(ShardKey::U32(*v)))
+                .map(|v| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::U32(*v)))
         ),
         0x9dda_6b55_d66b_d743,
         "u32"
@@ -261,14 +261,16 @@ fn the_routing_corpora_are_pinned_across_revisions() {
 fn the_weight_tables_reach_both_selection_paths() {
     type Keys = Owned<String>;
 
-    let uniform = DistributedRouter::<Keys>::new(first_char, &keys::UNIFORM).expect("uniform");
-    let tiered = DistributedRouter::<Keys>::new(first_char, &keys::TIERED).expect("tiered");
+    let uniform =
+        ClickHouseDistributedRouter::<Keys>::new(first_char, &keys::UNIFORM).expect("uniform");
+    let tiered =
+        ClickHouseDistributedRouter::<Keys>::new(first_char, &keys::TIERED).expect("tiered");
     assert_eq!(uniform.shard_count(), keys::SHARDS);
     assert_eq!(tiered.shard_count(), keys::SHARDS);
 
     let hashes: Vec<u64> = keys::short_strings(keys::KEYS)
         .iter()
-        .map(|k| DistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
+        .map(|k| ClickHouseDistributedRouter::<Keys>::hash_key(ShardKey::Str(k)))
         .collect();
 
     // Every shard index is in range under both tables, and the scan depth
@@ -344,7 +346,7 @@ fn the_frame_fixture_is_pinned_across_revisions() {
     let digest = batch
         .frames
         .iter()
-        .map(|f| DistributedRouter::<Owned<String>>::hash_key(ShardKey::Bytes(&f[..])))
+        .map(|f| ClickHouseDistributedRouter::<Owned<String>>::hash_key(ShardKey::Bytes(&f[..])))
         .fold(0u64, |acc, h| acc.rotate_left(7) ^ h);
     assert_eq!(digest, BATCH_DIGEST, "the write-path batch's bytes");
 }

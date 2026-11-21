@@ -66,18 +66,18 @@ and runs with
 ```
 
 `payments_sink` and `refunds_sink` come from the `sinks:` map's `payments` and
-`refunds` entries, resolved by `sink_config(name)`. Each mints a `NativeEncoder`
-over the row family that table receives (`Owned<PaymentRow>` and
-`Owned<RefundRow>`, two structs with different columns) from its own fetched
-schema, and a `DistributedRouter` over the same family from the `ShardKey`
-extractors `payment_key` and `refund_key`, which shard both tables on
-`order_id`. Sharding both on the same key is what keeps an order's payment and
-its refund on one shard, so a join across the two tables stays local, but only
-while the two sinks also carry the same `shards` topology. Placement is the
-key's hash over the shard weights, so scaling one table's shard list without the
-other separates the rows the shared key was chosen to keep together. The split's
-input family is `Owned<StorefrontEvent>`, the sum type the chain decodes the
-union into. See the concept page for the
+`refunds` entries, resolved by `sink_config(name)`. Each mints a
+`ClickHouseNativeEncoder` over the row family that table receives
+(`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different columns)
+from its own fetched schema, and a `ClickHouseDistributedRouter` over the same
+family from the `ShardKey` extractors `payment_key` and `refund_key`, which
+shard both tables on `order_id`. Sharding both on the same key is what keeps an
+order's payment and its refund on one shard, so a join across the two tables
+stays local, but only while the two sinks also carry the same `shards` topology.
+Placement is the key's hash over the shard weights, so scaling one table's shard
+list without the other separates the rows the shared key was chosen to keep
+together. The split's input family is `Owned<StorefrontEvent>`, the sum type the
+chain decodes the union into. See the concept page for the
 [routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
 ## What carries over per table, unchanged

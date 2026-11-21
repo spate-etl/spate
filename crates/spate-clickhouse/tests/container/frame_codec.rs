@@ -13,7 +13,7 @@ use hyper::{Request, Response};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use spate_clickhouse::{Compression, NativeEncoder, serialize_row};
+use spate_clickhouse::{ClickHouseNativeEncoder, Compression, serialize_row};
 use spate_core::error::ErrorClass;
 use spate_core::rng::SplitMix64;
 use std::sync::{Arc, Mutex};
@@ -36,8 +36,9 @@ fn coded<T>(
 where
     T: Serialize + Clone + Send + 'static,
 {
-    let mut native = (sink.format() == config::Format::Native)
-        .then(|| NativeEncoder::<Owned<T>>::new(sink.native_schema().expect("a Native schema")));
+    let mut native = (sink.format() == config::Format::Native).then(|| {
+        ClickHouseNativeEncoder::<Owned<T>>::new(sink.native_schema().expect("a Native schema"))
+    });
     let raw: Vec<Bytes> = chunks
         .iter()
         .map(|chunk| {

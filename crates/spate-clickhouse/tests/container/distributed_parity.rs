@@ -49,7 +49,7 @@
 // `spate-ch1-<nonce>` rather than a fixed `ch-shard-0`.
 
 use super::*;
-use spate_clickhouse::{ClickHouseEncoder, DistributedRouter, ShardKey};
+use spate_clickhouse::{ClickHouseDistributedRouter, ClickHouseRowBinaryEncoder, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckRef, Checkpointer};
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
@@ -189,7 +189,7 @@ fn make_data(num_skus: usize, lines_per: usize) -> (Vec<String>, Vec<LineRow>) {
 /// The shard our router (and, by parity, ClickHouse) assigns `sku` to,
 /// for a 2-shard equal-weight cluster.
 fn shard_of(sku: &str) -> usize {
-    (DistributedRouter::<Owned<LineRow>>::hash_key(ShardKey::Str(sku)) % 2) as usize
+    (ClickHouseDistributedRouter::<Owned<LineRow>>::hash_key(ShardKey::Str(sku)) % 2) as usize
 }
 
 // ---- the two-node cluster fixture (net-new: nothing else networks two --------
@@ -477,7 +477,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let mut driver = chain(BatchDeser)
         .flat_map::<Owned<LineRow>, _>(explode)
         .sink(
-            ClickHouseEncoder::<Owned<LineRow>>::with_schema(schema),
+            ClickHouseRowBinaryEncoder::<Owned<LineRow>>::new(schema),
             router,
             ChunkConfig::default(),
             queues,
@@ -805,10 +805,10 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
     );
 
     // Weighted placement oracle: the router's own public API over [9, 10].
-    let oracle =
-        DistributedRouter::<Owned<LineRow>>::new(sku_key, &[9, 10]).expect("oracle router");
+    let oracle = ClickHouseDistributedRouter::<Owned<LineRow>>::new(sku_key, &[9, 10])
+        .expect("oracle router");
     let shard_w = |sku: &str| {
-        oracle.shard_for_hash(DistributedRouter::<Owned<LineRow>>::hash_key(
+        oracle.shard_for_hash(ClickHouseDistributedRouter::<Owned<LineRow>>::hash_key(
             ShardKey::Str(sku),
         ))
     };

@@ -18,22 +18,23 @@ use std::sync::Arc;
 /// as-is.
 ///
 /// `F` is the **record family**: use `Owned<T>` for plain owned row structs
-/// (`ClickHouseEncoder::<Owned<MyRow>>::new()`), or a borrowed family whose
-/// `Rec<'buf>` points into the payload buffer for zero-copy pipelines. Any
-/// family whose records implement `Serialize` at every lifetime encodes.
+/// (`ClickHouseRowBinaryEncoder::<Owned<MyRow>>::new(sink.schema())`), or a
+/// borrowed family whose `Rec<'buf>` points into the payload buffer for
+/// zero-copy pipelines. Any family whose records implement `Serialize` at every
+/// lifetime encodes.
 ///
 /// The row struct's **field declaration order is the wire contract**: it is
 /// the insert column list `#[derive(ClickHouseRow)]` generates (see the
 /// crate docs). The encoder checks that contract against the live table's
 /// schema on each pipeline thread's first record.
 #[derive(Debug)]
-pub struct ClickHouseEncoder<F> {
+pub struct ClickHouseRowBinaryEncoder<F> {
     expected: Arc<RowSchema>,
     checked: bool,
     _row: PhantomData<fn(F)>,
 }
 
-impl<F> ClickHouseEncoder<F> {
+impl<F> ClickHouseRowBinaryEncoder<F> {
     /// An encoder that validates the row struct against `expected` (the
     /// schema from [`ClickHouseSink::schema`](crate::ClickHouseSink::schema))
     /// on the first record it encodes: field names, order and type classes.
@@ -41,8 +42,8 @@ impl<F> ClickHouseEncoder<F> {
     /// error, which stops the pipeline before any misaligned batch is sent.
     /// Steady-state cost after the first record is one predictable branch.
     #[must_use]
-    pub fn with_schema(expected: Arc<RowSchema>) -> Self {
-        ClickHouseEncoder {
+    pub fn new(expected: Arc<RowSchema>) -> Self {
+        ClickHouseRowBinaryEncoder {
             expected,
             checked: false,
             _row: PhantomData,
@@ -55,7 +56,7 @@ impl<F> ClickHouseEncoder<F> {
     #[doc(hidden)]
     #[must_use]
     pub fn unchecked() -> Self {
-        ClickHouseEncoder {
+        ClickHouseRowBinaryEncoder {
             expected: Arc::new(RowSchema::empty()),
             checked: true,
             _row: PhantomData,
@@ -63,11 +64,11 @@ impl<F> ClickHouseEncoder<F> {
     }
 }
 
-impl<F> Clone for ClickHouseEncoder<F> {
+impl<F> Clone for ClickHouseRowBinaryEncoder<F> {
     fn clone(&self) -> Self {
         // Each pipeline thread's clone re-validates its own first record:
         // the check is cheap, and threads must not race a shared flag.
-        ClickHouseEncoder {
+        ClickHouseRowBinaryEncoder {
             expected: Arc::clone(&self.expected),
             checked: self.checked,
             _row: PhantomData,
@@ -75,7 +76,7 @@ impl<F> Clone for ClickHouseEncoder<F> {
     }
 }
 
-impl<F> RowEncoder<F> for ClickHouseEncoder<F>
+impl<F> RowEncoder<F> for ClickHouseRowBinaryEncoder<F>
 where
     F: RecFamily,
     for<'b> F::Rec<'b>: Serialize,
@@ -104,9 +105,9 @@ where
 /// encode upstream or replicate pre-encoded data. One record must be
 /// exactly one encoded row; the framework counts rows by records.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PreEncodedRows;
+pub struct ClickHouseBytesEncoder;
 
-impl RowEncoder<Owned<Vec<u8>>> for PreEncodedRows {
+impl RowEncoder<Owned<Vec<u8>>> for ClickHouseBytesEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
         buf.extend_from_slice(&rec.payload);
         Ok(())
@@ -150,7 +151,7 @@ mod tests {
             name: "x".into(),
         });
         let mut buf = BytesMut::new();
-        ClickHouseEncoder::<Owned<Row>>::with_schema(id_name())
+        ClickHouseRowBinaryEncoder::<Owned<Row>>::new(id_name())
             .encode(&rec, &mut buf)
             .unwrap();
         assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
@@ -173,7 +174,7 @@ mod tests {
         let name = String::from("x");
         let rec = record(RowRef { id: 7, name: &name });
         let mut buf = BytesMut::new();
-        ClickHouseEncoder::<RowRefFam>::with_schema(id_name())
+        ClickHouseRowBinaryEncoder::<RowRefFam>::new(id_name())
             .encode(&rec, &mut buf)
             .unwrap();
         assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
@@ -186,7 +187,7 @@ mod tests {
             c: char,
         }
         let rec = record(Bad { c: 'x' });
-        let err = ClickHouseEncoder::<Owned<Bad>>::unchecked()
+        let err = ClickHouseRowBinaryEncoder::<Owned<Bad>>::unchecked()
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
         assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
@@ -205,7 +206,7 @@ mod tests {
             c: char,
         }
         let rec = record(Bad { c: 'x' });
-        let err = ClickHouseEncoder::<Owned<Bad>>::with_schema(schema(&[("c", "String")]))
+        let err = ClickHouseRowBinaryEncoder::<Owned<Bad>>::new(schema(&[("c", "String")]))
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
         let reason = err.reason();
@@ -224,11 +225,11 @@ mod tests {
             id: 7,
             name: "x".into(),
         });
-        let mut enc = ClickHouseEncoder::<Owned<Row>>::with_schema(id_name());
+        let mut enc = ClickHouseRowBinaryEncoder::<Owned<Row>>::new(id_name());
         enc.encode(&rec, &mut BytesMut::new()).unwrap();
 
         let mut wrong =
-            ClickHouseEncoder::<Owned<Row>>::with_schema(schema(&[("id", "UInt64")])).clone();
+            ClickHouseRowBinaryEncoder::<Owned<Row>>::new(schema(&[("id", "UInt64")])).clone();
         let err = wrong.encode(&rec, &mut BytesMut::new()).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
     }
@@ -237,7 +238,7 @@ mod tests {
     fn pre_encoded_rows_pass_through() {
         let rec = record(vec![1u8, 2, 3]);
         let mut buf = BytesMut::new();
-        PreEncodedRows.encode(&rec, &mut buf).unwrap();
+        ClickHouseBytesEncoder.encode(&rec, &mut buf).unwrap();
         assert_eq!(buf.as_ref(), &[1, 2, 3]);
     }
 }

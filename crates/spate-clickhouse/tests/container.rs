@@ -255,12 +255,13 @@ where
     ))
 }
 
-/// Encode `rows` through a [`NativeEncoder`](spate_clickhouse::NativeEncoder)
-/// into one sealed batch: `encode` per row (buffering columnar), then one
+/// Encode `rows` through a
+/// [`ClickHouseNativeEncoder`](spate_clickhouse::ClickHouseNativeEncoder) into
+/// one sealed batch: `encode` per row (buffering columnar), then one
 /// `finish_chunk` producing exactly one Native block frame, coded under the
 /// sinks' default compression.
 fn encode_native_batch<T>(
-    encoder: &mut spate_clickhouse::NativeEncoder<Owned<T>>,
+    encoder: &mut spate_clickhouse::ClickHouseNativeEncoder<Owned<T>>,
     rows: Vec<T>,
     token: &str,
 ) -> Result<SealedBatch, spate_core::error::SinkError>

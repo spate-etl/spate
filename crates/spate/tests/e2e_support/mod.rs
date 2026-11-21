@@ -31,7 +31,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseEncoder, ClickHouseSinkBuilder};
+use spate::clickhouse::{ClickHouseRowBinaryEncoder, ClickHouseSinkBuilder};
 use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
 use spate::kafka::KafkaSource;
@@ -485,7 +485,7 @@ impl Harness {
                     .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
-                        ClickHouseEncoder::<spate::deser::Owned<Event>>::with_schema(
+                        ClickHouseRowBinaryEncoder::<spate::deser::Owned<Event>>::new(
                             schema.clone(),
                         ),
                         KeyHashRouter,

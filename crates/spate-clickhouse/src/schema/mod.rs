@@ -81,7 +81,7 @@ pub enum SchemaError {
 
 /// The validated, struct-ordered expected schema. Produced by
 /// [`connect`](crate::ClickHouseSinkBuilder::connect); consumed by
-/// [`crate::ClickHouseEncoder::with_schema`] for the first-record check and by
+/// [`crate::ClickHouseRowBinaryEncoder::new`] for the first-record check and by
 /// the writer for its wire header. Opaque: holds no `clickhouse` crate types.
 #[derive(Debug)]
 pub struct RowSchema {

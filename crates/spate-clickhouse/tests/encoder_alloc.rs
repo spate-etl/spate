@@ -8,7 +8,7 @@ use serde::Serialize;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::ClickHouseSinkConfig;
 use spate_clickhouse::testing::system_columns;
-use spate_clickhouse::{ClickHouseEncoder, ClickHouseRow};
+use spate_clickhouse::{ClickHouseRow, ClickHouseRowBinaryEncoder};
 use spate_core::deser::Owned;
 use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
@@ -26,7 +26,7 @@ struct TestRow {
 }
 
 fn chunk(
-    enc: &mut ClickHouseEncoder<Owned<TestRow>>,
+    enc: &mut ClickHouseRowBinaryEncoder<Owned<TestRow>>,
     rows: &[Record<TestRow>],
     buf: &mut BytesMut,
 ) {
@@ -74,8 +74,8 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
         })
         .collect();
     let mut buf = BytesMut::with_capacity(1 << 20);
-    let mut checked = ClickHouseEncoder::<Owned<TestRow>>::with_schema(schema);
-    let mut unchecked = ClickHouseEncoder::<Owned<TestRow>>::unchecked();
+    let mut checked = ClickHouseRowBinaryEncoder::<Owned<TestRow>>::new(schema);
+    let mut unchecked = ClickHouseRowBinaryEncoder::<Owned<TestRow>>::unchecked();
     let c = measure(|| chunk(&mut checked, &rows, &mut buf)).unwrap();
     let u = measure(|| chunk(&mut unchecked, &rows, &mut buf)).unwrap();
     assert_eq!(c, u, "checked {c:?} vs unchecked {u:?}");

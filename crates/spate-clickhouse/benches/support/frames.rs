@@ -20,7 +20,7 @@
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use bytes::{Bytes, BytesMut};
-use spate_clickhouse::{ClickHouseRow, NativeEncoder, NativeSchema};
+use spate_clickhouse::{ClickHouseNativeEncoder, ClickHouseRow, NativeSchema};
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, SealedBatch};
 
@@ -67,7 +67,7 @@ pub(crate) struct Frame {
 /// `tests/bench_fixtures.rs` would report first.
 pub(crate) fn native_frames(count: usize) -> Vec<Frame> {
     let schema = NativeSchema::from_columns(&rows::event_columns()).expect("event schema builds");
-    let mut enc = NativeEncoder::<Owned<EventRow>>::new(schema);
+    let mut enc = ClickHouseNativeEncoder::<Owned<EventRow>>::new(schema);
     let target_bytes = spate_core::ops::ChunkConfig::default().target_bytes;
     let mut buf = BytesMut::new();
     let mut frames = Vec::with_capacity(count);

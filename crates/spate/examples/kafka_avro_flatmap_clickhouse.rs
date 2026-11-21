@@ -14,7 +14,8 @@
 //!   rather than row-at-a-time, which is what ClickHouse ingests most cheaply.
 //! - **Record-aware shard routing** — flat_map children share their parent's
 //!   metadata, so the default meta-only router would colocate every line of an
-//!   order anyway; a [`DistributedRouter`](spate::clickhouse::DistributedRouter)
+//!   order anyway; a
+//!   [`ClickHouseDistributedRouter`](spate::clickhouse::ClickHouseDistributedRouter)
 //!   keyed on each row's own `order_id` places them the way
 //!   `xxHash64(order_id)` would, which is what a `Distributed` read needs.
 //!
@@ -31,16 +32,17 @@
 //!    decoder. The YAML uses `mode: raw` with an inline writer schema, so no
 //!    registry is needed.
 //! 4. `sink.native_schema()` — fetches `system.columns` and builds the columnar
-//!    template; `NativeEncoder::new` mints one encoder per shard on `.clone()`.
+//!    template; `ClickHouseNativeEncoder::new` mints one encoder per shard on
+//!    `.clone()`.
 //! 5. `.flat_map` fans out the line array; `.filter` drops a line ordering no
 //!    units. Native column mapping is **positional**, off `OrderLineRow`'s
 //!    field declaration order via `#[derive(ClickHouseRow)]`, with a
 //!    first-record field-name check off the hot path.
 //! 6. `sink.router::<Owned<OrderLineRow>>(order_key)` — a record-aware
-//!    [`DistributedRouter`](spate::clickhouse::DistributedRouter): each exploded
-//!    line routes by **its own** `order_id` field, placing every order's lines
-//!    on the shard a ClickHouse `Distributed` table with sharding key
-//!    `xxHash64(order_id)` would pick. With the YAML's single shard it routes
+//!    [`ClickHouseDistributedRouter`](spate::clickhouse::ClickHouseDistributedRouter):
+//!    each exploded line routes by **its own** `order_id` field, placing every
+//!    order's lines on the shard a ClickHouse `Distributed` table with sharding
+//!    key `xxHash64(order_id)` would pick. With the YAML's single shard it routes
 //!    identically to the default; scaling out is a YAML change (see the
 //!    `shards:` comment there).
 //! 7. `.run(source)` — the runtime, reusing the builder's I/O runtime.
@@ -96,7 +98,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{self, ClickHouseRow, DateTime64Millis, NativeEncoder, ShardKey};
+use spate::clickhouse::{self, ClickHouseNativeEncoder, ClickHouseRow, DateTime64Millis, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -197,16 +199,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = sink.router::<Owned<OrderLineRow>>(order_key);
     // ANCHOR_END: router
     // ANCHOR: encoder
-    let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
+    let encoder = ClickHouseNativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
     // `flat_map` explodes each order's line array into one row per line;
     // `filter` drops a line that orders nothing. It is the only bad quantity
     // the filter can see: `qty` is unsigned, so a negative one fails to decode
-    // and takes the whole order with it, one stage earlier. `NativeEncoder::
-    // encode` then writes each field into its per-column buffer on the
-    // pipeline thread, inside the terminal sink-handoff stage.
+    // and takes the whole order with it, one stage earlier.
+    // `ClickHouseNativeEncoder::encode` then writes each field into its
+    // per-column buffer on the pipeline thread, inside the terminal
+    // sink-handoff stage.
     let report = pipeline
         .sink(sink)?
         .chains(move |ctx| {

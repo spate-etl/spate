@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use spate_clickhouse::ClickHouseEncoder;
+use spate_clickhouse::ClickHouseRowBinaryEncoder;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::ops::chain_owned;
@@ -60,7 +60,7 @@ fn the_skip_line_omits_the_refused_value() {
             chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
                 .map(row)
                 .sink(
-                    ClickHouseEncoder::<Owned<Row>>::unchecked(),
+                    ClickHouseRowBinaryEncoder::<Owned<Row>>::unchecked(),
                     KeyHashRouter,
                     chunk,
                     ctx.queues,

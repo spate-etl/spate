@@ -19,7 +19,7 @@ struct Batch {
 #[test]
 fn claimed_items_do_not_grow_memory_on_the_serde_path() {
     common::assert_bounded(&common::run(
-        |b| b.build_serde::<Batch>().unwrap(),
+        |b| b.build_serde::<Batch>(),
         |batch: &Batch| batch.groups[0].len() as u64,
     ));
 }

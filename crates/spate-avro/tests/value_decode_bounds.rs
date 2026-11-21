@@ -6,22 +6,18 @@
 
 use apache_avro::types::Value;
 use apache_avro::{BigDecimal, Days, Decimal, Duration, Millis, Months, Schema, to_avro_datum};
-use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::error::DeserError;
 use spate_test::{EmitCollector, raw_payload, test_ack};
 
 fn builder(schema: &str, reader: Option<&str>) -> AvroDeserializerBuilder {
-    let settings = AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(schema)),
-        reader_schema: reader.map(SchemaSource::inline),
-        ..AvroSettings::default()
-    };
+    let mut settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
+    settings.reader_schema = reader.map(SchemaSource::inline);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap()
+    AvroDeserializerBuilder::new(settings, rt.handle()).unwrap()
 }
 
 /// Decode one payload, returning the records or the error.
@@ -143,7 +139,7 @@ fn thirty_two_levels_decode_and_thirty_three_are_refused() {
         map_datum.push(0x0e);
         map_datum.resize(map_datum.len() + levels, 0x00);
         for (schema, datum) in [(arrays, array_datum), (maps, map_datum)] {
-            let mut deser = builder(&schema, None).build_value().unwrap();
+            let mut deser = builder(&schema, None).build_value();
             if refused {
                 assert!(
                     refusal(&mut deser, &datum).contains(DEPTH_REFUSAL),
@@ -169,8 +165,8 @@ fn nested_maps(maps: usize) -> String {
 fn a_ten_node_list_decodes_and_eleven_are_refused() {
     // A node is three levels (record, union, named reference), so 32 levels
     // hold ten nodes.
-    let mut value = builder(LIST, None).build_value().unwrap();
-    let mut serde = builder(LIST, None).build_serde::<Node>().unwrap();
+    let mut value = builder(LIST, None).build_value();
+    let mut serde = builder(LIST, None).build_serde::<Node>();
     assert_eq!(decode(&mut value, &list(10)).unwrap().len(), 1);
     assert_eq!(decode(&mut serde, &list(10)).unwrap()[0].len(), 10);
     assert!(refusal(&mut value, &list(11)).contains(DEPTH_REFUSAL));
@@ -200,7 +196,7 @@ fn decimal_and_big_decimal_count_a_level_and_uuid_does_not() {
     for (leaf, value, arrays, refused) in cases {
         let schema = nested(arrays, leaf);
         let datum = nested_datum(&schema, arrays, value);
-        let mut deser = builder(&schema, None).build_value().unwrap();
+        let mut deser = builder(&schema, None).build_value();
         if refused {
             assert!(
                 refusal(&mut deser, &datum).contains(DEPTH_REFUSAL),
@@ -226,9 +222,9 @@ fn the_deepest_datum_decodes_on_a_two_mib_stack() {
     std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(|| {
-            let mut value = builder(LIST, None).build_value().unwrap();
-            let mut resolved = builder(LIST, Some(LIST_READER)).build_value().unwrap();
-            let mut serde = builder(LIST, None).build_serde::<Node>().unwrap();
+            let mut value = builder(LIST, None).build_value();
+            let mut resolved = builder(LIST, Some(LIST_READER)).build_value();
+            let mut serde = builder(LIST, None).build_serde::<Node>();
             assert_eq!(decode(&mut value, &list(10)).unwrap().len(), 1);
             // The deepest resolve is ten nodes, past the resolution limit's
             // nine unless the datum's content buys the doubling: 64 KiB on
@@ -238,7 +234,7 @@ fn the_deepest_datum_decodes_on_a_two_mib_stack() {
                 "{}",
                 refusal(&mut resolved, &list(10))
             );
-            let mut padded_reader = builder(PADDED, Some(PADDED_READER)).build_value().unwrap();
+            let mut padded_reader = builder(PADDED, Some(PADDED_READER)).build_value();
             assert_eq!(
                 decode(&mut padded_reader, &padded(10, 64 << 10))
                     .unwrap()
@@ -256,9 +252,7 @@ fn the_deepest_datum_decodes_on_a_two_mib_stack() {
 fn a_size_prefixed_block_is_walked_item_by_item() {
     // A negative count is followed by the block's byte size, which the
     // decode ignores, so the check walks the items too.
-    let mut nulls = builder(r#"{"type":"array","items":"null"}"#, None)
-        .build_value()
-        .unwrap();
+    let mut nulls = builder(r#"{"type":"array","items":"null"}"#, None).build_value();
     let claim = [zig(-(1 << 20)), zig(0), vec![0x00]].concat();
     assert!(refusal(&mut nulls, &claim).contains("item budget"));
 
@@ -266,15 +260,13 @@ fn a_size_prefixed_block_is_walked_item_by_item() {
     let schema = format!(r#"{{"type":"array","items":{inner}}}"#);
     let item = nested_datum(&inner, 31, Value::Long(7));
     let sized = [zig(-1), zig(item.len() as i64), item, vec![0x00]].concat();
-    let mut deep = builder(&schema, None).build_value().unwrap();
+    let mut deep = builder(&schema, None).build_value();
     assert!(refusal(&mut deep, &sized).contains(DEPTH_REFUSAL));
 }
 
 #[test]
 fn the_item_budget_admits_its_floor_and_refuses_one_more() {
-    let mut nulls = builder(r#"{"type":"array","items":"null"}"#, None)
-        .build_value()
-        .unwrap();
+    let mut nulls = builder(r#"{"type":"array","items":"null"}"#, None).build_value();
     let at = [zig(1 << 16), vec![0x00]].concat();
     assert_eq!(
         decode(&mut nulls, &at).unwrap(),
@@ -283,9 +275,7 @@ fn the_item_budget_admits_its_floor_and_refuses_one_more() {
     let over = [zig((1 << 16) + 1), vec![0x00]].concat();
     assert!(refusal(&mut nulls, &over).contains("item budget"));
 
-    let mut map = builder(r#"{"type":"map","values":"null"}"#, None)
-        .build_value()
-        .unwrap();
+    let mut map = builder(r#"{"type":"map","values":"null"}"#, None).build_value();
     let claim = [zig(1 << 20), vec![0x00]].concat();
     assert!(refusal(&mut map, &claim).contains("item budget"));
 }
@@ -298,8 +288,7 @@ fn a_declared_length_past_the_datum_is_refused_before_the_decode() {
         r#"{"type":"record","name":"R","fields":[{"name":"s","type":"string"}]}"#,
         None,
     )
-    .build_value()
-    .unwrap();
+    .build_value();
     let reason = refusal(&mut deser, &zig(400 << 20));
     assert!(reason.contains("needed 419430400 bytes"), "{reason}");
 }
@@ -319,7 +308,7 @@ fn duration_and_big_decimal_decode_with_the_fields_after_them() {
         ("after".into(), Value::Long(7)),
     ]);
     let datum = to_avro_datum(&Schema::parse_str(schema).unwrap(), value.clone()).unwrap();
-    let mut deser = builder(schema, None).build_value().unwrap();
+    let mut deser = builder(schema, None).build_value();
     assert_eq!(decode(&mut deser, &datum).unwrap(), [value]);
 }
 
@@ -330,7 +319,7 @@ fn the_item_budget_holds_after_a_duration() {
         {"name":"d","type":{"type":"fixed","name":"D","size":12,"logicalType":"duration"}},
         {"name":"a","type":{"type":"array","items":"null"}}]}"#;
     let datum = [vec![0; 12], zig(1 << 20), vec![0x00]].concat();
-    let mut deser = builder(schema, None).build_value().unwrap();
+    let mut deser = builder(schema, None).build_value();
     assert!(refusal(&mut deser, &datum).contains("item budget"));
 }
 
@@ -369,16 +358,14 @@ fn the_byte_budget_admits_its_floor_and_refuses_one_more() {
     // 887 and 888 put the datum either side of the floor.
     let (datum, built) = wide_datum(887, 65_536);
     assert!(built <= BUILT_FLOOR);
-    let mut deser = builder(&wide(887), None).build_value().unwrap();
+    let mut deser = builder(&wide(887), None).build_value();
     assert_eq!(decode(&mut deser, &datum).unwrap().len(), 1);
 
     let (datum, built) = wide_datum(888, 65_536);
     assert!(built > BUILT_FLOOR);
-    let mut deser = builder(&wide(888), None).build_value().unwrap();
+    let mut deser = builder(&wide(888), None).build_value();
     assert!(over_budget(&refusal(&mut deser, &datum)));
-    let mut serde = builder(&wide(888), None)
-        .build_serde::<Vec<serde::de::IgnoredAny>>()
-        .unwrap();
+    let mut serde = builder(&wide(888), None).build_serde::<Vec<serde::de::IgnoredAny>>();
     assert!(over_budget(&refusal(&mut serde, &datum)));
 }
 
@@ -399,9 +386,9 @@ fn the_byte_budget_scales_with_the_payload_past_its_floor() {
     let built = |n: u64| VALUE + items * (VALUE + STRING + n + VALUE);
     assert!(BUILT_FLOOR < built(888) && built(888) <= budget && budget < built(889));
 
-    let mut deser = builder(&schema(888), None).build_value().unwrap();
+    let mut deser = builder(&schema(888), None).build_value();
     assert_eq!(decode(&mut deser, &datum).unwrap().len(), 1);
-    let mut deser = builder(&schema(889), None).build_value().unwrap();
+    let mut deser = builder(&schema(889), None).build_value();
     let reason = refusal(&mut deser, &datum);
     assert!(
         reason.contains(&format!("decodes to more than {budget} bytes")),
@@ -468,7 +455,7 @@ fn each_decoded_byte_counts_against_the_byte_budget() {
             );
             let datum = [pad_datum.clone(), x_datum].concat();
             assert!(datum.len() <= 65_536, "{label}: the floor sets the budget");
-            let mut deser = builder(&schema, None).build_value().unwrap();
+            let mut deser = builder(&schema, None).build_value();
             let got = match decode(&mut deser, &datum) {
                 Ok(_) => false,
                 Err(DeserError::Malformed { reason }) => over_budget(&reason),
@@ -859,9 +846,7 @@ fn a_reader_schema_charges_at_least_what_one_item_resolves_to() {
     for case in reader_cases() {
         let n = 100;
         let datum = [zig(1), case.item.to_vec(), vec![0x00]].concat();
-        let mut deser = builder(&case.writer, Some(&(case.reader)(n)))
-            .build_value()
-            .unwrap_or_else(|e| panic!("{}: {e}", case.label));
+        let mut deser = builder(&case.writer, Some(&(case.reader)(n))).build_value();
         let out = decode(&mut deser, &datum).unwrap_or_else(|e| panic!("{}: {e}", case.label));
         let item = match &out[0] {
             Value::Record(fields) => &fields.iter().find(|(k, _)| k == "a").unwrap().1,
@@ -896,9 +881,7 @@ fn a_reader_schema_counts_what_resolution_builds() {
         let n = usize::try_from(n).unwrap();
         for (n, refused) in [(n, false), (n + 1, true)] {
             let reader = (case.reader)(n);
-            let mut deser = builder(&case.writer, Some(&reader))
-                .build_value()
-                .unwrap_or_else(|e| panic!("{}: {e}", case.label));
+            let mut deser = builder(&case.writer, Some(&reader)).build_value();
             let got = match decode(&mut deser, &datum) {
                 Ok(_) => false,
                 Err(DeserError::Malformed { reason }) => {
@@ -917,7 +900,7 @@ fn a_writer_with_a_field_and_its_reader_alias_decodes() {
     // nothing.
     let writer = r#"{"type":"record","name":"W","fields":[{"name":"f","type":"string"},{"name":"s","type":"string"}]}"#;
     let reader = r#"{"type":"record","name":"W","fields":[{"name":"s","type":"string","default":"d","aliases":["f"]}]}"#;
-    let mut deser = builder(writer, Some(reader)).build_value().unwrap();
+    let mut deser = builder(writer, Some(reader)).build_value();
     let out = decode(&mut deser, &[0x04, b'h', b'i', 0x04, b'y', b'o']).unwrap();
     assert_eq!(
         out,
@@ -936,7 +919,7 @@ fn a_reader_union_of_two_records_is_charged_as_its_widest() {
         r#"[{},{{"type":"record","name":"W","fields":[{{"name":"f","type":"null"}}]}}]"#,
         BIG.replace("BIG", &"x".repeat(1000))
     ));
-    let mut deser = builder(&array_of(W), Some(&reader)).build_value().unwrap();
+    let mut deser = builder(&array_of(W), Some(&reader)).build_value();
     let one = decode(&mut deser, &[zig(1), vec![0x00]].concat()).unwrap();
     let Value::Array(items) = &one[0] else {
         panic!("{one:?}")
@@ -965,7 +948,7 @@ fn a_duration_schema_resolves_its_named_references() {
         {"name":"d","type":{"type":"fixed","name":"D","size":12,"logicalType":"duration"}},
         {"name":"next","type":["null","N"]}]}"#;
     let datum = [vec![0; 12], vec![0x02], vec![0; 12], vec![0x00]].concat();
-    let mut deser = builder(schema, None).build_value().unwrap();
+    let mut deser = builder(schema, None).build_value();
     assert_eq!(decode(&mut deser, &datum).unwrap().len(), 1);
 }
 
@@ -989,7 +972,7 @@ fn the_datum_path_keeps_its_own_limits() {
     let schema = ignored(&deep);
     let mut datum = zig(5);
     datum.extend(nested_datum(&deep, 40, Value::Long(7)));
-    let mut value = builder(&schema, None).build_value().unwrap();
+    let mut value = builder(&schema, None).build_value();
     assert!(refusal(&mut value, &datum).contains(DEPTH_REFUSAL));
     let mut skip = builder(&schema, None).build_serde_datum::<Keep>().unwrap();
     assert_eq!(decode(&mut skip, &datum).unwrap()[0].keep, 5);

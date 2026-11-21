@@ -12,7 +12,7 @@
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use spate_avro::{
-    AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, AvroValueDeserializer,
+    AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, AvroValueDeserializer,
     RegistrySection,
 };
 use spate_core::checkpoint::AckRef;
@@ -40,17 +40,14 @@ fn confluent_payload(id: u32, event_id: i64) -> Vec<u8> {
     spate_test::confluent_frame(id, &datum)
 }
 
-fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
+fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroDeserializerConfig {
     settings_at(format!("http://{addr}"), ttl)
 }
 
-fn settings_at(url: String, ttl: Duration) -> AvroSettings {
-    AvroSettings {
-        mode: AvroMode::Confluent,
-        registry: Some(RegistrySection::new(url)),
-        negative_cache_ttl: ttl,
-        ..AvroSettings::default()
-    }
+fn settings_at(url: String, ttl: Duration) -> AvroDeserializerConfig {
+    let mut config = AvroDeserializerConfig::confluent(RegistrySection::new(url));
+    config.negative_cache_ttl = ttl;
+    config
 }
 
 /// A builder whose negative cache and fetch backoff read `clock`.
@@ -59,8 +56,8 @@ fn builder_on(
     ttl: Duration,
     clock: &Arc<TestClock>,
 ) -> AvroDeserializerBuilder {
-    AvroDeserializerBuilder::from_settings_with_clock(
-        &settings(addr, ttl),
+    AvroDeserializerBuilder::new_with_clock(
+        settings(addr, ttl),
         &tokio::runtime::Handle::current(),
         Arc::clone(clock) as _,
     )
@@ -117,12 +114,12 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
     stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
     let addr = stub.addr();
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
 
     let payload = confluent_payload(42, 7);
     let (ack, _rx) = AckRef::test_pair();
@@ -158,7 +155,7 @@ async fn retriable_registry_errors_are_retried() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(9, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -179,7 +176,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_millis(300), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(5, 1);
 
     // Drive to the negative-cache verdict.
@@ -240,7 +237,7 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_millis(100), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(6, 1);
 
     let (mut deser, first) = tokio::task::spawn_blocking(move || {
@@ -334,9 +331,7 @@ fn unknown_id_warnings_are_rate_limited() {
         let clock = TestClock::frozen();
         let mut deser = rt.block_on(async {
             let addr = stub.addr();
-            builder_on(addr, Duration::from_secs(3600), &clock)
-                .build_value()
-                .expect("apache builder")
+            builder_on(addr, Duration::from_secs(3600), &clock).build_value()
         });
         decode_unknown_ids(&rt, &mut deser, 100..100 + IDS);
         clock.advance(Duration::from_secs(10));
@@ -361,11 +356,7 @@ fn each_builder_limits_its_own_unknown_id_warnings() {
         let clock = TestClock::frozen();
         let (mut first, mut second) = rt.block_on(async {
             let addr = stub.addr();
-            let build = || {
-                builder_on(addr, Duration::from_secs(3600), &clock)
-                    .build_value()
-                    .expect("apache builder")
-            };
+            let build = || builder_on(addr, Duration::from_secs(3600), &clock).build_value();
             (build(), build())
         });
         decode_unknown_ids(&rt, &mut first, 100..106);
@@ -389,7 +380,7 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(42, 7);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -417,13 +408,13 @@ async fn no_refetch_while_the_backoff_holds() {
         inner: Arc::clone(&test_clock),
         reads: AtomicUsize::new(0),
     });
-    let builder = AvroDeserializerBuilder::from_settings_with_clock(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new_with_clock(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
         Arc::clone(&clock) as _,
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(13, 1);
     let probe = stub.clone();
 
@@ -492,13 +483,13 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
         inner: Arc::clone(&test_clock),
         reads: AtomicUsize::new(0),
     });
-    let builder = AvroDeserializerBuilder::from_settings_with_clock(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new_with_clock(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
         Arc::clone(&clock) as _,
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(11, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -549,7 +540,7 @@ async fn a_transient_id_is_refetched_once_its_backoff_passes() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(11, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -581,7 +572,7 @@ async fn non_retriable_5xx_is_transient_not_poison() {
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(7, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
@@ -606,12 +597,12 @@ async fn slow_fetch_does_not_block_other_ids() {
     stub.hold("/schemas/ids/100");
     let addr = stub.addr();
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let slow = confluent_payload(100, 1);
     let fast = confluent_payload(200, 2);
 
@@ -681,9 +672,8 @@ async fn prewarm_loads_subjects_at_startup() {
 
     let mut cfg = settings(addr, Duration::from_millis(100));
     cfg.prewarm_subjects = vec!["events-value".into()];
-    let builder =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value();
 
     let payload = confluent_payload(42, 7);
     let hits = stub.clone();
@@ -717,28 +707,24 @@ async fn an_empty_trust_store_fails_only_an_https_build() {
     let runtime = tokio::runtime::Handle::current();
     if let Ok(url) = std::env::var(CHILD_REGISTRY_URL) {
         let https = settings_at("https://registry.invalid".into(), Duration::from_secs(30));
-        let built = AvroDeserializerBuilder::from_settings(&https, &runtime);
+        let built = AvroDeserializerBuilder::new(https, &runtime);
         if spate_core::tls::PLATFORM_VERIFIER {
             built.expect("the platform verifier reads the OS store");
         } else {
             let Err(err) = built else {
                 panic!("an https registry with no trust root built");
             };
-            let err = err.to_string();
-            assert!(
-                err.starts_with(
-                    "avro schema registry client: registry.tls.root_ca: the system trust store \
-                     has no certificates"
-                ),
-                "{err}"
+            assert_eq!(
+                err.to_string(),
+                "deserializer.avro.registry.tls.root_ca: the system trust store has no \
+                 certificates; install a CA bundle, point SSL_CERT_FILE at one, or set this key \
+                 to the issuing CA"
             );
         }
-        let builder = AvroDeserializerBuilder::from_settings(
-            &settings_at(url, Duration::from_secs(30)),
-            &runtime,
-        )
-        .expect("http registry builds");
-        let mut deser = builder.build_value().expect("apache builder");
+        let builder =
+            AvroDeserializerBuilder::new(settings_at(url, Duration::from_secs(30)), &runtime)
+                .expect("http registry builds");
+        let mut deser = builder.build_value();
         let payload = confluent_payload(42, 7);
         let rows = tokio::task::spawn_blocking(move || {
             let mut out = EmitCollector::new();
@@ -779,12 +765,12 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     stub.script("/schemas/ids/77", 200, schema_body(bad), 0);
     let addr = stub.addr();
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(77, 1);
 
     let err = tokio::task::spawn_blocking(move || {
@@ -808,12 +794,12 @@ async fn a_schema_that_is_not_avro_poisons_the_id() {
     let body = serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON" });
     stub.script("/schemas/ids/78", 200, body.to_string(), 0);
     let addr = stub.addr();
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(78, 1);
     let err = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
@@ -843,9 +829,8 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     // Subjects are pre-warmed in order, so a request for the second subject
     // means the first has been handled. The second answers 404.
     cfg.prewarm_subjects = vec!["json-value".into(), "sentinel-value".into()];
-    let builder =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let mut deser = builder.build_value().unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value();
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
         spate_test::wait_until(
@@ -876,12 +861,12 @@ async fn an_unknown_id_names_the_registry_error() {
     let stub = RegistryStub::start();
     // Unscripted: the stub answers 404 {"error_code":40403,"message":"Schema not found"}.
     let addr = stub.addr();
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().expect("apache builder");
+    let mut deser = builder.build_value();
     let payload = confluent_payload(5, 1);
     let err = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
@@ -908,9 +893,8 @@ async fn a_prewarm_forbidden_is_not_a_rejection() {
     // Pre-warm is sequential and ends on a recorded rejection, so a request
     // for the second subject means the first was handled and not recorded.
     cfg.prewarm_subjects = vec!["events-value".into(), "sentinel-value".into()];
-    let builder =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let mut deser = builder.build_value().unwrap();
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value();
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
         spate_test::wait_until(
@@ -962,9 +946,8 @@ async fn a_fetch_sends_basic_auth() {
         registry.username = username.map(Into::into);
         registry.password = password.map(Into::into);
         let builder =
-            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
-                .unwrap();
-        let mut deser = builder.build_value().unwrap();
+            AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+        let mut deser = builder.build_value();
         let payload = confluent_payload(5, 1);
         let records = tokio::task::spawn_blocking(move || {
             let mut out = EmitCollector::new();
@@ -1002,8 +985,7 @@ async fn a_prewarm_sends_basic_auth() {
         registry.password = username.map(|_| "hunter2".into());
         cfg.prewarm_subjects = vec!["orders-value".into()];
         let _builder =
-            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
-                .unwrap();
+            AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
         spate_test::wait_until(spate_test::HANG, "prewarm request is received", || {
             stub.hits() > 0
         });
@@ -1055,9 +1037,8 @@ async fn an_auth_rejection_is_fatal() {
         registry.username = Some("svc".into());
         registry.password = Some("hunter2".into());
         let builder =
-            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
-                .unwrap();
-        let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+            AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+        let reason = fatal_reason(builder.build_value(), confluent_payload(1, 1)).await;
         assert!(reason.contains(&format!("{status}")), "{reason}");
         assert!(reason.contains(&addr.to_string()), "{reason}");
         assert!(reason.contains("error_code"), "{reason}");
@@ -1080,9 +1061,8 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
     let addr = stub.addr();
     let mut cfg = settings(addr, Duration::from_secs(30));
     cfg.prewarm_subjects = vec!["events-value".into()];
-    let builder =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(42, 1)).await;
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let reason = fatal_reason(builder.build_value(), confluent_payload(42, 1)).await;
     assert!(reason.contains("401"), "{reason}");
     assert!(reason.contains("40101"), "{reason}");
 }
@@ -1094,12 +1074,12 @@ async fn a_cached_schema_decodes_after_a_rejection() {
     stub.script("/schemas/ids/1", 200, schema_body(SCHEMA_V1), 0);
     stub.script("/schemas/ids/2", 401, "{}", 0);
     let addr = stub.addr();
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = builder.build_value().unwrap();
+    let mut deser = builder.build_value();
     let (cached, rejected) = (confluent_payload(1, 7), confluent_payload(2, 8));
     let (first, second, again) = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
@@ -1130,12 +1110,12 @@ async fn serve_untrusted_https() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_untrusted_registry_certificate_is_fatal() {
     let url = serve_untrusted_https().await;
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings_at(url, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings_at(url, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+    let reason = fatal_reason(builder.build_value(), confluent_payload(1, 1)).await;
     assert!(reason.contains("certificate"), "{reason}");
 }
 
@@ -1146,12 +1126,12 @@ async fn a_rejecting_tls_alert_is_fatal() {
     use rustls::AlertDescription as A;
     for alert in [A::HandshakeFailure, A::ProtocolVersion] {
         let addr = spate_test::tls_alert_server(b"", u8::from(alert));
-        let builder = AvroDeserializerBuilder::from_settings(
-            &settings_at(format!("https://{addr}"), Duration::from_secs(30)),
+        let builder = AvroDeserializerBuilder::new(
+            settings_at(format!("https://{addr}"), Duration::from_secs(30)),
             &tokio::runtime::Handle::current(),
         )
         .unwrap();
-        let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+        let reason = fatal_reason(builder.build_value(), confluent_payload(1, 1)).await;
         assert!(reason.contains(&format!("{alert:?}")), "{reason}");
     }
 }
@@ -1169,9 +1149,8 @@ async fn a_refused_client_certificate_is_fatal() {
         spate_test_support::serve_tls(registry.server_config(Some(&clients)), |_| async {}).await;
     let mut cfg = settings_at(format!("https://{addr}"), Duration::from_secs(30));
     cfg.registry.as_mut().unwrap().tls.root_ca = Some(registry.write(dir.path()));
-    let builder =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
-    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+    let builder = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current()).unwrap();
+    let reason = fatal_reason(builder.build_value(), confluent_payload(1, 1)).await;
     assert!(reason.contains("CertificateRequired"), "{reason}");
 }
 
@@ -1194,8 +1173,8 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
     stub.script("/schemas/ids/62", 200, schema_body(SCHEMA_V2), 0);
     let addr = stub.addr();
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
@@ -1258,8 +1237,8 @@ async fn duration_schema_gates_only_the_datum_path() {
     );
     let addr = stub.addr();
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let builder = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
@@ -1279,7 +1258,7 @@ async fn duration_schema_gates_only_the_datum_path() {
     };
 
     // Value path: decodes fine once fetched.
-    let mut value_deser = builder.build_value().expect("value builder");
+    let mut value_deser = builder.build_value();
     let p = payload.clone();
     let values = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
@@ -1315,12 +1294,12 @@ async fn confluent_truncated_string_is_malformed() {
     let stub = RegistryStub::start();
     stub.script("/schemas/ids/83", 200, schema_body(SCH), 0);
     let addr = stub.addr();
-    let b = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
+    let b = AvroDeserializerBuilder::new(
+        settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap();
-    let mut deser = b.build_value().unwrap();
+    let mut deser = b.build_value();
     tokio::task::spawn_blocking(move || {
         let frame = |bytes: &[u8]| spate_test::confluent_frame(83, bytes);
         let mut out = EmitCollector::new();
@@ -1349,19 +1328,14 @@ async fn confluent_truncated_string_is_malformed() {
 /// Regression for #878.
 #[tokio::test]
 async fn reader_projection_does_not_hide_truncated_writer_string() {
-    let settings = AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(spate_avro::SchemaSource::inline(
-            r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"s","type":"string"}]}"#,
-        )),
-        reader_schema: Some(spate_avro::SchemaSource::inline(
-            r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"}]}"#,
-        )),
-        ..AvroSettings::default()
-    };
-    let b = AvroDeserializerBuilder::from_settings(&settings, &tokio::runtime::Handle::current())
-        .unwrap();
-    let mut deser = b.build_value().unwrap();
+    let mut settings = AvroDeserializerConfig::raw(spate_avro::SchemaSource::inline(
+        r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"s","type":"string"}]}"#,
+    ));
+    settings.reader_schema = Some(spate_avro::SchemaSource::inline(
+        r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"}]}"#,
+    ));
+    let b = AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = b.build_value();
     let mut out = EmitCollector::new();
     deser
         .deserialize(
@@ -1414,13 +1388,12 @@ fn decode_each(deser: &mut AvroValueDeserializer, ids: impl IntoIterator<Item = 
 }
 
 fn value_deserializer(stub: &RegistryStub) -> AvroValueDeserializer {
-    AvroDeserializerBuilder::from_settings(
-        &settings(stub.addr(), Duration::from_secs(30)),
+    AvroDeserializerBuilder::new(
+        settings(stub.addr(), Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
     )
     .unwrap()
     .build_value()
-    .expect("apache builder")
 }
 
 /// One distinct id past the count bound evicts the first, and a later record
@@ -1541,11 +1514,9 @@ async fn a_prewarm_weighs_the_schema() {
         .chain([0])
         .map(|id| format!("s{id}-value"))
         .collect();
-    let mut deser =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
-            .unwrap()
-            .build_value()
-            .expect("apache builder");
+    let mut deser = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current())
+        .unwrap()
+        .build_value();
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
         spate_test::wait_until(spate_test::HANG, "the pre-warm ends", || {
@@ -1579,11 +1550,9 @@ async fn a_prewarm_refuses_a_schema_above_the_byte_bound() {
 
     let mut cfg = settings(stub.addr(), Duration::from_secs(30));
     cfg.prewarm_subjects = vec!["big-value".into(), "end-value".into()];
-    let mut deser =
-        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
-            .unwrap()
-            .build_value()
-            .expect("apache builder");
+    let mut deser = AvroDeserializerBuilder::new(cfg, &tokio::runtime::Handle::current())
+        .unwrap()
+        .build_value();
     let hits = stub.clone();
     let err = tokio::task::spawn_blocking(move || {
         spate_test::wait_until(spate_test::HANG, "the pre-warm ends", || {
@@ -1658,9 +1627,7 @@ fn fetch_and_eviction_logs_are_rate_limited() {
         let rt = current_thread();
         let clock = TestClock::frozen();
         let mut deser = rt.block_on(async {
-            builder_on(stub.addr(), Duration::from_secs(3600), &clock)
-                .build_value()
-                .expect("apache builder")
+            builder_on(stub.addr(), Duration::from_secs(3600), &clock).build_value()
         });
         for id in 1..=last {
             decode_on(&rt, &mut deser, id).unwrap_or_else(|e| panic!("id {id}: {e}"));

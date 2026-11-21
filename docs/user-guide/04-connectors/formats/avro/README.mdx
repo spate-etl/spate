@@ -25,7 +25,8 @@ ready-made records configures none.
 
 ## Configuration
 
-The `deserializer: { avro: ... }` section deserializes into `AvroSettings`
+The `deserializer: { avro: ... }` section deserializes into
+`AvroDeserializerConfig`
 ([`spate-avro/src/config.rs`](repo:crates/spate-avro/src/config.rs)); unknown
 fields are rejected with the offending key.
 
@@ -67,7 +68,15 @@ nonempty username or a password fail at configuration load, before schema
 loading, TLS client construction or prewarm. Credentials belong in
 `registry.username` and `registry.password`, including when no separate
 credentials are supplied. A `registry.password` without a `registry.username`
-fails at the same point. A username without a password is accepted.
+fails at the same point. A username without a password is accepted. A `schema`
+or `reader_schema` that sets both `inline` and `path`, or neither, fails before
+either is read.
+
+`AvroDeserializerConfig::validate` runs every check in this section that needs
+no file or network access. `AvroDeserializerBuilder::new` runs it first, then
+reads the schema files and builds the registry client, so a config built in
+code meets the same rules as one loaded from YAML. A config built in code
+starts from `AvroDeserializerConfig::confluent`, `raw` or `single_object`.
 
 ## Security (TLS and registry credentials)
 
@@ -108,7 +117,7 @@ these fields. Username-only URLs need only `registry.username`. If separate
 credentials are already configured alongside URL credentials, retain the
 separate fields and remove the URL userinfo. Programmatic configurations
 using `RegistrySection::new` follow the same requirement when loaded by
-`AvroDeserializerBuilder::from_settings`.
+`AvroDeserializerBuilder::new`.
 
 A registry that answers `401` or `403`, or whose certificate fails
 verification, stops the pipeline whatever the deserializer's `ErrorPolicy`.

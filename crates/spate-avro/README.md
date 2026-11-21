@@ -16,7 +16,7 @@ snippet.
 ## Configuration
 
 The deserializer reads the pipeline's `deserializer: { avro: ... }` section into
-`AvroSettings`. An unknown key is rejected.
+`AvroDeserializerConfig`. An unknown key is rejected.
 
 ```yaml
 deserializer:
@@ -43,16 +43,24 @@ Loading fails when `confluent` has no `registry` or sets `schema`, when `raw` or
 when `single_object` sets `reader_schema`. It also fails on a `registry.url`
 that is not `http://` or `https://` or that carries credentials, a `password`
 with no `username`, a `negative_cache_ttl` under `100ms`, and a `tls.root_ca`
-beside a URL that is not `https://`. On Linux and other Unix systems other than
-macOS it also fails on an `https://` registry when neither the system trust
-store nor `tls.root_ca` holds a usable certificate. A fixed `schema` is parsed
-at load, and one that does not parse fails there.
+beside a URL that is not `https://`, and on a `schema` or `reader_schema` that
+sets both `inline` and `path`, or neither. `AvroDeserializerConfig::validate`
+runs all of these checks without reading a file or the network.
+
+Building the deserializer runs `validate` first, then reads the schema files
+and builds the registry client. On Linux and other Unix systems other than
+macOS it fails on an `https://` registry when neither the system trust store
+nor `tls.root_ca` holds a usable certificate. A fixed `schema` is parsed there,
+and one that does not parse fails the build.
 
 A non-empty `password` with an `http://` registry URL loads, and logs one
 warning that the credential is sent without TLS.
 
-`AvroDeserializerBuilder::from_component` takes the section and the pipeline's
-I/O runtime handle, where the registry fetcher runs.
+`AvroDeserializerBuilder::from_component_config` takes the section and the
+pipeline's I/O runtime handle, where the registry fetcher runs. In code, build
+the config with `AvroDeserializerConfig::confluent`, `raw` or `single_object`,
+set any optional fields, and pass it to `AvroDeserializerBuilder::new` with the
+same handle.
 [`kafka_avro_to_clickhouse.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/kafka_avro_to_clickhouse.rs)
 wires it into a whole pipeline.
 

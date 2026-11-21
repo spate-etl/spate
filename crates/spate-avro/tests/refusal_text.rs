@@ -72,7 +72,7 @@ where
     let pipeline =
         Pipeline::from_config(PipelineConfig::from_str(&config(name, reader)).expect("config"))
             .expect("builder");
-    let builder = AvroDeserializerBuilder::from_component(
+    let builder = AvroDeserializerBuilder::from_component_config(
         pipeline
             .config()
             .deserializer
@@ -128,9 +128,8 @@ fn the_datum_path_does_not_quote_an_unknown_symbol() {
 /// The two-pass serde deserializer.
 #[test]
 fn the_serde_path_does_not_quote_an_unknown_symbol() {
-    let reason = failure_reason::<Login, _>("avro-refusal-serde", None, |b| {
-        b.build_serde::<Login>().expect("serde")
-    });
+    let reason =
+        failure_reason::<Login, _>("avro-refusal-serde", None, |b| b.build_serde::<Login>());
     assert_eq!(
         reason,
         "malformed payload: avro record does not match the target type"
@@ -143,7 +142,7 @@ fn the_serde_path_does_not_quote_an_unknown_symbol() {
 fn a_missing_reader_field_is_named() {
     let reason =
         failure_reason::<AvroValue, _>("avro-refusal-reader", Some(READER_WITH_REGION), |b| {
-            b.build_value().expect("value")
+            b.build_value()
         });
     assert_eq!(
         reason,

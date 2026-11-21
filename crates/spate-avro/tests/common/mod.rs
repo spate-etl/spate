@@ -126,8 +126,9 @@ where
     );
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).unwrap()).unwrap();
     let section = pipeline.config().deserializer.clone().unwrap();
-    let deser =
-        build(&AvroDeserializerBuilder::from_component(&section, &pipeline.io_handle()).unwrap());
+    let deser = build(
+        &AvroDeserializerBuilder::from_component_config(&section, &pipeline.io_handle()).unwrap(),
+    );
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);
     let runtime = pipeline

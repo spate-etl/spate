@@ -26,5 +26,5 @@ fn ticks(value: &AvroValue) -> u64 {
 
 #[test]
 fn claimed_items_do_not_grow_memory_on_the_value_path() {
-    common::assert_bounded(&common::run(|b| b.build_value().unwrap(), ticks));
+    common::assert_bounded(&common::run(|b| b.build_value(), ticks));
 }

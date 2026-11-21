@@ -457,10 +457,9 @@ impl Harness {
             .as_ref()
             .expect("deserializer section");
         let deserializer =
-            AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())
+            AvroDeserializerBuilder::from_component_config(deser_section, &pipeline.io_handle())
                 .expect("avro")
-                .build_serde::<Event>()
-                .expect("apache builder");
+                .build_serde::<Event>();
         let sink = pipeline.block_on(
             config::from_component_config(
                 pipeline

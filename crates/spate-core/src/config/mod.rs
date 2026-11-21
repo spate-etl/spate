@@ -21,7 +21,7 @@
 //!     topic: orders
 //!     group_id: orders-etl                   # required (no default)
 //! deserializer:
-//!   avro:                                    # AvroSettings (confluent mode)
+//!   avro:                                    # AvroDeserializerConfig (confluent mode)
 //!     registry:
 //!       url: ${SCHEMA_REGISTRY_URL:?schema registry required}
 //! sink:

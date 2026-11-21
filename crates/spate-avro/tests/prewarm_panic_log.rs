@@ -1,6 +1,6 @@
 //! A panic in the registry pre-warm task is logged with the task's name.
 
-use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, RegistrySection};
 use spate_test_support::RegistryStub;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,17 +103,12 @@ fn a_prewarm_panic_is_logged_with_its_name() {
                     .to_string(),
                     0,
                 );
-                let settings = AvroSettings {
-                    mode: AvroMode::Confluent,
-                    registry: Some(RegistrySection::new(stub.endpoint())),
-                    prewarm_subjects: vec!["e-value".into()],
-                    ..AvroSettings::default()
-                };
-                let _builder = AvroDeserializerBuilder::from_settings(
-                    &settings,
-                    &tokio::runtime::Handle::current(),
-                )
-                .unwrap();
+                let mut settings =
+                    AvroDeserializerConfig::confluent(RegistrySection::new(stub.endpoint()));
+                settings.prewarm_subjects = vec!["e-value".into()];
+                let _builder =
+                    AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current())
+                        .unwrap();
                 tokio::time::timeout(spate_test::HANG, seen.notified())
                     .await
                     .expect("the pre-warm panic is logged");

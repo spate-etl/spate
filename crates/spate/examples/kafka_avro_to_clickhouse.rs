@@ -144,8 +144,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .ok_or("this pipeline requires a `deserializer` section")?;
     let deserializer =
-        AvroDeserializerBuilder::from_component(deser_section, &pipeline.io_handle())?
-            .build_serde::<OrderPlaced>()?;
+        AvroDeserializerBuilder::from_component_config(deser_section, &pipeline.io_handle())?
+            .build_serde::<OrderPlaced>();
     // ANCHOR_END: deserializer
 
     // ── Sink: sharded ClickHouse ────────────────────────────────────────

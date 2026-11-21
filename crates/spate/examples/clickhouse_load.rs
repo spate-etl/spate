@@ -64,7 +64,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::{Deserialize, Serialize};
-use spate::avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
+use spate::avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
 use spate::clickhouse::{
     self, ClickHouseRow, ClickHouseSinkConfig, Compression, DateTime64Millis, NativeEncoder,
     ShardKey,
@@ -138,13 +138,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The decoder reads against the schema the source writes, taken from the
     // same constant, so the two cannot drift.
-    let avro = AvroSettings {
-        mode: AvroMode::Raw,
-        schema: Some(SchemaSource::inline(EVENT_SCHEMA_JSON)),
-        ..AvroSettings::default()
-    };
-    let deserializer = AvroDeserializerBuilder::from_settings(&avro, &pipeline.io_handle())?
-        .build_serde::<StorefrontEvent>()?;
+    let avro = AvroDeserializerConfig::raw(SchemaSource::inline(EVENT_SCHEMA_JSON));
+    let deserializer =
+        AvroDeserializerBuilder::new(avro, &pipeline.io_handle())?.build_serde::<StorefrontEvent>();
 
     let sink_config: ClickHouseSinkConfig = pipeline
         .config()

@@ -32,13 +32,13 @@
 //! preserved across the concurrency.
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
-use crate::config::AvroConfigError;
+use crate::config::section_path;
 use reqwest::{StatusCode, Url};
 use rustls::AlertDescription;
 use serde::Deserialize;
 use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::SyncClock;
-use spate_core::config::UrlRule;
+use spate_core::config::{ConfigError, UrlRule};
 use spate_core::error::chain;
 use spate_core::hash::{QualityMap, QualitySet};
 use spate_core::telemetry::{Decision, RateLimit};
@@ -150,14 +150,12 @@ const REGISTRY_URL: UrlRule<'static> =
 ///
 /// # Errors
 ///
-/// [`AvroConfigError::Invalid`] naming `registry.url` when it is not an
-/// `http` or `https` URL, or carries userinfo.
-pub(crate) fn registry_url(url: &str) -> Result<Url, AvroConfigError> {
+/// [`ConfigError::Component`] at `deserializer.avro.registry.url` when it is
+/// not an `http` or `https` URL, or carries userinfo.
+pub(crate) fn registry_url(url: &str) -> Result<Url, ConfigError> {
     REGISTRY_URL
         .check(url)
-        .map_err(|e| AvroConfigError::Invalid {
-            detail: format!("registry.url {e}"),
-        })
+        .map_err(|e| section_path().invalid("registry.url", e.to_string()))
 }
 
 /// Where one schema registry is and how to authenticate to it. Requests go
@@ -341,7 +339,7 @@ fn excerpt(body: &[u8]) -> String {
 pub(crate) fn http_client(
     root_ca: Option<&Path>,
     scheme: &str,
-) -> Result<reqwest::Client, AvroConfigError> {
+) -> Result<reqwest::Client, ConfigError> {
     http_client_with(root_ca, scheme, SystemRoots::load)
 }
 
@@ -349,11 +347,16 @@ fn http_client_with(
     root_ca: Option<&Path>,
     scheme: &str,
     system: impl FnOnce() -> SystemRoots,
-) -> Result<reqwest::Client, AvroConfigError> {
+) -> Result<reqwest::Client, ConfigError> {
     client_builder(system, root_ca, scheme)?
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|e| AvroConfigError::Registry { detail: chain(&e) })
+        .map_err(|e| {
+            section_path().invalid(
+                "registry",
+                format!("the registry client could not be built: {}", chain(&e)),
+            )
+        })
 }
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
@@ -363,7 +366,7 @@ fn client_builder(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
     scheme: &str,
-) -> Result<reqwest::ClientBuilder, AvroConfigError> {
+) -> Result<reqwest::ClientBuilder, ConfigError> {
     // An `http://` registry needs these roots too: a redirect to `https://`
     // or an `https://` proxy connects over TLS.
     let roots = client_roots(system, root_ca, scheme == "https").map_err(root_ca_error)?;
@@ -376,20 +379,16 @@ fn client_builder(
 
 fn certificates(
     certs: Vec<CertificateDer<'static>>,
-) -> Result<Vec<reqwest::Certificate>, AvroConfigError> {
+) -> Result<Vec<reqwest::Certificate>, ConfigError> {
     certs
         .iter()
         .map(|cert| reqwest::Certificate::from_der(cert))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AvroConfigError::Registry {
-            detail: format!("registry.tls.root_ca: {e}"),
-        })
+        .map_err(|e| section_path().invalid("registry.tls.root_ca", e.to_string()))
 }
 
-fn root_ca_error(e: TrustError) -> AvroConfigError {
-    AvroConfigError::Registry {
-        detail: format!("registry.tls.root_ca: {e}"),
-    }
+fn root_ca_error(e: TrustError) -> ConfigError {
+    section_path().invalid("registry.tls.root_ca", e.to_string())
 }
 
 /// The limits on the fetcher's per-id log lines, on the fetcher's clock.
@@ -1356,36 +1355,31 @@ mod tests {
     #[test]
     fn an_unusable_url_fails() {
         for (url, expected) in [
-            (
-                "not a url",
-                "registry.url is not a URL: relative URL without a base",
-            ),
+            ("not a url", "is not a URL: relative URL without a base"),
             (
                 "https://user:secret@sr:99999",
-                "registry.url is not a URL: invalid port number",
+                "is not a URL: invalid port number",
             ),
-            (
-                "localhost:8081",
-                "registry.url has no `//` after its scheme",
-            ),
-            (
-                "user:secret@sr:8081",
-                "registry.url has no `//` after its scheme",
-            ),
+            ("localhost:8081", "has no `//` after its scheme"),
+            ("user:secret@sr:8081", "has no `//` after its scheme"),
             (
                 "ftp://user:secret@sr",
-                "registry.url must be a URL with scheme http or https; found ftp",
+                "must be a URL with scheme http or https; found ftp",
             ),
             (
                 "https://user:secret@sr",
-                "registry.url carries userinfo; set them in registry.username and \
+                "carries userinfo; set them in registry.username and \
                  registry.password",
             ),
         ] {
             let err = registry_url(url)
                 .expect_err("the URL is rejected")
                 .to_string();
-            assert_eq!(err, format!("avro configuration: {expected}"), "{url}");
+            assert_eq!(
+                err,
+                format!("deserializer.avro.registry.url: {expected}"),
+                "{url}"
+            );
         }
     }
 
@@ -1579,7 +1573,7 @@ mod tests {
                 assert_eq!(
                     err,
                     format!(
-                        "avro schema registry client: registry.tls.root_ca: {problem}; install a \
+                        "deserializer.avro.registry.tls.root_ca: {problem}; install a \
                          CA bundle, point SSL_CERT_FILE at one, or set this key to the issuing CA"
                     )
                 );

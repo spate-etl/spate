@@ -311,13 +311,13 @@ it. Distinct labels per test avoid the collision entirely, and
 `spate_test::unique_name("orders_in")` returns a name no other call in the
 process returns.
 
-## From a built-in source, sink, feed backend or deserializer
+## Receive a Meter in a source, sink, feed backend or deserializer
 
 A `Meter` you construct with `Meter::new(...)`, or take from `ChainCtx`, covers
-pipeline authors. A **built-in `Source`, sink `ShardWriter`, `Feed` backend or
-`Deserializer`** doesn't construct one: the framework hands it a pre-scoped
-`Meter`, so a connector never wires the pipeline name, the labels, or the
-prefix.
+pipeline authors. A **`Source`, sink `ShardWriter`, `Feed` backend or
+`Deserializer`** you implement doesn't construct one: the framework hands it a
+pre-scoped `Meter`, so a connector never wires the pipeline name, the labels,
+or the prefix.
 
 - **Declare a `component_type`.** A source overrides
   [`Source::component_type`](../07-reference/README.mdx) (default `"source"`); a

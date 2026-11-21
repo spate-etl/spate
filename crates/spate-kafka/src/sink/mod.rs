@@ -29,9 +29,7 @@ mod writer;
 
 #[cfg(test)]
 pub(crate) use config::Producer as SinkRole;
-#[cfg(feature = "testing")]
-pub use config::build_on_clocks;
-pub use config::{Compression, KafkaSink, KafkaSinkConfig, build, from_component_config};
+pub use config::{Compression, KafkaSink, KafkaSinkConfig};
 pub(crate) use context::{SinkContext, SinkHooks};
 pub use encoder::{
     BytesKeyFn, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KeyFn,

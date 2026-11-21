@@ -17,7 +17,7 @@ use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::sink::KeyHashRouter;
 use spate_kafka::sink::KafkaSinkConfig;
-use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_kafka::{KafkaSink, KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, PipelineRun, wait_until};
 use spate_test_support::SingleBroker;
 use std::collections::BTreeMap;
@@ -98,8 +98,8 @@ fn kafka_to_kafka_split_round_trip() {
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]);
         cfg
     });
-    let sink_a = spate_kafka::sink::build(sink_config(&brokers, A_TOPIC)).expect("sink a");
-    let sink_b = spate_kafka::sink::build(sink_config(&brokers, B_TOPIC)).expect("sink b");
+    let sink_a = KafkaSink::new(sink_config(&brokers, A_TOPIC)).expect("sink a");
+    let sink_b = KafkaSink::new(sink_config(&brokers, B_TOPIC)).expect("sink b");
     let enc_a = sink_a.encoder_bytes();
     let enc_b = sink_b.encoder_bytes();
 

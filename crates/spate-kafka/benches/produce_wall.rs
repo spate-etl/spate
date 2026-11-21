@@ -1,7 +1,7 @@
 //! Wall-clock cases for the Kafka sink's send: one sealed batch through
 //! `KafkaWriter::write_batch`.
 //!
-//! The sink is built by `spate_kafka::sink::build` against librdkafka's
+//! The sink is built by `KafkaSink::new` against librdkafka's
 //! in-process mock cluster, as a pipeline builds it, by
 //! `support/produce_rig.rs`. The batch is the frame `support/prepare_rig.rs`
 //! builds for the preparation benches: 10,000 messages of 512-byte payloads.

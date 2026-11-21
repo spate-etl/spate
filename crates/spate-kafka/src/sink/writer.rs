@@ -650,7 +650,7 @@ mod tests {
     #[cfg(feature = "tls")]
     mod tls_rejection {
         use super::*;
-        use crate::sink::config::{KafkaSinkConfig, build};
+        use crate::sink::config::{KafkaSink, KafkaSinkConfig};
 
         fn one_row() -> SealedBatch {
             let mut frame = bytes::BytesMut::new();
@@ -675,7 +675,7 @@ mod tests {
                 cfg.delivery_timeout = Duration::from_secs(1);
                 cfg.statistics_interval = Duration::ZERO;
                 cfg.rdkafka.insert("security.protocol".into(), "ssl".into());
-                let sink = build(cfg).expect("build");
+                let sink = KafkaSink::new(cfg).expect("sink");
 
                 let err = sink
                     .writer
@@ -723,7 +723,7 @@ mod tests {
             .deserialize_into()
             .expect("config");
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            let _sink = crate::sink::build(cfg).expect("sink");
+            let _sink = crate::sink::KafkaSink::new(cfg).expect("sink");
         });
         crate::testutil::assert_one_cleartext_warning(&lines, "sink.kafka");
     }
@@ -743,7 +743,7 @@ mod tests {
             .deserialize_into()
             .expect("config");
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            let _ = crate::sink::build(cfg);
+            let _ = crate::sink::KafkaSink::new(cfg);
         });
         assert!(
             !lines
@@ -753,11 +753,11 @@ mod tests {
         );
     }
 
-    /// `build_on_clocks` stamps and ages a broker's rejection on the clock
+    /// `KafkaSink::new_on_clocks` stamps and ages a broker's rejection on the clock
     /// it is given.
     #[cfg(feature = "tls")]
     #[test]
-    fn build_on_clocks_ages_a_rejection_on_the_given_clock() {
+    fn new_on_clocks_ages_a_rejection_on_the_given_clock() {
         let brokers = crate::testutil::refuses_sasl_login();
         let body = format!(
             "  brokers: {brokers}\n  topic: orders\n  rdkafka:\n    security.protocol: \
@@ -768,9 +768,12 @@ mod tests {
             .deserialize_into()
             .expect("config");
         let clock = spate_core::clock::TestClock::frozen();
-        let sink =
-            crate::sink::build_on_clocks(cfg, Arc::clone(&clock) as _, Arc::new(IoSystemClock))
-                .expect("sink");
+        let sink = crate::sink::KafkaSink::new_on_clocks(
+            cfg,
+            Arc::clone(&clock) as _,
+            Arc::new(IoSystemClock),
+        )
+        .expect("sink");
         let endpoint = &sink.endpoints[0][0];
         spate_test::wait_until(spate_test::HANG, "the rejection", || {
             endpoint.producer.context().latest_rejection().is_some()

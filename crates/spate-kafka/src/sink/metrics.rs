@@ -18,7 +18,7 @@
 //! (fetch-max: idempotent under duplicate delivery, PromQL `rate()` works
 //! natively). The mapping is sound only while totals are monotonic, i.e.
 //! scoped to a single producer client. The sink guarantees this by
-//! construction: `build()` creates exactly one producer per sink instance,
+//! construction: `KafkaSink::new` creates exactly one producer per sink instance,
 //! shared by every shard. The per-broker totals are accumulated as growth
 //! (see the source metrics module for the full rationale).
 //!

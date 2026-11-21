@@ -303,6 +303,22 @@ impl KafkaSinkConfig {
         }
     }
 
+    /// Deserialize and validate from the pipeline's opaque component section.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the section does not deserialize into
+    /// this type, or when [`validate`](Self::validate) refuses it. Every error
+    /// starts at the section's [`path`](ComponentConfig::path), such as
+    /// `sinks.eu.kafka` for a `sinks:` entry named `eu`, or `kafka` for a
+    /// section built with [`ComponentConfig::new`] and never placed in a
+    /// pipeline config.
+    pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
+        let cfg: KafkaSinkConfig = section.deserialize_into()?;
+        cfg.validate_at(&section.path())?;
+        Ok(cfg)
+    }
+
     /// Cross-field validation, including the passthrough denylist and the pool
     /// sections' [`SinkPoolConfig::validate`] rules.
     ///
@@ -429,9 +445,9 @@ impl KafkaSinkConfig {
 }
 
 /// Everything the framework needs to run this sink. Build with
-/// [`from_component_config`] or [`build`]; terminate a chain with one of
-/// the `encoder_*` helpers (they bake the configured message-size guard
-/// into the encoder).
+/// [`from_component_config`](Self::from_component_config) or
+/// [`new`](Self::new); terminate a chain with one of the `encoder_*` helpers
+/// (they bake the configured message-size guard into the encoder).
 #[derive(Debug)]
 pub struct KafkaSink {
     /// The `ShardWriter` implementation.
@@ -501,67 +517,76 @@ impl SinkBundle for KafkaSink {
     }
 }
 
-/// Build a [`KafkaSink`] from the opaque `sink: { kafka: ... }` component
-/// section.
-///
-/// # Errors
-///
-/// [`ConfigError::Component`] when the section does not deserialize into
-/// [`KafkaSinkConfig`], and otherwise as [`build`]. Every error starts at the
-/// section's [`path`](ComponentConfig::path), such as `sinks.eu.kafka` for a
-/// `sinks:` entry named `eu`, or `kafka` for a section built with
-/// [`ComponentConfig::new`] and never placed in a pipeline config.
-pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError> {
-    let cfg: KafkaSinkConfig = section.deserialize_into()?;
-    build_on(
-        cfg,
-        &section.path(),
-        SyncClock::system(),
-        Arc::new(IoSystemClock),
-    )
-}
+impl KafkaSink {
+    /// Build a sink from a config made in code.
+    ///
+    /// Creates the producer eagerly: librdkafka validates property values and
+    /// idempotence compatibility (`max.in.flight` ≤ 5, `retries` > 0) at
+    /// creation, so a passthrough that conflicts with the forced durability
+    /// settings fails at startup here rather than on the first batch.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a
+    /// configuration rule, or when librdkafka refuses to create the producer or
+    /// the probe producer.
+    pub fn new(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
+        build_on(
+            cfg,
+            &SectionPath::sink(TAG),
+            SyncClock::system(),
+            Arc::new(IoSystemClock),
+        )
+    }
 
-/// Build from an already-deserialized config (programmatic use).
-///
-/// Creates the producer eagerly: librdkafka validates property values and
-/// idempotence compatibility (`max.in.flight` ≤ 5, `retries` > 0) at
-/// creation, so a passthrough that conflicts with the forced durability
-/// settings fails at startup here rather than on the first batch.
-///
-/// # Errors
-///
-/// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a
-/// configuration rule, or when librdkafka refuses to create the producer or
-/// the probe producer.
-pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
-    build_on(
-        cfg,
-        &SectionPath::sink(TAG),
-        SyncClock::system(),
-        Arc::new(IoSystemClock),
-    )
-}
+    /// Build a sink from the opaque `sink: { kafka: ... }` component section.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::config::ComponentConfig;
+    /// use spate_kafka::KafkaSink;
+    ///
+    /// # fn run(section: &ComponentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    /// let sink = KafkaSink::from_component_config(section)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`KafkaSinkConfig::from_component_config`], and otherwise as
+    /// [`new`](Self::new). Every error starts at the section's
+    /// [`path`](ComponentConfig::path).
+    pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError> {
+        build_on(
+            KafkaSinkConfig::from_component_config(section)?,
+            &section.path(),
+            SyncClock::system(),
+            Arc::new(IoSystemClock),
+        )
+    }
 
-/// [`build`] with the clocks the sink reads: `clock` stamps and ages a
-/// broker's rejection, and `io_clock` runs the writer's send and report
-/// deadlines.
-///
-/// # Errors
-///
-/// As [`build`].
-#[cfg(feature = "testing")]
-#[doc(hidden)]
-pub fn build_on_clocks(
-    cfg: KafkaSinkConfig,
-    clock: spate_core::clock::SharedClock,
-    io_clock: Arc<dyn IoClock + RefUnwindSafe>,
-) -> Result<KafkaSink, ConfigError> {
-    build_on(
-        cfg,
-        &SectionPath::sink(TAG),
-        SyncClock::new(clock),
-        io_clock,
-    )
+    /// [`new`](Self::new) with the clocks the sink reads: `clock` stamps and
+    /// ages a broker's rejection, and `io_clock` runs the writer's send and
+    /// report deadlines.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn new_on_clocks(
+        cfg: KafkaSinkConfig,
+        clock: spate_core::clock::SharedClock,
+        io_clock: Arc<dyn IoClock + RefUnwindSafe>,
+    ) -> Result<KafkaSink, ConfigError> {
+        build_on(
+            cfg,
+            &SectionPath::sink(TAG),
+            SyncClock::new(clock),
+            io_clock,
+        )
+    }
 }
 
 fn build_on(
@@ -666,7 +691,7 @@ mod tests {
     fn an_owned_key_in_a_sinks_entry_names_the_entry() {
         let cfg = sinks_entry(&format!("{}  rdkafka:\n    acks: \"1\"\n", minimal()));
         let section = cfg.sink_config("eu").expect("declared");
-        let msg = refusal(from_component_config(section).map(drop));
+        let msg = refusal(KafkaSink::from_component_config(section).map(drop));
         assert!(
             msg.starts_with("sinks.eu.kafka: rdkafka.\"acks\" cannot be overridden: "),
             "{msg}"
@@ -682,7 +707,7 @@ mod tests {
             minimal()
         ));
         let section = cfg.sink_config("eu").expect("declared");
-        let msg = refusal(from_component_config(section).map(drop));
+        let msg = refusal(KafkaSink::from_component_config(section).map(drop));
         assert!(
             msg.starts_with("sinks.eu.kafka: producer creation failed: "),
             "{msg}"
@@ -694,17 +719,34 @@ mod tests {
     #[test]
     fn an_unplaced_section_reports_at_its_tag() {
         let msg = refusal(
-            from_component_config(&section("  brokers: localhost:9092\n  topic: \"\"\n")).map(drop),
+            KafkaSink::from_component_config(&section(
+                "  brokers: localhost:9092\n  topic: \"\"\n",
+            ))
+            .map(drop),
         );
         assert_eq!(msg, "kafka.topic: must not be empty");
     }
 
-    /// A config built in code has no section, so `build` reports at the
+    /// The config's own constructor validates, and reports at the section's
+    /// path, placed or not.
+    #[test]
+    fn sink_config_from_component_config_refuses_at_the_section_path() {
+        let body = format!("{}  shards: 0\n", minimal());
+        let msg = refusal(KafkaSinkConfig::from_component_config(&section(&body)).map(drop));
+        assert_eq!(msg, "kafka.shards: must be at least 1");
+
+        let cfg = sinks_entry(&body);
+        let section = cfg.sink_config("eu").expect("declared");
+        let msg = refusal(KafkaSinkConfig::from_component_config(section).map(drop));
+        assert_eq!(msg, "sinks.eu.kafka.shards: must be at least 1");
+    }
+
+    /// A config built in code has no section, so `KafkaSink::new` reports at the
     /// single sink's path.
     #[test]
-    fn build_reports_at_the_single_sink_path() {
+    fn new_reports_at_the_single_sink_path() {
         let cfg = KafkaSinkConfig::new("localhost:9092", "");
-        let msg = refusal(build(cfg).map(drop));
+        let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert_eq!(msg, "sink.kafka.topic: must not be empty");
     }
 
@@ -818,37 +860,37 @@ mod tests {
         }
     }
 
-    /// A programmatic config is validated by `build`, so a passthrough key
+    /// A programmatic config is validated by `KafkaSink::new`, so a passthrough key
     /// the sink owns is refused there too.
     #[test]
-    fn build_refuses_an_owned_key_in_a_programmatic_config() {
+    fn new_refuses_an_owned_key_in_a_programmatic_config() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.rdkafka
             .insert("allow.auto.create.topics".to_owned(), "true".to_owned());
-        let msg = refusal(build(cfg).map(drop));
+        let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert!(msg.contains("allow.auto.create.topics"), "{msg}");
     }
 
-    /// `build` refuses a programmatic zero batch threshold with core's
+    /// `KafkaSink::new` refuses a programmatic zero batch threshold with core's
     /// message for the key, under the sink's prefix.
     #[test]
-    fn build_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
+    fn new_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.batch.max_bytes = 0;
-        let msg = refusal(build(cfg).map(drop));
+        let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert_eq!(
             msg,
             format!("sink.kafka: {}", SinkPoolConfigError::ZeroMaxBytes)
         );
     }
 
-    /// `build` refuses a programmatic `delivery_timeout` under 1 ms before
+    /// `KafkaSink::new` refuses a programmatic `delivery_timeout` under 1 ms before
     /// creating a producer. Regression for #1208.
     #[test]
-    fn build_refuses_a_sub_millisecond_delivery_timeout_in_a_programmatic_config() {
+    fn new_refuses_a_sub_millisecond_delivery_timeout_in_a_programmatic_config() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.delivery_timeout = Duration::from_micros(999);
-        let msg = refusal(build(cfg).map(drop));
+        let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert!(msg.contains("delivery_timeout"), "{msg}");
     }
 
@@ -998,16 +1040,17 @@ mod tests {
         }
     }
 
-    /// `build()` runs the TLS guard on a config made with `new()`: without the
+    /// `KafkaSink::new` runs the TLS guard on a config made with
+    /// `KafkaSinkConfig::new`: without the
     /// `tls` feature it rejects a security passthrough, and with it the
     /// producer is created.
     #[test]
-    fn build_enforces_tls_guard_on_programmatic_sink() {
+    fn new_enforces_tls_guard_on_programmatic_sink() {
         let mut config = KafkaSinkConfig::new("localhost:9092", "orders");
         config
             .rdkafka
             .insert("security.protocol".into(), "ssl".into());
-        let result = build(config);
+        let result = KafkaSink::new(config);
         if cfg!(feature = "tls") {
             result.expect("tls build: build succeeds");
         } else {
@@ -1345,7 +1388,7 @@ mod tests {
              breaker:\n    failure_threshold: 7\n",
             minimal()
         );
-        let sink = build(parse(&body).unwrap()).unwrap();
+        let sink = KafkaSink::new(parse(&body).unwrap()).unwrap();
         assert_eq!(sink.endpoints.len(), 3, "one worker per shard");
         assert!(
             sink.endpoints.iter().all(|shard| shard.len() == 1),
@@ -1361,7 +1404,7 @@ mod tests {
 
     #[test]
     fn bundle_exposes_kafka_component_type_and_labels() {
-        let sink = build(parse(&minimal()).unwrap()).unwrap();
+        let sink = KafkaSink::new(parse(&minimal()).unwrap()).unwrap();
         let parts = sink.into_parts();
         assert_eq!(parts.component_type, "kafka");
         assert_eq!(
@@ -1377,7 +1420,7 @@ mod tests {
     #[test]
     fn idempotence_incompatible_passthrough_fails_at_build() {
         let body = format!("{}  rdkafka:\n    max.in.flight: \"10\"\n", minimal());
-        let err = build(parse(&body).unwrap()).unwrap_err();
+        let err = KafkaSink::new(parse(&body).unwrap()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("producer creation failed"),
@@ -1390,7 +1433,9 @@ mod tests {
     #[test]
     fn rejected_passthrough_value_is_not_printed() {
         let body = format!("{}  rdkafka:\n    compression.type: hunter2\n", minimal());
-        let err = build(parse(&body).unwrap()).unwrap_err().to_string();
+        let err = KafkaSink::new(parse(&body).unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(!err.contains("hunter2"), "{err}");
         assert!(err.contains("compression.type"), "{err}");
     }
@@ -1466,14 +1511,14 @@ mod tests {
         }
     }
 
-    /// Pins that `build` refuses a programmatic config with a sub-millisecond
+    /// Pins that `KafkaSink::new` refuses a programmatic config with a sub-millisecond
     /// `statistics_interval` before it creates a producer.
     /// Regression for #1528.
     #[test]
-    fn build_refuses_a_sub_millisecond_statistics_interval() {
+    fn new_refuses_a_sub_millisecond_statistics_interval() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders-out");
         cfg.statistics_interval = Duration::from_micros(500);
-        let msg = refusal(build(cfg).map(drop));
+        let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert!(
             msg.starts_with("sink.kafka.statistics_interval: must be"),
             "{msg}"

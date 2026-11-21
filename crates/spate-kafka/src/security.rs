@@ -8,7 +8,7 @@
 //! with SSL/SASL support, which is the crate's off-by-default `tls` feature.
 //!
 //! Without the feature, librdkafka rejects a security request only when the
-//! client is created: the sink eagerly in `build()`, the source in `open()`.
+//! client is created: the sink eagerly in `KafkaSink::new`, the source in `open()`.
 //! Both call this guard from `validate()` before that point (the source also
 //! at config-load via `from_component_config`), so a misconfiguration fails
 //! identically with an actionable message instead of late and asymmetrically.

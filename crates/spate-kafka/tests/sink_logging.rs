@@ -8,7 +8,7 @@ mod sink;
 use mock::MockKafka;
 use sink::sealed;
 use spate_core::sink::ShardWriter;
-use spate_kafka::sink::KafkaSinkConfig;
+use spate_kafka::sink::{KafkaSink, KafkaSinkConfig};
 use spate_test::LogCapture;
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ async fn producer_debug_logs_reach_tracing() {
     let mut cfg = KafkaSinkConfig::new(cluster.bootstrap_servers(), "log-level-sink");
     cfg.statistics_interval = Duration::ZERO;
     cfg.rdkafka.insert("debug".into(), "msg".into());
-    let sink = spate_kafka::sink::build(cfg).expect("sink build");
+    let sink = KafkaSink::new(cfg).expect("sink build");
 
     let batch = sealed(&mut sink.encoder_bytes(), [b"payload".as_slice()]);
     sink.writer

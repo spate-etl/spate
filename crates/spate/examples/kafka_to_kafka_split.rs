@@ -78,8 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rdkafka passthrough). `encoder_with` bakes the sink's configured
     // `max_message_bytes` guard into the encoder.
     // ANCHOR: encoder
-    let eu_sink = kafka::sink::from_component_config(pipeline.config().sink_config("eu")?)?;
-    let us_sink = kafka::sink::from_component_config(pipeline.config().sink_config("us")?)?;
+    let eu_sink = kafka::KafkaSink::from_component_config(pipeline.config().sink_config("eu")?)?;
+    let us_sink = kafka::KafkaSink::from_component_config(pipeline.config().sink_config("us")?)?;
     let eu_enc = eu_sink.encoder_with(KafkaBytesEncoder::with_key_fn(order_key));
     let us_enc = us_sink.encoder_with(KafkaBytesEncoder::with_key_fn(order_key));
     // ANCHOR_END: encoder

@@ -126,7 +126,7 @@ mod tests {
             let yaml = format!("pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\n{sinks}");
             let cfg = PipelineConfig::from_str(&yaml).expect("loads");
             let section = cfg.sink_config(name).expect("declared");
-            let err = crate::sink::from_component_config(section)
+            let err = crate::KafkaSink::from_component_config(section)
                 .map(drop)
                 .expect_err("empty topic");
             assert_eq!(err.to_string(), format!("{want}: must not be empty"));

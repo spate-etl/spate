@@ -121,7 +121,7 @@ mod tests {
     use spate_core::error::ErrorClass;
     use spate_test::record;
 
-    /// A schema as `with_row` would fetch it from a live table.
+    /// A schema as `ClickHouseSinkBuilder::build` would fetch it from a live table.
     fn schema(cols: &[(&str, &str)]) -> Arc<RowSchema> {
         Arc::new(RowSchema {
             wire: crate::schema::Wire::RowBinary,

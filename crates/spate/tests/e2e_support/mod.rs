@@ -31,7 +31,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseEncoder, config};
+use spate::clickhouse::{ClickHouseEncoder, ClickHouseSinkBuilder};
 use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
 use spate::kafka::KafkaSource;
@@ -461,14 +461,14 @@ impl Harness {
                 .expect("avro")
                 .build_serde::<Event>();
         let sink = pipeline.block_on(
-            config::from_component_config(
+            ClickHouseSinkBuilder::from_component_config(
                 pipeline
                     .config()
                     .sink_config("default")
                     .expect("sink config"),
             )
             .expect("sink")
-            .with_row::<spate::deser::Owned<Event>>(),
+            .build::<spate::deser::Owned<Event>>(),
         );
         let sink = sink.expect("schema fetch");
         let schema = sink.schema();

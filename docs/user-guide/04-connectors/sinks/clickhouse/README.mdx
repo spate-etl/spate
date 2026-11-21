@@ -13,10 +13,14 @@ RowBinaryWithNamesAndTypes` per sealed batch with a deterministic
 encodes columnar blocks and inserts `FORMAT Native` instead; see
 [Native format](./native-format.mdx).
 
-Construct it from the pipeline's opaque section, then supply the row type
-with `with_row`, which generates the insert column list from
-`#[derive(ClickHouseRow)]` and fetches the table's schema; the result is a
-`SinkBundle` that drops straight into the builder:
+The sink is built in two steps, because its insert needs the row type and the
+table's schema as well as the configuration.
+`ClickHouseSinkBuilder::from_component_config` validates the pipeline's opaque
+section and returns a builder. `ClickHouseSinkBuilder::new` does the same for a
+`ClickHouseSinkConfig` built in code. The builder's `build::<F>()` then takes
+the row type, generates the insert column list from `#[derive(ClickHouseRow)]`
+and fetches the table's schema. The result is a `SinkBundle` that drops straight
+into the pipeline builder:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```
@@ -25,7 +29,7 @@ That is from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
 a complete program that builds under the `kafka`, `clickhouse` and `avro`
 features. The single `sink:` section is addressed as `"default"`; a named sink
-resolves under its own name. The fetch that `with_row` performs is what the
+resolves under its own name. The fetch that `build` performs is what the
 encoder and the insert header are both built from; see
 [Schema validation](./schema-validation.mdx).
 
@@ -47,7 +51,7 @@ list is not one of its keys:
 declaration order, honoring `#[serde(rename = "...")]` for a flattened
 `Nested` column's dotted `outer.inner` name, and rejects a duplicate or
 malformed name at compile time; [Column types](./column-types.mdx) has the
-detail. `with_row` supplies the row type to the builder.
+detail. `build::<F>()` supplies the row type to the builder.
 
 ```yaml
 sink:

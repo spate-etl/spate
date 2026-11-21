@@ -1,12 +1,11 @@
 ---
-description: "What a connector crate carries beyond its source: manifest, testing feature, tests, container suites, bench and fuzz targets, docs page and changelog fragment."
+description: "What a connector crate carries: manifest, constructor shape, testing feature, tests, container suites, bench and fuzz targets, metric handles, docs page and changelog fragment."
 ---
 
 # Adding a connector crate
 
 A connector crate ships a source, a sink, a format or a feed backend, or several of them, behind a feature of the `spate` crate.
-Its `src/` is the smaller part of what it carries.
-Each section below covers one of the other parts.
+Each section below covers one thing the crate carries, in its `src/` or beside it.
 
 ## Write the manifest
 
@@ -14,6 +13,58 @@ Write the crate's `description` as one paragraph that says what the crate is, an
 **Why:** a reader who finds the crate on docs.rs or crates.io is then sent to `spate`, the only crate an application depends on.
 
 For a filled-in example, see [`crates/spate-kafka/Cargo.toml`](repo:crates/spate-kafka/Cargo.toml).
+
+## Give each component a config type and two constructors
+
+Give each source, sink and deserializer a config type, and put its two constructors on the type they return.
+**Why:** every connector then builds the same way, so a user who has wired one connector can wire the next from its type names alone.
+
+The config type follows four rules:
+
+- It is a `#[non_exhaustive]` struct named `<Vendor><Role>Config`, such as `KafkaSinkConfig`.
+- Its `from_component_config(section)` deserializes the pipeline's section and validates it.
+- Its public `validate(&self)` checks the configuration rules, and creates no client and reads no file.
+- It refuses with `ConfigError`, built through a `SectionPath`, so each error starts with the key it refuses.
+
+`validate` reports at the role's own path, such as `sink.kafka.shards`.
+A source or deserializer config's `from_component_config` reports at the same path, because a pipeline holds one section of each.
+A sink config's `from_component_config` reports at the section's own path, because a pipeline can hold several sinks under `sinks:`.
+An error in a `sinks:` entry named `eu` then starts at `sinks.eu.kafka`.
+
+The type the config turns into follows three rules:
+
+- It has `new(config)` for a config built in code, and `from_component_config(section)` for the pipeline's section.
+  `new` also takes any runtime handle it needs, as `S3Source::new` takes the I/O runtime's handle.
+- Its `new` returns `Result<_, ConfigError>` only when it can fail, such as when it creates a client or loads a file.
+  `KafkaSink::new` creates the sink's producers, so it is fallible, and `KafkaSource::new` creates nothing, so it returns the source.
+- A `new` that can fail also runs the config's `validate` rules, so a config built in code meets the same rules as one read from YAML.
+  An infallible `new` takes a config that is already valid, so a caller who builds the config in code calls `validate` first.
+
+The Kafka sink in [`spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs) has this shape.
+Its signatures, with the bodies left out, are:
+
+```rust
+impl KafkaSinkConfig {
+    pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError>;
+    pub fn validate(&self) -> Result<(), ConfigError>;
+}
+
+impl KafkaSink {
+    pub fn new(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError>;
+    pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError>;
+}
+```
+
+Make the constructors return a builder only when an input must come after the config: a type parameter, or a startup step that does I/O.
+Name the builder `<Vendor><Role>Builder`, and finish it with `build` or `build_<output>`.
+`ClickHouseSinkBuilder::build::<F>()` in [`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs) takes the row type and reads the table's schema from every replica.
+`JsonDeserializerBuilder` in [`spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs) finishes with `build_serde::<T>()` or `build_value()`.
+
+Without such an input, the constructors return the role type itself.
+[`KafkaSource`](repo:crates/spate-kafka/src/source.rs) needs no later input.
+`KafkaSink` takes its encoder's record type on the built sink, through `encoder_json::<F>()`, so it needs no builder either.
+
+Feed backends and sink encoders have constructor shapes of their own, which this section does not cover.
 
 ## Put test-only access behind `testing`
 

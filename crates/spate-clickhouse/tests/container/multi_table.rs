@@ -26,9 +26,9 @@ async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
         "table: {table}\nshards:\n  - replicas: [\"{url}\"]\n{SERVER_CREDENTIALS}"
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<Order>>()
+        .build::<Owned<Order>>()
         .await
         .expect("schema fetch")
 }

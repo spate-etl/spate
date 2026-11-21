@@ -1,0 +1,5 @@
+**Breaking:** **The ClickHouse sink builds through `ClickHouseSinkBuilder::new` and `ClickHouseSinkBuilder::from_component_config`** (`spate-clickhouse`)
+
+`ClickHouseSinkBuilder::from_component_config(section)` and `ClickHouseSinkBuilder::new(config)` replace the free functions `spate_clickhouse::from_component_config` (also at `spate_clickhouse::config::from_component_config`) and `spate_clickhouse::config::build`, which are removed. `ClickHouseSinkBuilder` is exported at the crate root. The builder's `with_row::<F>()` is renamed `build::<F>()`. Its errors, the schema read and the settings check are unchanged.
+
+`ClickHouseSinkConfig` gains two public methods. `validate()` checks the configuration rules without creating a client or reading `tls.root_ca`, and its errors start at `sink.clickhouse`. `from_component_config(section)` deserializes and validates a section, and its errors start at the section's path, such as `sinks.eu.clickhouse.shards: at least one shard is required`.

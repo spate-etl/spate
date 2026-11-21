@@ -98,16 +98,16 @@
 //! struct OrderRow { id: u64, name: String, amount: f64 }
 //!
 //! let sink = pipeline.block_on(
-//!     spate_clickhouse::config::from_component_config(section)?
-//!         .with_row::<Owned<OrderRow>>(),
+//!     spate_clickhouse::ClickHouseSinkBuilder::from_component_config(section)?
+//!         .build::<Owned<OrderRow>>(),
 //! )?;
 //! let encoder = ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema());
 //! ```
 //!
-//! [`config::from_component_config`] turns that section into a
-//! [`config::ClickHouseSinkBuilder`], holding per-shard
+//! [`ClickHouseSinkBuilder::from_component_config`] turns that section into a
+//! [`ClickHouseSinkBuilder`], holding per-shard
 //! [`ClickHouseEndpoint`]s and the sink-pool configuration but no row type
-//! yet; [`config::ClickHouseSinkBuilder::with_row`] supplies it, reads the
+//! yet; [`ClickHouseSinkBuilder::build`] supplies it, reads the
 //! table's columns from every replica, and generates the
 //! [`ClickHouseWriter`] (the framework's `ShardWriter`) from both.
 //! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a
@@ -153,8 +153,8 @@ mod types;
 mod writer;
 
 pub use config::{
-    ClickHouseSink, ClickHouseSinkConfig, Compression, DistributedCheckSection, Format, TlsSection,
-    from_component_config,
+    ClickHouseSink, ClickHouseSinkBuilder, ClickHouseSinkConfig, Compression,
+    DistributedCheckSection, Format, TlsSection,
 };
 pub use distributed::DistributedCheckError;
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};

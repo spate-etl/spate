@@ -16,6 +16,7 @@
 // so a single container is enough, with no cluster wiring required.
 
 use super::*;
+use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::ClickHouseSinkConfig;
 use spate_clickhouse::{DistributedRouter, ShardKey};
 use spate_core::deser::Owned;
@@ -49,9 +50,9 @@ distributed_check:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg)
+    ClickHouseSinkBuilder::new(cfg)
         .expect("valid sink config")
-        .with_row::<Owned<IdName>>()
+        .build::<Owned<IdName>>()
         .await
         .expect("schema fetch")
 }

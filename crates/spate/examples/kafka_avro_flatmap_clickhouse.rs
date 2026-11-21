@@ -177,14 +177,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build_serde::<OrderPlaced>();
 
     // ── Sink: ClickHouse Native, sharded by order ───────────────────────
-    // `with_row` fetches `system.columns`, which is where the encoder's real
+    // `build` fetches `system.columns`, which is where the encoder's real
     // column types come from (so `placed_at`'s `DateTime64(3)` is laid out as
     // an Int64). The encoder is `Clone`: the terminal stage mints one per
     // shard.
     // ANCHOR: router
     let sink = pipeline.block_on(
-        clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?
-            .with_row::<Owned<OrderLineRow>>(),
+        clickhouse::ClickHouseSinkBuilder::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .build::<Owned<OrderLineRow>>(),
     )?;
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.

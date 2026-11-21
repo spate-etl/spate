@@ -56,7 +56,8 @@ pub(crate) struct TableEngineRow {
     pub(crate) engine_full: String,
 }
 
-/// What `build()` captures for a later `validate_distributed()` call.
+/// What `ClickHouseSinkBuilder::new` captures for a later
+/// `validate_distributed()` call.
 #[derive(Debug)]
 pub(crate) struct DistributedCheck {
     /// The endpoint to query (`distributed_check.endpoint`, defaulting to

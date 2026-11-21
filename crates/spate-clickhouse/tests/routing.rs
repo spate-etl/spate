@@ -12,7 +12,8 @@
 //! the default `cargo test` gate.
 
 use bytes::BytesMut;
-use spate_clickhouse::config::{self, ClickHouseSinkConfig};
+use spate_clickhouse::ClickHouseSinkBuilder;
+use spate_clickhouse::config::ClickHouseSinkConfig;
 use spate_clickhouse::{ClickHouseRow, DistributedRouter, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
@@ -134,7 +135,7 @@ shards:
 "#,
     )
     .expect("config yaml");
-    let builder = config::build(cfg).expect("valid sink config");
+    let builder = ClickHouseSinkBuilder::new(cfg).expect("valid sink config");
     let router = builder.router::<Owned<SkuRow>>(sku_key);
 
     let (queues, mut rxs) = shard_queues(2, 64);

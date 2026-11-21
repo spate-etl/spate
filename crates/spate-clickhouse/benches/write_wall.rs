@@ -3,7 +3,7 @@
 //!
 //! The batch is the first 1,600 frames of `support/frames.rs`, Native blocks
 //! of the `events` corpus sealed at `ChunkConfig`'s default chunk target. The
-//! sink is built by `config::build(..).with_row()` against the in-process
+//! sink is built by `ClickHouseSinkBuilder::new(..).build()` against the in-process
 //! server in `support/http_server.rs`, as a pipeline builds it, so the writer,
 //! its settings and its client are the production ones. The build and the
 //! schema fetch run in setup, outside the measured region.

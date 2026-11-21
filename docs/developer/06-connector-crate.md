@@ -85,14 +85,16 @@ Give each parser of outside bytes a target in `fuzz/`, one `[[bin]]` per boundar
 Name each metric family and label key the crate registers by [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts).
 The framework's own names follow the same rules.
 
-Hold the handles in a struct in the crate's metrics module, shaped like its peers:
+## Hold its metric handles in one struct
 
-- Declare each metric name and each label key the crate adds as a constant in that module.
+Hold the handles each component registers in one struct, shaped like its peers:
+
+- Declare each metric name and each label key the crate adds as a constant in the struct's module.
 - Keep the handle fields private.
-  Callers outside the module record through one function per event, such as `JsonDeserMetrics::dropped_malformed`.
+  Callers outside that module record through one function per event, such as `JsonDeserMetrics::dropped_malformed`.
 - When another task records into some of the handles, give it a struct of just those handles with the same shape, such as `LaneCounters` in spate-datagen.
 - Derive `Debug`.
-- Name the struct for its vendor and role, such as `KafkaFeedMetrics`.
+- Name the struct for its connector and role, such as `KafkaFeedMetrics` or `JsonDeserMetrics`.
   When one struct serves two roles, name it for the client it reads, such as `KafkaConsumerStatsMetrics`.
 
 ## Add its docs page

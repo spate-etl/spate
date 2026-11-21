@@ -151,7 +151,7 @@ their labels.
 - [JSON format page](https://spate.kainth.dev/docs/user-guide/connectors/formats/json)
   — every key, the framings, both backends and the metric family.
 - [API documentation on docs.rs](https://docs.rs/spate-json) — the builder, both
-  deserializers, the settings types and `NdjsonFramer`.
+  deserializers, the config types and `NdjsonFramer`.
 - [`json_skip_bad_records.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/json_skip_bad_records.rs)
   — one NDJSON payload with a malformed line skipped and counted, with nothing
   installed

@@ -71,7 +71,7 @@ pub enum OnError {
 ///
 /// Every key has a default, so `json: {}` is a complete section. Build one in
 /// code from [`Default`] and set the fields you need.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct JsonDeserializerConfig {
@@ -248,7 +248,7 @@ mod tests {
             YamlValue::Null,
         ))
         .unwrap();
-        assert_eq!(c.framing, JsonFraming::Single);
+        assert_eq!(c, JsonDeserializerConfig::default());
     }
 
     #[test]

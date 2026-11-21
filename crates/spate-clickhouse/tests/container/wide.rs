@@ -189,7 +189,7 @@ fn encoded_row() -> WideRow {
         t64: Time64Millis(3_723_250),
         // ClickHouse orders a Variant's members by type name, so `String` is
         // discriminant 0 and `UInt64` is 1; the enum declares them in that
-        // order (see the rowbinary module docs).
+        // order (see the crate docs on `Variant` ordering).
         v: Choice::Num(7),
         sagg: 42,
         lc: "repeat".into(),

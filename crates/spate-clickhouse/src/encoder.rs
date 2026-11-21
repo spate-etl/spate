@@ -129,6 +129,8 @@ where
 #[derive(Debug)]
 pub struct ClickHouseRowBinaryEncoder<F> {
     expected: Arc<RowSchema>,
+    /// False only for [`Self::unchecked`]; a clone starts from it.
+    check: bool,
     checked: bool,
     _row: PhantomData<fn(F)>,
 }
@@ -141,6 +143,7 @@ impl<F> ClickHouseRowBinaryEncoder<F> {
     pub(crate) fn new(expected: Arc<RowSchema>) -> Self {
         ClickHouseRowBinaryEncoder {
             expected,
+            check: true,
             checked: false,
             _row: PhantomData,
         }
@@ -154,6 +157,7 @@ impl<F> ClickHouseRowBinaryEncoder<F> {
     pub fn unchecked() -> Self {
         ClickHouseRowBinaryEncoder {
             expected: Arc::new(RowSchema::empty()),
+            check: false,
             checked: true,
             _row: PhantomData,
         }
@@ -166,7 +170,8 @@ impl<F> Clone for ClickHouseRowBinaryEncoder<F> {
         // the check is cheap, and threads must not race a shared flag.
         ClickHouseRowBinaryEncoder {
             expected: Arc::clone(&self.expected),
-            checked: self.checked,
+            check: self.check,
+            checked: !self.check,
             _row: PhantomData,
         }
     }
@@ -300,21 +305,45 @@ mod tests {
         );
     }
 
-    /// The struct check runs once per encoder, and a clone re-runs it, so a
-    /// pipeline thread never inherits another thread's verdict.
+    /// The struct check runs once per encoder, and a clone of an encoder that
+    /// has already passed it runs it again, so a pipeline thread never
+    /// inherits another thread's verdict.
     #[test]
     fn a_clone_revalidates_its_own_first_record() {
+        #[derive(Serialize)]
+        struct MaybeRow {
+            id: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+        }
+        let mut enc = ClickHouseRowBinaryEncoder::<Owned<MaybeRow>>::new(schema(&[
+            ("id", "UInt64"),
+            ("name", "Nullable(String)"),
+        ]));
+        let full = record(MaybeRow {
+            id: 1,
+            name: Some("x".into()),
+        });
+        enc.encode(&full, &mut BytesMut::new()).unwrap();
+
+        // Serde skips the field, so the row is one column short.
+        let short = record(MaybeRow { id: 2, name: None });
+        let err = enc
+            .clone()
+            .encode(&short, &mut BytesMut::new())
+            .unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+    }
+
+    /// A clone of the bench encoder stays unchecked.
+    #[test]
+    fn a_clone_of_the_unchecked_encoder_skips_the_check() {
         let rec = record(Row {
             id: 7,
             name: "x".into(),
         });
-        let mut enc = ClickHouseRowBinaryEncoder::<Owned<Row>>::new(id_name());
+        let mut enc = ClickHouseRowBinaryEncoder::<Owned<Row>>::unchecked().clone();
         enc.encode(&rec, &mut BytesMut::new()).unwrap();
-
-        let mut wrong =
-            ClickHouseRowBinaryEncoder::<Owned<Row>>::new(schema(&[("id", "UInt64")])).clone();
-        let err = wrong.encode(&rec, &mut BytesMut::new()).unwrap_err();
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
     }
 
     /// The format encoder hands the terminal stage the Native encoder's

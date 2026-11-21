@@ -32,8 +32,8 @@ struct Row {
     fixed: [u8; 4],
 }
 
-/// A cursor over encoded rows, reading the layout the rowbinary module
-/// documents. Every read panics when the buffer holds too few bytes.
+/// A cursor over encoded rows, reading the layout the crate docs give for
+/// RowBinary. Every read panics when the buffer holds too few bytes.
 struct Reader<'a> {
     rest: &'a [u8],
 }

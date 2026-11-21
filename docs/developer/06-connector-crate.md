@@ -68,7 +68,7 @@ The connector's name on each nested type keeps two roots from colliding.
 
 **Follow:** [`crates/spate-s3/src/lib.rs`](repo:crates/spate-s3/src/lib.rs).
 
-**Departs:** `KafkaFeed`, `KafkaEndpoint` and `ClickHouseSinkBuilder`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** `KafkaFeed`, `KafkaEndpoint`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 
@@ -80,7 +80,7 @@ Give each role type two constructors.
 `new` also takes any runtime handle the role needs, as `S3Source::new` takes the I/O runtime's handle.
 
 A role that needs I/O before it can run, such as the ClickHouse sink reading its table schema, builds in two steps.
-`new` and `from_component_config` return a builder, and the builder's `connect` does the I/O and returns the role.
+`new` and `from_component_config` return a builder, and the builder's `connect` does the I/O and returns the role, as `ClickHouseSinkBuilder::connect` does.
 
 **Why:** an application that builds a pipeline in code and one that reads YAML reach the same type and the same checks.
 An invalid config fails at construction, as the `ConfigError` the rest of the configuration returns, and never later as text inside a start error.
@@ -88,7 +88,6 @@ An invalid config fails at construction, as the `ConfigError` the rest of the co
 **Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs).
 
 **Departs:** the sources and the JSON deserializer build infallibly and validate in `open` or not at all ([#2335](https://github.com/spate-etl/spate/issues/2335)).
-The ClickHouse sink's builder finishes with `with_row` and its `validate` is private ([#1601](https://github.com/spate-etl/spate/issues/1601)).
 The feed backends have no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
@@ -103,7 +102,7 @@ Pass a value the role cannot run without to `new`, never to a `with_*` setter.
 
 **Follow:** `PipelineRuntime::with_feed` in [`crates/spate-core/src/pipeline/runtime.rs`](repo:crates/spate-core/src/pipeline/runtime.rs).
 
-**Departs:** `ClickHouseSinkBuilder::with_row` ([#1601](https://github.com/spate-etl/spate/issues/1601)), `with_*` constructors that take no `self`, and `S3Source::with_framer`, whose framer `open` requires ([#1607](https://github.com/spate-etl/spate/issues/1607)).
+**Departs:** `with_*` constructors that take no `self`, and `S3Source::with_framer`, whose framer `open` requires ([#1607](https://github.com/spate-etl/spate/issues/1607)).
 
 **Checked by:** review.
 

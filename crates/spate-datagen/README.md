@@ -110,10 +110,10 @@ split one stream between them. Two instances with the same configuration and
 - `commit()` stores watermarks in memory and nowhere else.
 - The source claims no resumability. A restart or a crash begins every lane at
   offset 0, so the same configuration replays the whole stream from the
-  beginning, with the same ids and offsets. Under `clock: wall`, only
-  `placed_at` differs between runs. That is strictly more duplication than a
-  real at-least-once source. Such a source replays only from its last committed
-  position.
+  beginning, with the same ids and offsets. Under `clock: wall`, each record's
+  event time differs between runs, and so does each order's `placed_at`. That
+  is strictly more duplication than a real at-least-once source. Such a source
+  replays only from its last committed position.
 - A `resume_from:` file is deliberately declined. A demo source that appears to
   resume durably is one somebody builds on.
 - A bounded run exits `Completed` only once every batch is acknowledged and the

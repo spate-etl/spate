@@ -96,8 +96,9 @@ covers both.
 
 The third, `check_source_framing`, runs once per chain when the pipeline
 starts, with the source's `FramingContract`. A deserializer that splits one
-payload into several records refuses `PerRecord`, because that source has split
-them already. The run then fails with the refusal before the source opens.
+payload into several records should refuse `PerRecord`, because that source has
+split them already. When a deserializer refuses, the run fails with the refusal
+before the source opens.
 
 Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload
 and uses it as the pipeline's failure reason. Keep the payload's content out of

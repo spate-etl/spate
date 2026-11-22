@@ -535,8 +535,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             None => None,
         };
 
-        // Each chain meets the source's framing before any task or driver
-        // starts, so a refusal leaves nothing running to stop.
+        // Each chain meets the source's framing before `run` starts any task
+        // or driver of its own.
         let source_framing = self.source.framing_contract();
         let mut chains = Vec::with_capacity(threads);
         for i in 0..threads {

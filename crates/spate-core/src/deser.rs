@@ -85,9 +85,9 @@ pub trait Deserializer<F: RecFamily>: Send {
     /// [`framing_contract`](crate::source::Source::framing_contract), and a
     /// refusal stops the run before the source opens.
     ///
-    /// A deserializer that splits one payload into several records refuses
-    /// [`FramingContract::PerRecord`], since that source has already split
-    /// them. The default accepts every contract, which fits a deserializer
+    /// A deserializer that splits one payload into several records should
+    /// refuse [`FramingContract::PerRecord`], since that source has already
+    /// split them. The default accepts every contract, which fits a deserializer
     /// that decodes one record per payload.
     ///
     /// A deserializer that wraps another passes it on.

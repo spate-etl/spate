@@ -14,6 +14,9 @@ use std::time::Duration;
 #[path = "../tests/support/mock.rs"]
 pub(crate) mod mock;
 
+#[path = "../tests/support/raw.rs"]
+pub(crate) mod raw;
+
 #[path = "../tests/support/topics.rs"]
 #[allow(dead_code, reason = "the integration suites use the rest")]
 pub(crate) mod topics;
@@ -202,5 +205,84 @@ fn api_versions(ver: i16, apis: &[(i16, i16, i16)], body: &mut Vec<u8>) {
         body.extend_from_slice(&k.to_be_bytes());
         body.extend_from_slice(&lo.to_be_bytes());
         body.extend_from_slice(&hi.to_be_bytes());
+    }
+}
+
+/// Runs the test `name` again in a child process, where `build` builds and
+/// drops a client after the child registers an exit handler of its own. That
+/// handler runs after any OpenSSL registers later, and aborts if OpenSSL
+/// refuses to initialise because its cleanup has run.
+#[cfg(feature = "tls")]
+pub(crate) fn assert_openssl_runs_through_exit(name: &str, build: impl FnOnce()) {
+    use std::ffi::c_int;
+
+    const CHILD: &str = "SPATE_TEST_OPENSSL_EXIT";
+
+    unsafe extern "C" {
+        fn atexit(handler: extern "C" fn()) -> c_int;
+    }
+
+    extern "C" fn abort_after_openssl_cleanup() {
+        // SAFETY: a null settings pointer selects OpenSSL's defaults.
+        if unsafe { openssl_sys::OPENSSL_init_ssl(0, std::ptr::null()) } != 1 {
+            std::process::abort();
+        }
+    }
+
+    if std::env::var_os(CHILD).is_none() {
+        spate_test_support::run_in_child(name, |child| child.env(CHILD, "1"));
+        return;
+    }
+    // SAFETY: the handler is a function item, valid for the whole process.
+    assert_eq!(unsafe { atexit(abort_after_openssl_cleanup) }, 0);
+    build();
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod tests {
+    use super::assert_openssl_runs_through_exit;
+    use super::raw::{Raw as _, raw_config};
+    use rdkafka::producer::{BaseProducer, DefaultProducerContext};
+
+    /// Pins that the mock cluster's own client leaves OpenSSL's exit handler
+    /// unregistered. It is the first client of every mock test.
+    #[test]
+    fn a_mock_cluster_leaves_openssl_running_through_process_exit() {
+        assert_openssl_runs_through_exit(
+            "testutil::tests::a_mock_cluster_leaves_openssl_running_through_process_exit",
+            || drop(super::mock::MockKafka::new()),
+        );
+    }
+
+    /// Pins that a test's own client leaves OpenSSL's exit handler
+    /// unregistered.
+    #[test]
+    fn a_raw_client_leaves_openssl_running_through_process_exit() {
+        assert_openssl_runs_through_exit(
+            "testutil::tests::a_raw_client_leaves_openssl_running_through_process_exit",
+            || {
+                let client: BaseProducer = raw_config()
+                    .set("bootstrap.servers", "127.0.0.1:1")
+                    .build()
+                    .expect("producer");
+                drop(client);
+            },
+        );
+    }
+
+    /// Pins that a test's own client built with a context leaves OpenSSL's
+    /// exit handler unregistered.
+    #[test]
+    fn a_raw_client_with_a_context_leaves_openssl_running_through_process_exit() {
+        assert_openssl_runs_through_exit(
+            "testutil::tests::a_raw_client_with_a_context_leaves_openssl_running_through_process_exit",
+            || {
+                let client: BaseProducer<DefaultProducerContext> = raw_config()
+                    .set("bootstrap.servers", "127.0.0.1:1")
+                    .build_with(DefaultProducerContext)
+                    .expect("producer");
+                drop(client);
+            },
+        );
     }
 }

@@ -660,7 +660,7 @@ fn build_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::testing::Raw as _;
+    use crate::testutil::raw::Raw as _;
     use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
 
     fn section(body: &str) -> ComponentConfig {

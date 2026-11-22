@@ -882,7 +882,7 @@ mod tests {
         //! The follower against rdkafka's in-process MockCluster.
 
         use super::super::*;
-        use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::raw::{Raw as _, raw_config};
         use crate::testutil::mock::MockKafka;
         use crate::testutil::wire::{self, Marker};
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};

@@ -701,7 +701,7 @@ mod tests {
     /// with the partitions it could not read.
     #[test]
     fn an_end_read_with_no_time_left_names_its_partitions() {
-        use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::raw::{Raw as _, raw_config};
         let consumer: rdkafka::consumer::BaseConsumer = raw_config()
             .set("bootstrap.servers", "127.0.0.1:1")
             .build()

@@ -3658,7 +3658,7 @@ mod tests {
         fn mock_holding(records: usize) -> MockKafka {
             let cluster = MockKafka::new();
             cluster.create_topic("t", 1, 1).expect("create topic");
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .build()
@@ -3820,7 +3820,8 @@ mod tests {
         /// from its commit unchecked while another partition reads.
         #[test]
         fn a_runtime_resume_leaves_a_refused_partition_paused() {
-            use crate::client::testing::{Raw as _, mark_errors, raw_config};
+            use crate::client::testing::mark_errors;
+            use crate::testutil::raw::{Raw as _, raw_config};
             use spate_core::source::SourceLane as _;
             let cluster = MockKafka::new();
             cluster.create_topic("t", 2, 1).expect("create topic");
@@ -3972,7 +3973,7 @@ mod tests {
         /// Commit `offset` on partition 0 of `cluster`'s topic `t` for group
         /// `positions`.
         fn commit_positions(cluster: &MockKafka, offset: i64) {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             use rdkafka::consumer::Consumer as _;
             let committer: rdkafka::consumer::BaseConsumer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
@@ -3991,7 +3992,7 @@ mod tests {
         /// mock keeps of a partition before it drops its oldest message sets, and
         /// return the log's start and end.
         fn write_past_retention(cluster: &MockKafka) -> (i64, i64) {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             use rdkafka::consumer::Consumer as _;
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
@@ -4030,7 +4031,7 @@ mod tests {
             lane: &mut KafkaLane,
             after: i64,
         ) -> (i64, Vec<i64>) {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             use spate_core::source::PayloadBatch as _;
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
@@ -4256,16 +4257,13 @@ mod tests {
         /// retiring offsets, since it moved the position with no lane issuing it.
         /// A partition that was never split delivers there.
         #[test]
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a test producer is configured outside the factory's roles"
-        )]
         fn a_main_queue_message_latches_the_rewind() {
+            use crate::testutil::raw::{Raw as _, raw_config};
             let (cluster, mut source, _lanes) = assigned_on_mock(0);
             cluster.create_topic("unsplit", 1, 1).expect("create topic");
-            let producer: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+            let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
-                .create()
+                .build()
                 .expect("producer");
             producer
                 .send(
@@ -4294,7 +4292,7 @@ mod tests {
         /// another partition reads.
         #[test]
         fn a_rewind_leaves_a_partition_waiting_for_its_seek_paused() {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             use spate_core::source::SourceLane as _;
             let cluster = MockKafka::new();
             cluster.create_topic("t", 2, 1).expect("create topic");
@@ -4967,7 +4965,7 @@ mod tests {
 
         /// Produce `n` records to partition 0 of `cluster`'s topic `orders`.
         fn produce_orders(cluster: &MockKafka, n: usize) {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .build()
@@ -4987,7 +4985,7 @@ mod tests {
         /// Commit `offset` on partition 0 of `cluster`'s topic `orders` for
         /// `group`.
         fn commit_orders(cluster: &MockKafka, group: &str, offset: i64) {
-            use crate::client::testing::{Raw as _, raw_config};
+            use crate::testutil::raw::{Raw as _, raw_config};
             let committer: BaseConsumer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .set("group.id", group)
@@ -5210,7 +5208,7 @@ mod tests {
     /// hangs depends on a race these lines do not reproduce.
     mod queued_rebalance {
         use super::*;
-        use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::raw::{Raw as _, raw_config};
         use crate::testutil::mock::MockKafka;
         use crate::testutil::{ASSIGN_STOP, returns_within, stop_at};
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
@@ -5731,7 +5729,7 @@ mod tests {
     /// A consumer of `group` on `brokers`, outside the source, that answers
     /// its own rebalances.
     fn raw_group_member(brokers: &str, group: &str) -> rdkafka::consumer::BaseConsumer {
-        use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::raw::{Raw as _, raw_config};
         raw_config()
             .set("bootstrap.servers", brokers)
             .set("group.id", group)

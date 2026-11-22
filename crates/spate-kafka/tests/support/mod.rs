@@ -11,7 +11,7 @@ use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
 use rdkafka::message::{BorrowedMessage, Headers as _, Message as _};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::types::RDKafkaRespErr;
-use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+use rdkafka::{Offset, TopicPartitionList};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::metrics::names;
@@ -32,12 +32,15 @@ pub(crate) mod feed;
 pub(crate) mod group;
 pub(crate) mod latest;
 pub(crate) mod mock;
+pub(crate) mod raw;
 pub(crate) mod sink;
 pub(crate) mod topics;
 pub(crate) mod wire;
 
 #[allow(unused_imports, reason = "each target uses a different subset")]
 pub(crate) use mock::MockKafka;
+#[allow(unused_imports, reason = "each target uses a different subset")]
+pub(crate) use raw::{Raw, raw_config};
 #[allow(unused_imports, reason = "each target uses a different subset")]
 pub(crate) use wire::{
     BatchCrc, Marker, RawBatch, control_batch, corrupt_batch, produce_batch, try_produce_batch,
@@ -205,48 +208,6 @@ pub(crate) fn a_member_that_never_answers_its_offer(
         let _ = b.poll(Duration::from_millis(50));
         offers(&a) >= 2
     });
-}
-
-/// A client configuration a test builds itself, outside the crate's client
-/// factory: a seeding producer, a reading consumer, an admin client.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a test client is configured outside the factory's roles"
-)]
-pub(crate) fn raw_config() -> ClientConfig {
-    ClientConfig::new()
-}
-
-/// Builds a client from a [`raw_config`].
-pub(crate) trait Raw {
-    fn build<T: rdkafka::config::FromClientConfig>(&self) -> rdkafka::error::KafkaResult<T>;
-
-    fn build_with<C, T>(&self, context: C) -> rdkafka::error::KafkaResult<T>
-    where
-        C: rdkafka::client::ClientContext,
-        T: rdkafka::config::FromClientConfigAndContext<C>;
-}
-
-impl Raw for ClientConfig {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a test client is built outside the factory's roles"
-    )]
-    fn build<T: rdkafka::config::FromClientConfig>(&self) -> rdkafka::error::KafkaResult<T> {
-        self.create()
-    }
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a test client is built outside the factory's roles"
-    )]
-    fn build_with<C, T>(&self, context: C) -> rdkafka::error::KafkaResult<T>
-    where
-        C: rdkafka::client::ClientContext,
-        T: rdkafka::config::FromClientConfigAndContext<C>,
-    {
-        self.create_with_context(context)
-    }
 }
 
 /// The broker the selected `ci/kafka/` lane pins, pulled by digest.

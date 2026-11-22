@@ -4,7 +4,7 @@
 // A per-item `expect` goes unfulfilled in whichever target uses the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
-use rdkafka::ClientConfig;
+use super::raw::{Raw as _, raw_config};
 use rdkafka::error::KafkaResult;
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::producer::{BaseProducer, DefaultProducerContext, Producer as _};
@@ -55,13 +55,9 @@ impl MockKafka {
     pub(crate) fn with_brokers(brokers: i32) -> Self {
         // librdkafka sets the delay only through a cluster's native handle, and
         // rdkafka hands one out only for a cluster a client config starts.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the client only holds the mock cluster, outside every role"
-        )]
-        let client: BaseProducer = ClientConfig::new()
+        let client: BaseProducer = raw_config()
             .set("test.mock.num.brokers", brokers.to_string())
-            .create()
+            .build()
             .expect("mock cluster");
         let kafka = Self {
             client: Arc::new(client),

@@ -12,8 +12,8 @@ use super::fakes::*;
 use super::*;
 use crate::config::{ConfigError, PipelineConfig, SectionPath};
 use crate::error::SourceError;
-use crate::framing::FramingContract;
 use crate::feed::memory::MemoryFeed;
+use crate::framing::FramingContract;
 use crate::metrics::names;
 use crate::ops::tests::VecEncoder;
 use crate::ops::{PushOutcome, RunnableChain};
@@ -124,9 +124,13 @@ fn start_prepared(
     customize: impl FnOnce(PipelineRuntime<FakeSource>, &SharedLog) -> PipelineRuntime<FakeSource>,
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
-    start_chains(config, options, prepare, customize, move |_thread, cs, log| {
-        Box::new(mode_factory(cs, log))
-    })
+    start_chains(
+        config,
+        options,
+        prepare,
+        customize,
+        move |_thread, cs, log| Box::new(mode_factory(cs, log)),
+    )
 }
 
 /// [`start_prepared`] with a chain factory that sees the thread index and
@@ -3253,7 +3257,11 @@ fn each_chain_is_asked_about_the_source_contract() {
         },
     );
     h.shutdown.trigger();
-    let report = h.join.join().unwrap().expect("a whole-payload source starts");
+    let report = h
+        .join
+        .join()
+        .unwrap()
+        .expect("a whole-payload source starts");
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(*asked.lock().unwrap(), [FramingContract::WholePayload]);
 }

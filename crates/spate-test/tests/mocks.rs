@@ -549,7 +549,8 @@ fn split_on_refuses_a_source_that_frames_each_record() {
         TestDeserializer::passthrough(),
         TestDeserializer::fail_on_prefix(&b"x"[..]),
     ] {
-        one.check_source_framing(FramingContract::PerRecord).unwrap();
+        one.check_source_framing(FramingContract::PerRecord)
+            .unwrap();
         one.check_source_framing(FramingContract::WholePayload)
             .unwrap();
     }

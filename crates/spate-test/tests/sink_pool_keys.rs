@@ -76,7 +76,9 @@ fn rows_are_written(config: PipelineConfig, options: SinkOptions) {
         script.writes().iter().map(|w| w.rows).sum::<u64>() == ROWS
     });
     shutdown.trigger();
-    run.wait_exit(HANG).expect("pipeline did not exit").expect("run");
+    run.wait_exit(HANG)
+        .expect("pipeline did not exit")
+        .expect("run");
 }
 
 /// A `batch:` block beside the backend key overlays the connector's base in

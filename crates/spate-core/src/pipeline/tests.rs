@@ -15,6 +15,7 @@ use crate::error::SourceError;
 use crate::framing::FramingContract;
 use crate::feed::memory::MemoryFeed;
 use crate::metrics::names;
+use crate::ops::tests::VecEncoder;
 use crate::ops::{PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
@@ -3276,7 +3277,7 @@ fn a_chain_built_by_run_records_through_the_recorder_run_installs() {
             crate::ops::chain_owned(crate::deser::BytesPassthrough)
                 .with_metrics(chain_name.clone(), "main")
                 .sink(
-                    crate::ops::tests::VecEncoder,
+                    VecEncoder,
                     crate::sink::KeyHashRouter,
                     crate::ops::ChunkConfig::default(),
                     queues,

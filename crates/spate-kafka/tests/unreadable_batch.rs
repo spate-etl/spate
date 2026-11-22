@@ -94,7 +94,8 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(source_cfg(&brokers, "unreadable"));
+        let mut source =
+            KafkaSource::new(source_cfg(&brokers, "unreadable")).expect("the config validates");
         let meter =
             spate_core::metrics::Meter::with_namespace("kafka", "unreadable", "source", "kafka");
         source
@@ -162,7 +163,8 @@ fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(source_cfg(&brokers, "tail"));
+        let mut source =
+            KafkaSource::new(source_cfg(&brokers, "tail")).expect("the config validates");
         let meter = spate_core::metrics::Meter::with_namespace("kafka", "tail", "source", "kafka");
         source
             .open(
@@ -202,7 +204,8 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
     assert_eq!(produce_batch(&brokers, TOPIC, 0, &unknown), 0);
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(source_cfg(&brokers, "unknown-codec"));
+    let mut source =
+        KafkaSource::new(source_cfg(&brokers, "unknown-codec")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[lanes[0].partition()], 1);
@@ -255,7 +258,8 @@ fn a_record_at_the_top_of_the_offset_range_fails_the_lane() {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(source_cfg(&brokers, name));
+        let mut source =
+            KafkaSource::new(source_cfg(&brokers, name)).expect("the config validates");
         source
             .open(
                 SourceCtx::new(cp.handle())
@@ -321,7 +325,8 @@ fn a_batch_that_fails_its_crc_is_delivered_by_default() {
     );
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(source_cfg(&brokers, "crc-default"));
+    let mut source =
+        KafkaSource::new(source_cfg(&brokers, "crc-default")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[lanes[0].partition()], 1);
@@ -373,7 +378,7 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source
             .open(
                 SourceCtx::new(cp.handle())
@@ -454,7 +459,8 @@ fn an_error_bars_the_marker_advance() {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             let mut cp = Checkpointer::new();
-            let mut source = KafkaSource::new(source_cfg(&brokers, "barred"));
+            let mut source =
+                KafkaSource::new(source_cfg(&brokers, "barred")).expect("the config validates");
             let meter =
                 spate_core::metrics::Meter::with_namespace("kafka", "barred", "source", "kafka");
             source
@@ -531,7 +537,7 @@ fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
 
     let stops = |cfg: KafkaSourceConfig, produce_after: bool| -> String {
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         if produce_after {

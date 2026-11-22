@@ -97,7 +97,8 @@ fn kafka_to_kafka_split_round_trip() {
         cfg.statistics_interval = Duration::ZERO;
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "earliest".to_string())]);
         cfg
-    });
+    })
+    .expect("the config validates");
     let sink_a = KafkaSink::new(sink_config(&brokers, A_TOPIC)).expect("sink a");
     let sink_b = KafkaSink::new(sink_config(&brokers, B_TOPIC)).expect("sink b");
     let enc_a = sink_a.encoder_bytes();

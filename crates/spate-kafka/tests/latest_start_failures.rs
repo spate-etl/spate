@@ -108,7 +108,7 @@ mod another_topic {
         ]);
         let runtime = passthrough_runtime(
             pipeline,
-            KafkaSource::new(cfg),
+            KafkaSource::new(cfg).expect("the config validates"),
             sink,
             TestEncoder,
             RuntimeOptions::default(),
@@ -173,7 +173,7 @@ mod slow_commits {
         // Far past `HANG`, so a slow runner fails on the test's wait, which names it.
         cfg.startup_timeout = Duration::from_secs(300);
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         wait_until(HANG, "lanes", || {
@@ -214,7 +214,7 @@ mod policy_spelling {
             .insert("auto.offset.reset".into(), " latest".into());
         cfg.validate().expect("the value loads");
         let checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("librdkafka accepts the value");
@@ -257,7 +257,9 @@ mod named_failure {
         cfg.statistics_interval = Duration::ZERO;
         let clock = TestClock::frozen();
         let checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("open");
@@ -317,7 +319,7 @@ mod permanent_codes {
             // failing request too, so only the classification may end the run.
             cfg.startup_timeout = Duration::from_hours(1);
             let cp = Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let mut stopped = None;
             wait_until(HANG, "the run to stop", || {
@@ -362,7 +364,9 @@ mod startup_deadline {
         cfg.statistics_interval = Duration::ZERO;
         cfg.startup_timeout = Duration::from_secs(5);
         let clock = TestClock::frozen();
-        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let cp = Checkpointer::new();
         let capture = spate_test::LogCapture::new();
         capture.during(tracing::Level::WARN, || {
@@ -440,7 +444,7 @@ mod slow_listing {
         cfg.statistics_interval = Duration::ZERO;
         cfg.startup_timeout = Duration::from_secs(120);
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).expect("open");
         // Three listings wait 20 s each, so this sits above `HANG` and under the
         // nextest kill.
@@ -604,7 +608,7 @@ mod silent_coordinator {
         let (tx, rx) = mpsc::channel();
         let driver = std::thread::spawn(move || {
             let cp = Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.open(SourceCtx::new(cp.handle())).expect("open");
             loop {
                 match source.poll_events(Duration::from_millis(200)) {
@@ -752,7 +756,7 @@ mod silent_coordinator {
         let (tx, rx) = mpsc::channel();
         let driver = std::thread::spawn(move || {
             let cp = Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.open(SourceCtx::new(cp.handle())).expect("open");
             loop {
                 match source.poll_events(Duration::from_millis(200)) {
@@ -968,7 +972,9 @@ mod logical_committed_offset {
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
         let clock = TestClock::frozen();
         let checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         source.open(SourceCtx::new(checkpointer.handle())).unwrap();
         let capture = spate_test::LogCapture::new();
         capture.during(tracing::Level::WARN, || {
@@ -1044,7 +1050,7 @@ mod logical_committed_offset {
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
         let runtime = passthrough_runtime(
             pipeline,
-            KafkaSource::new(cfg),
+            KafkaSource::new(cfg).expect("the config validates"),
             sink,
             TestEncoder,
             RuntimeOptions::default(),
@@ -1117,7 +1123,7 @@ mod refused_starts {
             ("heartbeat.interval.ms".to_string(), "500".to_string()),
         ]);
         let checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("open");

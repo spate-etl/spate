@@ -53,7 +53,7 @@ fn real_broker_full_lifecycle() {
     produce(&brokers, TOPIC, 100, 1, "real");
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "real-life"));
+    let mut source = KafkaSource::new(config(&brokers, "real-life")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment.
@@ -105,7 +105,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     let mut cfg = config(&brokers, "rev-commit");
     // No interval commit, so only the flush can commit before `unassign` does.
     cfg.commit_interval = Duration::from_hours(1);
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment and drain all 50 records, producing a watermark at
@@ -205,7 +205,8 @@ fn real_broker_backlog_reports_summable_lag() {
             &spate_core::metrics::ComponentLabels::new("backlog", "source", "kafka"),
         ));
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(config(&brokers, "backlog"));
+        let mut source =
+            KafkaSource::new(config(&brokers, "backlog")).expect("the config validates");
         source
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
@@ -288,7 +289,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     let mut cfg = config(&brokers, "rev-each");
     cfg.consumers = 2;
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let statistics = recorder.handle();
     let meter = spate_core::metrics::Meter::with_namespace("kafka", "rev-each", "source", "kafka");
@@ -440,7 +441,7 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
             handle_signals: false,
             ..spate_core::pipeline::RuntimeOptions::default()
         })
-        .into_runtime(KafkaSource::new(config(&brokers, &group)))
+        .into_runtime(KafkaSource::new(config(&brokers, &group)).expect("the config validates"))
         .expect("runtime");
     let shutdown = runtime.shutdown_handle();
     let run = spate_test::PipelineRun::spawn(move || runtime.run());
@@ -1203,7 +1204,8 @@ mod latest_start {
             support::produce_to(brokers, topic, 0, 0..3);
             let accept = || {
                 let cp = Checkpointer::new();
-                let mut source = KafkaSource::new(latest::config(brokers, topic, &group, "latest"));
+                let mut source = KafkaSource::new(latest::config(brokers, topic, &group, "latest"))
+                    .expect("the config validates");
                 source.open(SourceCtx::new(cp.handle())).expect("open");
                 let lanes = await_assignment(&mut source, HANG);
                 (source, cp, lanes)
@@ -1253,7 +1255,7 @@ mod latest_start {
             cfg.rdkafka
                 .insert("isolation.level".to_string(), level.to_string());
             let cp = Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let lanes = await_assignment(&mut source, HANG);
             let at = support::committed_by(&brokers, group, TOPIC, 1)[0];

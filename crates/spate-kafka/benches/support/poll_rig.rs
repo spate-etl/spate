@@ -87,7 +87,7 @@ impl Rig {
             ("fetch.wait.max.ms".to_owned(), "1".to_owned()),
         ]);
         let mut checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(config);
+        let mut source = KafkaSource::new(config).expect("the config validates");
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("open");

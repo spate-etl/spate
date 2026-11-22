@@ -90,7 +90,7 @@ impl Run {
     /// A run whose sink acknowledges every write.
     pub(crate) fn start(cfg: KafkaSourceConfig) -> Run {
         let (pipeline, sink, script) = pipeline();
-        let source = KafkaSource::new(cfg);
+        let source = KafkaSource::new(cfg).expect("the config validates");
         let runtime = passthrough_runtime(pipeline, source, sink, TestEncoder, options());
         Run::spawn(runtime, script)
     }
@@ -101,7 +101,7 @@ impl Run {
         for _ in 0..DOWN_WRITES {
             script.enqueue_global(WriteOutcome::retryable("sink down"));
         }
-        let source = KafkaSource::new(cfg);
+        let source = KafkaSource::new(cfg).expect("the config validates");
         let runtime = passthrough_runtime(pipeline, source, sink, TestEncoder, options());
         Run::spawn(runtime, script)
     }
@@ -133,7 +133,7 @@ impl Run {
                 handle_signals: false,
                 ..options()
             })
-            .into_runtime(KafkaSource::new(cfg))
+            .into_runtime(KafkaSource::new(cfg).expect("the config validates"))
             .expect("runtime");
         Run::spawn(runtime, script)
     }
@@ -408,14 +408,16 @@ pub(crate) fn a_removed_single_consumer(brokers: &str, topic: &str, policy: &str
     let group = unique_name("removed");
     let mut next = 0;
     let first_cp = Checkpointer::new();
-    let mut first = KafkaSource::new(config(brokers, topic, &group, policy));
+    let mut first =
+        KafkaSource::new(config(brokers, topic, &group, policy)).expect("the config validates");
     first.open(SourceCtx::new(first_cp.handle())).expect("open");
     let mut first_lanes = await_assignment(&mut first, HANG);
     let first_at = first_read(&mut first, &mut first_lanes[0], brokers, topic, &mut next);
 
     // The first member polls no more from here.
     let second_cp = Checkpointer::new();
-    let mut second = KafkaSource::new(config(brokers, topic, &group, policy));
+    let mut second =
+        KafkaSource::new(config(brokers, topic, &group, policy)).expect("the config validates");
     second
         .open(SourceCtx::new(second_cp.handle()))
         .expect("open");

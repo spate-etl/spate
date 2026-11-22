@@ -944,12 +944,12 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use crate::KafkaSourceConfig;
-    use crate::testutil::raw::raw_config;
     use crate::config::Consumer;
     use crate::context::SourceHooks;
     use crate::feed::{FeedRole, KafkaFeedConfig};
     use crate::security::tests::assert_ca_cases;
     use crate::sink::{KafkaSinkConfig, SinkRole};
+    use crate::testutil::raw::raw_config;
     use rdkafka::admin::AdminClient;
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::BaseProducer;

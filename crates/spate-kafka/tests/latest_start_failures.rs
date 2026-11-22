@@ -2,7 +2,6 @@
 //! behaviour, against rdkafka's in-process MockCluster and, for a silent
 //! coordinator, a real broker.
 
-
 mod support;
 
 /// A rebalance offer that names another topic must not move the group's commit
@@ -11,9 +10,9 @@ mod support;
 /// receives the bytes a hostile coordinator would send.
 mod another_topic {
     use crate::support::MockKafka;
+    use crate::support::{Raw as _, raw_config};
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-    use crate::support::{Raw as _, raw_config};
     use rdkafka::{Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
@@ -896,11 +895,11 @@ mod silent_coordinator {
 mod logical_committed_offset {
     use crate::support::MockKafka;
     use crate::support::wire::{request, str16};
+    use crate::support::{Raw as _, raw_config};
+    use rdkafka::Offset;
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::types::RDKafkaApiKey;
-    use crate::support::{Raw as _, raw_config};
-    use rdkafka::Offset;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
     use spate_core::config::PipelineConfig;

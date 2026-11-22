@@ -5208,8 +5208,8 @@ mod tests {
     /// hangs depends on a race these lines do not reproduce.
     mod queued_rebalance {
         use super::*;
-        use crate::testutil::raw::{Raw as _, raw_config};
         use crate::testutil::mock::MockKafka;
+        use crate::testutil::raw::{Raw as _, raw_config};
         use crate::testutil::{ASSIGN_STOP, returns_within, stop_at};
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         use spate_test::{HANG, capture_logs, wait_until};

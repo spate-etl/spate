@@ -380,12 +380,14 @@ impl SinkOptions {
     /// use spate_core::sink::SinkPoolConfig;
     ///
     /// let config = PipelineConfig::from_str(
-    ///     "pipeline: { name: demo }\n\
-    ///      source: { memory: {} }\n\
-    ///      sink:\n\
-    ///        queue: { max_bytes: 2MiB }\n\
-    ///        chunk: { target_bytes: 128KiB }\n\
-    ///        memory: {}\n",
+    ///     r#"
+    /// pipeline: { name: demo }
+    /// source: { memory: {} }
+    /// sink:
+    ///   queue: { max_bytes: 2MiB }
+    ///   chunk: { target_bytes: 128KiB }
+    ///   memory: {}
+    /// "#,
     /// )?;
     /// let resolved = SinkOptions::default().resolve(&config, "default", SinkPoolConfig::default())?;
     /// assert_eq!(resolved.queue_capacity, 16);

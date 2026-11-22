@@ -304,16 +304,31 @@ mod tests {
     #[test]
     fn an_empty_overlay_keeps_the_base_exactly() {
         for base in extreme_bases() {
-            for blocks in ["batch: {}\ninflight: {}\nretry: {}\nbreaker: {}", "batch:\nretry:\n"] {
+            for blocks in [
+                "batch: {}\ninflight: {}\nretry: {}\nbreaker: {}",
+                "batch:\nretry:\n",
+            ] {
                 let mut keys: serde_yaml::Mapping = serde_yaml::from_str(blocks).unwrap();
                 keys.insert("fake".into(), serde_yaml::Value::Null);
                 let section: SinkSection =
                     serde_yaml::from_value(serde_yaml::Value::Mapping(keys)).unwrap();
                 let got = SinkPoolConfig::new(
-                    section.batch("sink", &base.batch).unwrap().unwrap_or(base.batch),
-                    section.inflight("sink", &base.inflight).unwrap().unwrap_or(base.inflight),
-                    section.retry("sink", &base.retry).unwrap().unwrap_or(base.retry),
-                    section.breaker("sink", &base.breaker).unwrap().unwrap_or(base.breaker),
+                    section
+                        .batch("sink", &base.batch)
+                        .unwrap()
+                        .unwrap_or(base.batch),
+                    section
+                        .inflight("sink", &base.inflight)
+                        .unwrap()
+                        .unwrap_or(base.inflight),
+                    section
+                        .retry("sink", &base.retry)
+                        .unwrap()
+                        .unwrap_or(base.retry),
+                    section
+                        .breaker("sink", &base.breaker)
+                        .unwrap()
+                        .unwrap_or(base.breaker),
                 );
                 assert_eq!(got, base, "{blocks}");
             }
@@ -328,6 +343,9 @@ mod tests {
                 .unwrap();
         let printed = format!("{section:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
-        assert!(printed.contains("initial") && printed.contains("password"), "{printed}");
+        assert!(
+            printed.contains("initial") && printed.contains("password"),
+            "{printed}"
+        );
     }
 }

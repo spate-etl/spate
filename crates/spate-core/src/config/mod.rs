@@ -1101,9 +1101,16 @@ sink: { memory: {} }
             section.declared(),
             ["queue", "chunk", "batch", "inflight", "retry", "breaker"]
         );
-        let body: Body = cfg.sink_config("default").unwrap().deserialize_into().unwrap();
+        let body: Body = cfg
+            .sink_config("default")
+            .unwrap()
+            .deserialize_into()
+            .unwrap();
         assert_eq!(body.table, "events");
-        assert_eq!(cfg.sink_config("default").unwrap().path(), SectionPath::sink("fake"));
+        assert_eq!(
+            cfg.sink_config("default").unwrap().path(),
+            SectionPath::sink("fake")
+        );
     }
 
     /// A misspelled framework key reads as a second backend, so it is refused
@@ -1125,10 +1132,9 @@ sink: { memory: {} }
 
     #[test]
     fn sink_chunk_block_parses_and_resolves() {
-        let cfg = load(
-            "sink:\n  chunk: { target_bytes: 512KiB, encode_policy: fail }\n  memory: {}\n",
-        )
-        .unwrap();
+        let cfg =
+            load("sink:\n  chunk: { target_bytes: 512KiB, encode_policy: fail }\n  memory: {}\n")
+                .unwrap();
         let chunk = cfg
             .sink_section("default")
             .unwrap()
@@ -1195,10 +1201,22 @@ sink: { memory: {} }
     #[test]
     fn validate_checks_the_blocks_of_every_declared_sink() {
         for (block, want) in [
-            ("queue: { max_bytes: 0 }", "sinks.cold.queue.max_bytes: must be greater than zero"),
-            ("queue: { bytes: 1MiB }", "sinks.cold.queue.bytes: unknown field `bytes`"),
-            ("batch: { max_rows: lots }", "sinks.cold.batch.max_rows: invalid type"),
-            ("inflight: { per_shard: 2 }", "sinks.cold.inflight.per_shard: unknown field"),
+            (
+                "queue: { max_bytes: 0 }",
+                "sinks.cold.queue.max_bytes: must be greater than zero",
+            ),
+            (
+                "queue: { bytes: 1MiB }",
+                "sinks.cold.queue.bytes: unknown field `bytes`",
+            ),
+            (
+                "batch: { max_rows: lots }",
+                "sinks.cold.batch.max_rows: invalid type",
+            ),
+            (
+                "inflight: { per_shard: 2 }",
+                "sinks.cold.inflight.per_shard: unknown field",
+            ),
             ("retry: { initial: soon }", "sinks.cold.retry.initial: "),
             ("breaker: 7", "sinks.cold.breaker: invalid type"),
         ] {
@@ -1266,9 +1284,12 @@ sink: { memory: {} }
         )
         .unwrap_err();
         assert!(err.starts_with("sinks.cold.chunk.encode_policy: "), "{err}");
-        let err = load("sinks:\n  cold:\n    chunk: { target_bytes: 0B }\n    memory: {}\n")
-            .unwrap_err();
-        assert_eq!(err, "sinks.cold.chunk.target_bytes: must be greater than zero");
+        let err =
+            load("sinks:\n  cold:\n    chunk: { target_bytes: 0B }\n    memory: {}\n").unwrap_err();
+        assert_eq!(
+            err,
+            "sinks.cold.chunk.target_bytes: must be greater than zero"
+        );
     }
 
     #[test]

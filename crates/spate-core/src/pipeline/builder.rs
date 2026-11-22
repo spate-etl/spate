@@ -404,8 +404,13 @@ impl SinkOptions {
         let section = config.sink_section(name).ok();
         let at = &*address;
 
-        let chunk = one_place(from_yaml(section, |s| s.chunk(at))?, self.chunk, "chunk", at)?
-            .unwrap_or_default();
+        let chunk = one_place(
+            from_yaml(section, |s| s.chunk(at))?,
+            self.chunk,
+            "chunk",
+            at,
+        )?
+        .unwrap_or_default();
         // The YAML path already checked `> 0`; `with_chunk` skips that. It
         // also comes before the queue's slot count divides by it.
         if chunk.target_bytes == 0 {
@@ -413,7 +418,12 @@ impl SinkOptions {
                 "{address}: chunk.target_bytes must be greater than zero"
             )));
         }
-        let queue = one_place(from_yaml(section, |s| s.queue(at))?, self.queue, "queue", at)?;
+        let queue = one_place(
+            from_yaml(section, |s| s.queue(at))?,
+            self.queue,
+            "queue",
+            at,
+        )?;
         let queue_capacity = match queue {
             Some(queue) => queue.capacity(chunk.target_bytes, &SectionPath::at(at))?,
             None => DEFAULT_QUEUE_CAPACITY,
@@ -1269,7 +1279,6 @@ mod tests {
             p.sink(bad_labels).err(),
             Some(BuildError::Sink(_))
         ));
-
     }
 
     #[tokio::test]
@@ -1890,12 +1899,18 @@ mod tests {
                 "queue: { max_bytes: 1MiB }",
                 SinkOptions::default().with_queue(QueueSection::new(1024 * 1024)),
             ),
-            ("batch: {}", SinkOptions::default().with_batch(BatchConfig::default())),
+            (
+                "batch: {}",
+                SinkOptions::default().with_batch(BatchConfig::default()),
+            ),
             (
                 "inflight: {}",
                 SinkOptions::default().with_inflight(InflightConfig::default()),
             ),
-            ("retry: {}", SinkOptions::default().with_retry(RetryConfig::default())),
+            (
+                "retry: {}",
+                SinkOptions::default().with_retry(RetryConfig::default()),
+            ),
             (
                 "breaker: {}",
                 SinkOptions::default().with_breaker(BreakerConfig::default()),
@@ -1970,7 +1985,10 @@ mod tests {
         let none = SinkOptions::default();
         let base = SinkPoolConfig::default();
         let err = resolve_pool("batch: { max_rowz: 1 }", &none, base).unwrap_err();
-        assert!(err.starts_with("sink.batch.max_rowz: unknown field"), "{err}");
+        assert!(
+            err.starts_with("sink.batch.max_rowz: unknown field"),
+            "{err}"
+        );
         let err = resolve_pool("inflight: { max_per_shard: 0 }", &none, base).unwrap_err();
         assert!(
             err.starts_with("invalid configuration: sink: inflight.max_per_shard"),
@@ -2057,7 +2075,10 @@ mod tests {
         let mut on_sink = test_config(1);
         on_sink.sink = Some(SinkSection::new(ComponentConfig::new("capture", chunk())));
         for (config, want) in [
-            (on_source, "fake.chunk: `chunk:` is only valid on a sink section"),
+            (
+                on_source,
+                "fake.chunk: `chunk:` is only valid on a sink section",
+            ),
             (
                 on_sink,
                 "capture.chunk: `chunk:` sits beside `capture:` in the sink section, not inside it",

@@ -307,7 +307,8 @@ pub(super) fn split_backend<E: serde::de::Error, const N: usize>(
             )
         }));
     }
-    let backend = ComponentConfig::deserialize(serde_yaml::Value::Mapping(keys)).map_err(E::custom)?;
+    let backend =
+        ComponentConfig::deserialize(serde_yaml::Value::Mapping(keys)).map_err(E::custom)?;
     Ok((values, backend))
 }
 

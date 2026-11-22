@@ -61,7 +61,11 @@ impl QueueSection {
 
     /// The slot count for chunks of `chunk_bytes`, which must be above zero.
     /// `at` is the path of the sink section, such as `sinks.eu`.
-    pub(crate) fn capacity(&self, chunk_bytes: usize, at: &SectionPath) -> Result<usize, ConfigError> {
+    pub(crate) fn capacity(
+        &self,
+        chunk_bytes: usize,
+        at: &SectionPath,
+    ) -> Result<usize, ConfigError> {
         let max_bytes = self.max_bytes.as_u64();
         if max_bytes == 0 {
             return Err(at.invalid("queue.max_bytes", "must be greater than zero"));
@@ -555,7 +559,10 @@ mod tests {
         let most = Semaphore::MAX_PERMITS as u64;
         assert_eq!(slots(most, 1), Ok(Semaphore::MAX_PERMITS));
         let err = slots(most + 1, 1).unwrap_err();
-        assert!(err.starts_with("sink.fake.queue.max_bytes: makes "), "{err}");
+        assert!(
+            err.starts_with("sink.fake.queue.max_bytes: makes "),
+            "{err}"
+        );
         assert_eq!(
             slots(0, 64 * 1024),
             Err("sink.fake.queue.max_bytes: must be greater than zero".to_owned())

@@ -28,7 +28,7 @@ exactly once. That single boundary is `RunnableChain`:
 pub trait RunnableChain: Send {
     /// `from` is the resume cursor: where a blocked push left off.
     fn push_batch<'buf>(&mut self, batch: &mut dyn PayloadBatch<'buf>, from: usize) -> PushOutcome;
-    // + flush/drain lifecycle hooks
+    // + flush/drain lifecycle hooks, and check_source_framing at start
 }
 ```
 
@@ -79,6 +79,8 @@ pub trait Deserializer<F: RecFamily>: Send {
     fn component_type(&self) -> &str { "deserializer" }
     /// Receives the deserializer's own `Meter`; the default ignores it.
     fn attach_metrics(&mut self, _cx: DeserMetricsCtx) {}
+    /// Accepts or refuses the source's framing at start; the default accepts.
+    fn check_source_framing(&self, _source: FramingContract) -> Result<(), ConfigError> { Ok(()) }
 }
 ```
 
@@ -86,11 +88,16 @@ Records go out through the emitter rather than back through a return value, so
 a payload that contains a thousand records does not allocate a collection to
 hand them over.
 
-The two defaulted methods label the deserializer's metrics. A chain built with
-`with_metrics` reads `component_type` for its deserializer stage and passes the
-deserializer a `Meter` through `attach_metrics`.
+Two of the defaulted methods label the deserializer's metrics. A chain built
+with `with_metrics` reads `component_type` for its deserializer stage and passes
+the deserializer a `Meter` through `attach_metrics`.
 [Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)
 covers both.
+
+The third, `check_source_framing`, runs once per chain when the pipeline
+starts, with the source's `FramingContract`. A deserializer that splits one
+payload into several records refuses `PerRecord`, because that source has split
+them already. The run then fails with the refusal before the source opens.
 
 Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload
 and uses it as the pipeline's failure reason. Keep the payload's content out of

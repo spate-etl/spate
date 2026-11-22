@@ -93,7 +93,8 @@ usually shrink `batch.linger` so flushes are fast.
 ## Encoding helpers
 
 - `TestDeserializer` — payload to records: `passthrough()` (one payload,
-  one record), `split_on(b',')` (one payload, N records), and
+  one record), `split_on(b',')` (one payload, N records, refused at start
+  under a source that frames one record per payload), and
   `fail_on_prefix(...)` for poison-payload tests. `BytesPassthrough` (a
   re-export of the framework's) skips deserialization entirely.
 - `TestEncoder` — a `RowEncoder` writing each row as a length-prefixed

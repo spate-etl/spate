@@ -54,7 +54,8 @@ call. The feed has no queue and no clock behind it, and its backend key is
 - `TestDeserializer` turns payloads into records. `passthrough` emits one record
   per payload, `split_on` one per delimited segment, and `fail_on_prefix` fails
   each payload that starts with a marker, to exercise the `Skip` and `Fail`
-  error policies.
+  error policies. A pipeline whose source frames one record per payload
+  refuses to start with `split_on`.
 - `TestEncoder` writes each row with a length prefix, and `decode_rows` reads a
   captured frame back into rows.
 - `EmitCollector` collects what a deserializer emits. `blocking_after` makes it

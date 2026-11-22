@@ -208,8 +208,11 @@ The contract reaches the chain as `ctx.source_framing`, and a format crate's
 deserializer builder reads it there to derive its own granularity and to
 reject a double-framing configuration where the source frames *and* the
 deserializer frames (worked reference: [`spate-json`](repo:crates/spate-json)'s
-`JsonDeserializerBuilder::for_source_framing`). Not every layout fits this
-model. Columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
+`JsonDeserializerBuilder::for_source_framing`). When the pipeline starts, the
+runtime also asks each chain's deserializer to accept the contract through
+`Deserializer::check_source_framing`. A deserializer that splits payloads
+refuses `PerRecord`, and the run fails before the source opens. Not every
+layout fits this model. Columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
 per-record byte boundary and belong to a future record-batch reader source,
 not a framer.
 

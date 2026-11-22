@@ -341,8 +341,8 @@ sink: { capture: {} }
 // The budget below is smaller than a full chunk queue, so a handful of
 // records crosses the high watermark: one shard at the default capacity of
 // eight holds 8 × 256B of queued chunks against a 1KiB budget. Size a real
-// deployment the other way round, with `shards × queue_capacity ×
-// chunk.target_bytes` under the low watermark. Otherwise a saturated
+// deployment the other way round, with `shards × queue.max_bytes` under the
+// low watermark. Otherwise a saturated
 // pipeline sits permanently above the high watermark and duty-cycles at
 // `min_pause`.
 fn slow_sink() -> Result<(), Box<dyn std::error::Error>> {

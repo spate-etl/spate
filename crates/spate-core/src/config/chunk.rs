@@ -103,7 +103,7 @@ mod tests {
     }
 
     fn at() -> SectionPath {
-        SectionPath::sink("fake")
+        SectionPath::at("sink")
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "sink.fake.chunk.target_bytes: must be greater than zero"
+            "sink.chunk.target_bytes: must be greater than zero"
         );
     }
 

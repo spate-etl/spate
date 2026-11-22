@@ -112,9 +112,10 @@ like `p@ss #1` cannot turn into a YAML comment.
 
 ## Opaque connector sections
 
-`source`, `deserializer`, and `sink` are **single-key mappings**: the one
-key selects the component type, and the body under it belongs entirely to
-that component:
+`source` and `deserializer` are **single-key mappings**: the one key selects
+the component type, and the body under it belongs entirely to that component.
+A `sink` section holds the same key, and the framework's sink keys sit beside
+it (below):
 
 ```yaml
 source:
@@ -132,11 +133,31 @@ dotted path from the file root (`source.<tag>.<key>: missing field ...`).
 Connectors stay fully decoupled from the framework schema, and the
 single-key shape lets every typed struct keep `deny_unknown_fields`.
 
-One key inside the body is the exception: **`chunk` is framework-reserved**
-([reference](../07-reference/configuration.mdx#chunk)). The framework peels it
-out before the connector sees the body, so a connector schema must not declare
-its own `chunk` field; on a sink it would never receive a value, and on a
-`source`/`deserializer` the key is rejected at load.
+A `chunk` key inside any body is refused at load, so a connector schema must
+not declare its own `chunk` field
+([reference](../07-reference/configuration.mdx#chunk)).
+
+## Sink keys beside the component key {#sink-keys}
+
+A sink section names one component, and the keys that tune every sink sit
+beside it: `queue`, `chunk`, `batch`, `inflight`, `retry` and `breaker`. The
+framework reads them itself, so they mean the same thing for every sink:
+
+```yaml
+sink:
+  queue: { max_bytes: 8MiB }
+  batch: { linger: 2s }
+  clickhouse:
+    table: orders
+    shards: [{ replicas: ["http://localhost:8123"] }]
+```
+
+A pool block (`batch`, `inflight`, `retry`, `breaker`) overlays the
+connector's own base pool field by field, so `batch: { linger: 2s }` keeps
+the base's row and byte limits. Any other key beside the component key fails
+at load as a second component, so a misspelled `batc:` is caught at startup.
+The [sink section reference](../07-reference/configuration.mdx#sink-section)
+lists each key, its default and its bounds.
 
 Each connector's body schema is documented on its page:
 [Kafka](../04-connectors/sources/kafka/README.mdx) ·
@@ -148,22 +169,23 @@ Each connector's body schema is documented on its page:
 
 A pipeline that writes to more than one destination declares a `sinks:` map
 of `name -> component` **instead of** `sink:` (setting both, or neither, is a
-load error). Each entry is an ordinary single-key component with its own full
-configuration:
+load error). Each entry is a sink section with its own full configuration:
 
 ```yaml
 sinks:
   type_a:
-    clickhouse: { table: events_a, shards: [...], batch: { linger: 1s }, ... }
+    batch: { linger: 1s }
+    clickhouse: { table: events_a, shards: [...], ... }
   type_b:
-    clickhouse: { table: events_b, shards: [...], batch: { linger: 5s }, ... }
+    batch: { linger: 5s }
+    clickhouse: { table: events_b, shards: [...], ... }
 ```
 
-A `chunk:` error in an entry, and an error decoding the entry's body, start
-at the entry's name. For example, `target_bytes: 0` in the `chunk:` block of
-`type_a` fails with
-`sinks.type_a.<type>.chunk.target_bytes: must be greater than zero`, where
-`<type>` is the entry's component key.
+An error in an entry starts at the entry's name. For example,
+`target_bytes: 0` in the `chunk:` block of `type_a` fails with
+`sinks.type_a.chunk.target_bytes: must be greater than zero`, and an error
+decoding the entry's body starts at `sinks.type_a.<type>`, where `<type>` is
+the entry's component key.
 
 The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)
 resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on

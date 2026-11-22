@@ -29,7 +29,7 @@ runtimes, leaked queue clones. Use it when you need it, not by default.
 | Builder step | Public primitives |
 |---|---|
 | `Pipeline::from_config(config)` | `telemetry::init` → `metrics::install(&metrics_settings(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → `InflightBudget::new` → `SinkFailures::new` |
-| `.sink(bundle)` | `SinkBundle::into_parts` → `SinkPoolConfig::validate` → `shard_queues` → `ShardQueues::with_frame_codec` when the parts carry a `frame_codec` → `ComponentLabels` + `SinkShardMetrics::try_new` per shard → `SinkPool::spawn` → a boxed drain closure. It also resolves this sink's `ChunkConfig` from the YAML `chunk:` block — the one step with no manual equivalent, since the config layer is what carries `chunk:`, so by hand you pass a `ChunkConfig` yourself. |
+| `.sink(bundle)` | `SinkBundle::into_parts` → `SinkOptions::resolve` → `shard_queues` → `ShardQueues::with_frame_codec` when the parts carry a `frame_codec` → `ComponentLabels` + `SinkShardMetrics::try_new` per shard → `SinkPool::spawn` → a boxed drain closure. `SinkOptions::resolve` gives this sink's chunking, queue slot count and validated pool from its YAML section, the `SinkOptions` and the connector's base pool. |
 | `.chains(f)` | the chain factory handed to `PipelineRuntime::new`, with queue/budget/name plumbing pre-threaded per call |
 | `.into_runtime(source)` / `.run(source)` | `PipelineRuntime::new(config, source, factory, SinkRuntime, budget)` + `with_options` + `with_io_runtime` + `run` |
 
@@ -152,17 +152,20 @@ impossibility; manually, they are yours again:
   shard's endpoints are caught nowhere: a surplus label publishes health
   for a replica that does not exist, and a missing one drops a live
   replica's health silently.
-- **Pool validation** — the builder runs `SinkPoolConfig::validate` on the
-  bundle's pool and returns `BuildError::Config`. `SinkPool::spawn` checks
-  only `inflight.max_per_shard`, panicking when it is out of range, so by
-  hand call `validate` before spawning, as the example does.
+- **Sink key resolution** — the builder calls `SinkOptions::resolve`, which
+  overlays the YAML pool blocks on the bundle's pool, sizes the queue against
+  the resolved chunk and runs `SinkPoolConfig::validate`, returning
+  `BuildError::Config`. `SinkPool::spawn` checks only
+  `inflight.max_per_shard`, panicking when it is out of range, so by hand
+  call `resolve` before spawning, as the example does. The warning for a
+  sink key declared on a sink nothing installs comes from `into_runtime`, so
+  a manual assembly does not log it.
 
 ## The layering contract
 
 Both layers are public and semver-committed. The builder grows no capability
-the primitives cannot express, bar the standing exceptions above (the
-queue-depth series, which has no public seam, and resolving a per-sink
-`chunk:` block, which is the config layer's job), and the primitives will
+the primitives cannot express, bar the standing exception above (the
+queue-depth series, which has no public seam), and the primitives will
 not break under you to make the builder prettier. If you
 outgrow one builder step, desugar *that step* and keep the rest; the two
 paths compose because they are the same path.

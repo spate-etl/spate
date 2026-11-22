@@ -127,14 +127,12 @@ default settings, hand-recorded during the tuning investigation:
 
 ```text
 max_inflight_bytes × low_ratio  ≥  headroom (≈2×) × (
-    shards × inflight.max_per_shard × batch.max_bytes           // pending writes
-  + shards × SinkOptions::queue_capacity × chunk.target_bytes ) // queued chunks
+    shards × inflight.max_per_shard × batch.max_bytes   // pending writes
+  + shards × queue.max_bytes )                          // queued chunks
 ```
 
-`SinkOptions::queue_capacity` is the one factor that is not a configuration
-key; it is set on the builder. Configuration rejects unknown fields naming
-the offending one, so a pipeline that reads `queue_capacity` off this rule
-and puts it in YAML fails at startup.
+With `queue.max_bytes` unset, each shard's queue holds 8 chunks, so the
+queued-chunks term is `shards × 8 × chunk.target_bytes`.
 
 In words: the budget's low watermark must comfortably hold everything the
 sink *legitimately* keeps in flight during steady-state operation. If it

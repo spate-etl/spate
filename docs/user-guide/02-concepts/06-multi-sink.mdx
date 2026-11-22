@@ -52,7 +52,8 @@ what the classifier sees; and each `add` fixes its own branch's row family,
 `Owned<PaymentRow>` and `Owned<RefundRow>` here, two rows with different
 columns. `ctx.sink("<name>")` resolves the sink installed under that
 name, handing the branch that sink's queues **and** its own resolved chunking
-(from that sink's `chunk:` block, so each branch tunes independently).
+(from the `chunk:` key in that sink's section, so each branch tunes
+independently).
 Declaration order fixes the handle indices.
 
 Classification against a decoded sum type is the shortest shape this takes:

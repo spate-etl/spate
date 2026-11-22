@@ -234,10 +234,10 @@ Keys the framework reads for every backend of a role sit beside the backend's ke
 
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 
-**Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs).
+**Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
 
-**Departs:** each sink declares `batch`, `inflight`, `retry` and `breaker` in its own config, and `chunk` sits inside the sink's body ([#2325](https://github.com/spate-etl/spate/issues/2325)).
-Until core parses them beside the backend key, a new sink declares them as the shipped sinks do.
+**Departs:** the ClickHouse and Kafka sinks still declare `batch`, `inflight`, `retry` and `breaker` in their own config ([#2325](https://github.com/spate-etl/spate/issues/2325)).
+A new sink leaves them out and passes a default pool in its `SinkParts`.
 
 **Checked by:** review.
 

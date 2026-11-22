@@ -6,9 +6,11 @@ description: "Sinks write records out: Kafka as a producer with delivery-report 
 
 A **sink** writes records out: the framework batches, shards, retries, and
 acknowledges them, and only commits a source watermark once the sink confirms
-the data behind it is durable. Configure one with a single-key `sink:` section
+the data behind it is durable. Configure one with a
+[sink section](../../07-reference/configuration.mdx#sink-section) under `sink:`
 (or a [`sinks:` map](../../07-reference/configuration.mdx#sinks) for multiple
-destinations). All sinks share the framework's
+destinations): one key naming the sink, and the framework's sink keys beside
+it. All sinks share the framework's
 [`batch` / `inflight` / `retry` / `breaker` pool settings](../../07-reference/configuration.mdx#sink-pool).
 
 | Sink | Config tag | Summary |

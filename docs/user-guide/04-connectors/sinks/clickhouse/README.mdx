@@ -42,11 +42,10 @@ To write to **several tables** from one pipeline (one per record kind), see
 The `sink: { clickhouse: ... }` section deserializes into
 `ClickHouseSinkConfig`
 ([`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs));
-unknown fields are rejected with the offending key, and the `batch`,
-`inflight`, `retry` and `breaker` sections are validated at load against the
-framework's
-[sink-pool rules](../../../07-reference/configuration.mdx#sink-pool), so a
-refused value fails startup with an error naming the key. The insert column
+unknown fields are rejected with the offending key. The framework's sink keys,
+such as `batch` and `queue`, sit beside `clickhouse:` in the
+[sink section](../../../07-reference/configuration.mdx#sink-section). The
+insert column
 list is not one of its keys:
 `#[derive(ClickHouseRow)]` on the row struct generates it from field
 declaration order, honoring `#[serde(rename = "...")]` for a flattened
@@ -56,6 +55,8 @@ detail. `connect::<F>()` supplies the row type to the builder.
 
 ```yaml
 sink:
+  batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
+  inflight: { max_per_shard: 2 }
   clickhouse:
     table: orders_local            # or db.orders_local
     shards:
@@ -63,8 +64,6 @@ sink:
       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
     user: default
     password: ${CLICKHOUSE_PASSWORD}
-    batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
-    inflight: { max_per_shard: 2 }
     timeouts: { send: 30s, end: 180s, startup: 30s }
     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ```
@@ -79,7 +78,7 @@ sink:
 | `password` | string | `none` | Password (interpolate secrets via `${VAR}`). Renders `<redacted>` in `Debug` output. |
 | `tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. See [Security](#security-tls). |
 | `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough-and-the-denylist). Values render `<redacted>` in `Debug` output. |
-| `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply; keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
+| `batch` / `inflight` / `retry` / `breaker` | sections | `none` | The connector's base for the shared sink pool (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply. The same blocks beside `clickhouse:` in the sink section overlay this base field by field, so set them there. Keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
 | `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
 | `timeouts.startup` | duration | `30s` | Timeout of each request the sink sends a replica at startup: the schema read, the settings check and the `distributed_check` queries. A replica that gives no answer within it fails startup with an error naming the replica. |

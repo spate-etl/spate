@@ -206,8 +206,8 @@ fn framing_contract(&self) -> FramingContract {
 
 When the pipeline starts, the runtime asks each chain's deserializer to accept
 the contract through `Deserializer::check_source_framing`. A deserializer that
-splits payloads refuses `PerRecord`, because the source frames *and* the
-deserializer would frame again, and the run fails before the source opens.
+splits payloads should refuse `PerRecord`, because the source frames *and* the
+deserializer would frame again. A refusal fails the run before the source opens.
 Worked reference: [`spate-json`](repo:crates/spate-json)'s deserializers, which
 refuse `PerRecord` under `JsonFraming::Lines` or `JsonFraming::Array`.
 

@@ -8,8 +8,10 @@
 //! the provided [`Owned`] family.
 
 use crate::checkpoint::AckRef;
+#[cfg(not(loom))]
 use crate::config::ConfigError;
 use crate::error::DeserError;
+#[cfg(not(loom))]
 use crate::framing::FramingContract;
 use crate::metrics::Meter;
 use crate::metrics::names::DESERIALIZER_DEFAULT;
@@ -93,6 +95,8 @@ pub trait Deserializer<F: RecFamily>: Send {
     /// # Errors
     ///
     /// The [`ConfigError`] the run returns, naming what to change.
+    // `config` is out of loom model builds, and no loom model starts a run.
+    #[cfg(not(loom))]
     fn check_source_framing(&self, _source: FramingContract) -> Result<(), ConfigError> {
         Ok(())
     }

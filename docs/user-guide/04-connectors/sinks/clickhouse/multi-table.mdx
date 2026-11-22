@@ -27,22 +27,22 @@ Each table's own insert columns come from its own row struct, via
 ```yaml
 sinks:
   payments:
+    batch: { max_rows: 500000, linger: 1s }
     clickhouse:
       table: payments
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-      batch: { max_rows: 500000, linger: 1s }
 
   refunds:
+    # A low-volume table: linger longer to build bigger parts (at the cost of
+    # checkpoint lag — see the tuning note below).
+    batch: { max_rows: 500000, linger: 5s }
     clickhouse:
       table: refunds
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-      # A low-volume table: linger longer to build bigger parts (at the cost of
-      # checkpoint lag — see the tuning note below).
-      batch: { max_rows: 500000, linger: 5s }
 ```
 
 `sink:` and `sinks:` are mutually exclusive; a single-sink pipeline keeps using

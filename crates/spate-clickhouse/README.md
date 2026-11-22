@@ -24,6 +24,8 @@ rejected.
 
 ```yaml
 sink:
+  # batch, inflight, retry and breaker are the framework's sink-pool sections,
+  # set here beside `clickhouse:`
   clickhouse:
     table: orders_local            # or analytics.orders_local
     database: analytics            # for an unqualified table
@@ -37,7 +39,6 @@ sink:
     format: rowbinary              # rowbinary | native
     timeouts: { send: 30s, end: 180s, startup: 30s }
     settings: { insert_quorum: "auto" }   # extra per-insert settings
-    # batch, inflight, retry and breaker are the framework's sink-pool sections
 ```
 
 `weight`, `compression`, `format` and `timeouts` show their defaults. Leaving

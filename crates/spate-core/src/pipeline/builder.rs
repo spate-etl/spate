@@ -371,8 +371,9 @@ impl SinkOptions {
     ///
     /// [`ConfigError`] naming the sink when a key is set both here and in
     /// YAML, a block does not decode, `chunk.target_bytes` is zero,
-    /// `queue.max_bytes` is zero or makes more chunks than a queue holds,
-    /// or the pool fails [`SinkPoolConfig::validate`].
+    /// `queue.max_bytes` is zero, does not fit `usize` on this platform or
+    /// makes more chunks than a queue holds, or the pool fails
+    /// [`SinkPoolConfig::validate`].
     ///
     /// ```
     /// use spate_core::config::PipelineConfig;

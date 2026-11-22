@@ -106,12 +106,10 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         .sink(sink)?
         .chains(move |ctx| {
             let chunk_cfg = ctx.chunk();
-            // The S3 lane already frames NDJSON (one line = one payload), so
-            // `for_source_framing` derives `single` from the source and would
-            // reject a `framing:` that double-frames it.
+            // The S3 lane already frames JSON Lines (one line = one payload),
+            // so the deserializer keeps the default `JsonFraming::Single`.
             // ANCHOR: deserializer
             let deser = JsonDeserializerBuilder::from_component_config(&deser_section)
-                .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .build_serde::<PaymentCaptured>();
             // ANCHOR_END: deserializer

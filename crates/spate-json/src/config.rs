@@ -7,20 +7,22 @@
 //! ```yaml
 //! deserializer:
 //!   json:
-//!     framing: single              # single | ndjson | array
 //!     on_error: skip               # skip | fail
 //!     reject_duplicate_keys: false
 //! ```
+//!
+//! How a payload splits into documents is set in code, with
+//! [`JsonDeserializerBuilder::framing`], since it follows the producer's
+//! format and the source the pipeline is built with.
 
 use crate::deser::{DecoderCore, JsonSerdeDeserializer, JsonValueDeserializer};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use spate_core::config::{ComponentConfig, ConfigError, SectionPath};
-use spate_core::framing::FramingContract;
+use spate_core::config::{ComponentConfig, ConfigError};
 
-/// How one payload is split into JSON documents.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+/// How one payload is split into JSON documents, set with
+/// [`JsonDeserializerBuilder::framing`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JsonFraming {
     /// The whole payload is one JSON document → one record. An empty or
@@ -30,21 +32,10 @@ pub enum JsonFraming {
     /// Newline-delimited JSON (JSON Lines): one JSON value per `\n`-separated
     /// line → one record per line, with per-line error isolation under
     /// [`OnError::Skip`].
-    Ndjson,
+    Lines,
     /// A top-level JSON array → one record per element, decoded in one pass
     /// (a malformed array is handled atomically by [`OnError`]).
     Array,
-}
-
-impl JsonFraming {
-    /// The value as the `framing` key spells it.
-    fn yaml_name(self) -> &'static str {
-        match self {
-            JsonFraming::Single => "single",
-            JsonFraming::Ndjson => "ndjson",
-            JsonFraming::Array => "array",
-        }
-    }
 }
 
 /// What to do with a record that does not parse or match the target type.
@@ -62,7 +53,7 @@ pub enum OnError {
     /// *does* is the chain's deserializer
     /// [`ErrorPolicy`](spate_core::ErrorPolicy): `Fail` stops the pipeline and the
     /// batch replays under at-least-once; `Skip` (the default) drops the whole
-    /// payload. Multi-record framings (`ndjson`, `array`) fail all-or-nothing,
+    /// payload. Multi-record framings (`Lines`, `Array`) fail all-or-nothing,
     /// so a payload never emits a partial prefix before erroring.
     Fail,
 }
@@ -75,8 +66,6 @@ pub enum OnError {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct JsonDeserializerConfig {
-    /// Payload framing.
-    pub framing: JsonFraming,
     /// Record-level error policy.
     pub on_error: OnError,
     /// Reject (rather than silently last-value-wins) any JSON object with a
@@ -99,8 +88,7 @@ impl JsonDeserializerConfig {
     }
 
     /// Cross-field validation. It refuses nothing, because no key's values
-    /// depend on another's. The framing a source already applies is checked
-    /// by [`JsonDeserializerBuilder::for_source_framing`].
+    /// depend on another's.
     ///
     /// # Errors
     ///
@@ -118,13 +106,17 @@ pub(crate) const TAG: &str = "json";
 #[derive(Clone, Debug)]
 pub struct JsonDeserializerBuilder {
     config: JsonDeserializerConfig,
+    framing: JsonFraming,
 }
 
 impl JsonDeserializerBuilder {
-    /// Build from a config.
+    /// Build from a config, with [`JsonFraming::Single`] framing.
     #[must_use]
     pub fn new(config: JsonDeserializerConfig) -> JsonDeserializerBuilder {
-        JsonDeserializerBuilder { config }
+        JsonDeserializerBuilder {
+            config,
+            framing: JsonFraming::Single,
+        }
     }
 
     /// Build from the pipeline's `deserializer` component section.
@@ -140,38 +132,16 @@ impl JsonDeserializerBuilder {
         )?))
     }
 
-    /// Derive and validate framing against the source's
-    /// [`FramingContract`](spate_core::framing::FramingContract), so the format
-    /// is declared once (on the source) instead of coordinating the source's
-    /// framing with `framing:` by hand.
+    /// Split each payload as `framing`. The default, [`JsonFraming::Single`],
+    /// decodes each payload as one document.
     ///
-    /// - [`PerRecord`](FramingContract::PerRecord): the source already frames
-    ///   one record per payload, so the deserializer must decode a single
-    ///   document. `framing: single` (the default) is used, and any other
-    ///   `framing` is refused.
-    /// - [`WholePayload`](FramingContract::WholePayload): the deserializer owns
-    ///   framing, and the configured `framing` (`single` / `ndjson` / `array`)
-    ///   is honored unchanged.
-    ///
-    /// # Errors
-    ///
-    /// [`ConfigError::Component`] at `deserializer.json.framing` for a
-    /// `PerRecord` source with a `framing` other than `single`.
-    pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, ConfigError> {
-        match contract {
-            FramingContract::PerRecord if self.config.framing != JsonFraming::Single => {
-                Err(SectionPath::deserializer(TAG).invalid(
-                    "framing",
-                    format!(
-                        "is `{}`, but the source already frames one record per payload; \
-                         remove `framing` or set it to `single`, or use a source format \
-                         that leaves framing to the deserializer",
-                        self.config.framing.yaml_name()
-                    ),
-                ))
-            }
-            _ => Ok(self),
-        }
+    /// A source that frames one record per payload, such as an S3 source with
+    /// a `JsonLinesFramer`, has split the payload already. The deserializer
+    /// then refuses any framing but `Single` when the pipeline starts.
+    #[must_use]
+    pub fn framing(mut self, framing: JsonFraming) -> Self {
+        self.framing = framing;
+        self
     }
 
     /// Decode each document into your own `T: serde::de::DeserializeOwned`.
@@ -191,7 +161,7 @@ impl JsonDeserializerBuilder {
 
     fn core(&self) -> DecoderCore {
         DecoderCore {
-            framing: self.config.framing,
+            framing: self.framing,
             on_error: self.config.on_error,
             reject_duplicate_keys: self.config.reject_duplicate_keys,
             metrics: None,
@@ -217,27 +187,35 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_single_skip_no_dedup() {
+    fn defaults_are_skip_no_dedup_and_single_framing() {
         let c = JsonDeserializerConfig::default();
-        assert_eq!(c.framing, JsonFraming::Single);
         assert_eq!(c.on_error, OnError::Skip);
         assert!(!c.reject_duplicate_keys);
+        let b = JsonDeserializerBuilder::new(c);
+        assert_eq!(b.framing, JsonFraming::Single);
     }
 
     #[test]
     fn parses_a_full_section() {
-        let c = config("framing: ndjson\non_error: fail\nreject_duplicate_keys: true\n").unwrap();
-        assert_eq!(c.framing, JsonFraming::Ndjson);
+        let c = config("on_error: fail\nreject_duplicate_keys: true\n").unwrap();
         assert_eq!(c.on_error, OnError::Fail);
         assert!(c.reject_duplicate_keys);
     }
 
     #[test]
     fn the_builder_takes_the_section_it_is_given() {
-        let b = builder("framing: array\non_error: fail\nreject_duplicate_keys: true\n");
-        assert_eq!(b.config.framing, JsonFraming::Array);
+        let b = builder("on_error: fail\nreject_duplicate_keys: true\n");
         assert_eq!(b.config.on_error, OnError::Fail);
         assert!(b.config.reject_duplicate_keys);
+    }
+
+    #[test]
+    fn the_builder_takes_the_framing_it_is_given() {
+        for framing in [JsonFraming::Single, JsonFraming::Lines, JsonFraming::Array] {
+            let b = builder("{}").framing(framing);
+            assert_eq!(b.framing, framing);
+            assert_eq!(b.core().framing, framing);
+        }
     }
 
     #[test]
@@ -253,60 +231,24 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected() {
-        const REFUSAL: &str = "json.bogus: unknown field `bogus`, expected one of `framing`, \
-                               `on_error`, `reject_duplicate_keys`";
-        let err = config("framing: single\nbogus: 1\n").unwrap_err();
+        const REFUSAL: &str =
+            "json.bogus: unknown field `bogus`, expected `on_error` or `reject_duplicate_keys`";
+        let err = config("on_error: skip\nbogus: 1\n").unwrap_err();
         assert_eq!(err.to_string(), REFUSAL);
         let err =
             JsonDeserializerBuilder::from_component_config(&component("bogus: 1\n")).unwrap_err();
         assert_eq!(err.to_string(), REFUSAL);
     }
 
+    /// Framing is set in code, so a `framing` key is refused like any other
+    /// unknown key.
     #[test]
-    fn unknown_framing_is_rejected() {
-        let err = config("framing: yaml\n").unwrap_err();
+    fn a_framing_key_is_rejected() {
+        let err = config("framing: lines\n").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "json.framing: unknown variant, expected one of `single`, `ndjson`, `array`"
+            "json.framing: unknown field `framing`, expected `on_error` or \
+             `reject_duplicate_keys`"
         );
-    }
-
-    #[test]
-    fn per_record_source_derives_single_and_rejects_double_framing() {
-        // Omitted framing (defaults to single) under a per-record source is fine.
-        let b = JsonDeserializerBuilder::new(JsonDeserializerConfig::default())
-            .for_source_framing(FramingContract::PerRecord)
-            .unwrap();
-        assert_eq!(b.config.framing, JsonFraming::Single);
-
-        // Explicit single is fine too.
-        builder("framing: single\n")
-            .for_source_framing(FramingContract::PerRecord)
-            .unwrap();
-
-        // ndjson / array double-frame an already-framed source.
-        for framing in ["ndjson", "array"] {
-            let err = builder(&format!("framing: {framing}\n"))
-                .for_source_framing(FramingContract::PerRecord)
-                .unwrap_err();
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "deserializer.json.framing: is `{framing}`, but the source already frames \
-                     one record per payload; remove `framing` or set it to `single`, or use a \
-                     source format that leaves framing to the deserializer"
-                ),
-            );
-        }
-    }
-
-    #[test]
-    fn whole_payload_source_honors_configured_framing() {
-        for framing in ["single", "ndjson", "array"] {
-            let b = builder(&format!("framing: {framing}\n"))
-                .for_source_framing(FramingContract::WholePayload)
-                .unwrap();
-            assert_eq!(b.config.framing.yaml_name(), framing);
-        }
     }
 }

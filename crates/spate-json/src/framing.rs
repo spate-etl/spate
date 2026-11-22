@@ -19,7 +19,7 @@
 //! ```
 //!
 //! This is the source-side counterpart to the deserializer's in-memory
-//! [`ndjson`](crate::JsonFraming::Ndjson) framing, which splits a whole payload
+//! [`ndjson`](crate::JsonFraming::Lines) framing, which splits a whole payload
 //! already resident in RAM (a Kafka message). `JsonLinesFramer` is bounded and
 //! chunk-fed instead, for byte streams that never fit in memory. A source that
 //! frames one record per payload pairs with the deserializer's `single` mode

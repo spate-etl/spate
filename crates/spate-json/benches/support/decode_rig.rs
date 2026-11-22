@@ -263,7 +263,7 @@ pub(crate) fn install_recorder() {
 /// in one process, and distinct label sets are what keep one rig's counters
 /// from being summed into another's.
 pub(crate) fn warm_rig<F, D>(
-    settings: JsonDeserializerConfig,
+    builder: JsonDeserializerBuilder,
     payload: Vec<u8>,
     expect: u64,
     labels: (&'static str, &'static str),
@@ -274,7 +274,6 @@ where
     D: Deserializer<F>,
 {
     install_recorder();
-    let builder = JsonDeserializerBuilder::new(settings);
     let mut deser = build(&builder);
     let component_type = deser.component_type().to_owned();
     let meter = Meter::with_namespace("json_bench", labels.0, labels.1, component_type);
@@ -306,17 +305,15 @@ pub(crate) fn full_settings(
     framing: JsonFraming,
     on_error: OnError,
     reject_duplicate_keys: bool,
-) -> JsonDeserializerConfig {
+) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
-    config.framing = framing;
     config.on_error = on_error;
     config.reject_duplicate_keys = reject_duplicate_keys;
-    config
+    JsonDeserializerBuilder::new(config).framing(framing)
 }
 
-pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerConfig {
+pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
-    config.framing = framing;
     // Skip is the shipped default, so this is the path production takes.
     // It is not the cheaper of the two by construction: on valid input
     // Skip's error bookkeeping never runs, while ndjson under Fail buffers
@@ -327,7 +324,7 @@ pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerConfig {
     // Off: the structural check parses each document a second time, which
     // would measure the guard rather than the decode.
     config.reject_duplicate_keys = false;
-    config
+    JsonDeserializerBuilder::new(config).framing(framing)
 }
 
 /// An unwarmed rig with no metrics, for a case whose point is the decode
@@ -338,7 +335,7 @@ pub(crate) fn rig<D>(
     expect: u64,
     build: impl FnOnce(&JsonDeserializerBuilder) -> D,
 ) -> Rig<D> {
-    let builder = JsonDeserializerBuilder::new(settings(framing));
+    let builder = settings(framing);
     let deser = build(&builder);
     // The receiver is dropped here, so when the last `AckRef` goes with the rig
     // the batch resolves into a disconnected channel and the send is discarded.

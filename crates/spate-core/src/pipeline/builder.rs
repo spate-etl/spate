@@ -63,7 +63,6 @@ use super::runtime::{
 use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig};
 use crate::feed::{Feed, FeedOrigin};
-use crate::framing::FramingContract;
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
 };
@@ -157,12 +156,6 @@ pub struct ChainCtx {
     /// ([`ChainBuilder::with_metrics`](crate::ops::ChainBuilder::with_metrics)'s
     /// first argument).
     pub pipeline: String,
-    /// How the source frames its payloads
-    /// ([`Source::framing_contract`](crate::source::Source::framing_contract)).
-    /// Hand it to a deserializer builder (e.g. `JsonDeserializerBuilder::
-    /// for_source_framing`) so the deserializer's granularity is derived from
-    /// the source and a double-framing configuration is rejected.
-    pub source_framing: FramingContract,
     /// The **first** installed sink's resolved terminal-stage chunking, the
     /// back-compat handle for single-sink pipelines, mirroring [`queues`](Self::queues).
     /// Pass it to the chain's [`.sink(...)`](crate::ops::ChainBuilder::sink)
@@ -806,9 +799,6 @@ impl Pipeline {
         let default_chunk = named[0].2;
         let budget = Arc::clone(&self.budget);
         let name = self.config.pipeline.name.clone();
-        // Read the source's framing contract once, before it moves into the
-        // runtime, and hand it to every per-thread ChainCtx.
-        let source_framing = source.framing_contract();
         // This wrapper is the factory the runtime drops before the sink
         // drain; the queue clones it captures die there.
         let chains = move |thread: usize| {
@@ -817,7 +807,6 @@ impl Pipeline {
                 queues: default_queues.clone(),
                 budget: Arc::clone(&budget),
                 pipeline: name.clone(),
-                source_framing,
                 chunk: default_chunk,
                 named: named.clone(),
             })
@@ -1216,9 +1205,6 @@ mod tests {
             .expect("sink")
             .chains(move |ctx| {
                 assert_eq!(ctx.pipeline, pipeline_name);
-                // The source's framing contract threads into every ChainCtx;
-                // FakeSource overrides it to the non-default PerRecord.
-                assert_eq!(ctx.source_framing, FramingContract::PerRecord);
                 seen.lock().unwrap().push(ctx.thread);
                 fake_chain(&cs, &log)
             })

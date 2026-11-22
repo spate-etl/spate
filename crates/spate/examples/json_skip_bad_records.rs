@@ -70,9 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let chunk_cfg = ctx.chunk();
             // ANCHOR: deserializer
             let mut config = JsonDeserializerConfig::default();
-            config.framing = JsonFraming::Ndjson;
             config.on_error = OnError::Skip;
-            let deser = JsonDeserializerBuilder::new(config).build_serde::<Event>();
+            let deser = JsonDeserializerBuilder::new(config)
+                .framing(JsonFraming::Lines)
+                .build_serde::<Event>();
             // ANCHOR_END: deserializer
             chain_owned::<Event, _>(deser)
                 .with_metrics(ctx.pipeline, "main")

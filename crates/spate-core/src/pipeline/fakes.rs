@@ -187,8 +187,8 @@ impl FakeSource {
 impl Source for FakeSource {
     type Lane = FakeLane;
 
-    // A distinctive non-default value so tests can prove the source's own
-    // contract (not the trait default) reaches `ChainCtx`.
+    // `PerRecord` unless a test sets another, so tests can tell the source's
+    // own contract from the trait default.
     fn framing_contract(&self) -> crate::framing::FramingContract {
         self.shared
             .lock()

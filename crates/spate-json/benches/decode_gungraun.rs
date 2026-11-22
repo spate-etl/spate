@@ -211,7 +211,7 @@ fn single_value_rig() -> Rig<spate_json::JsonValueDeserializer> {
 
 fn ndjson_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     rig(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         orders::lines_ndjson(BATCH),
         BATCH,
         |b| b.build_serde::<LineItem>(),
@@ -226,7 +226,7 @@ fn array_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 
 fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,
@@ -238,7 +238,7 @@ fn ndjson_bad_rig(
     how: Corruption,
 ) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson_bad_every(RECORDS, bad_every, how),
         orders::good_lines(RECORDS, bad_every),
@@ -247,7 +247,7 @@ fn ndjson_bad_rig(
 
 fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Fail,
         orders::lines_ndjson(RECORDS),
         RECORDS,
@@ -256,7 +256,7 @@ fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 
 fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Fail,
         orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
@@ -274,7 +274,7 @@ fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 
 fn events_rig() -> Rig<spate_json::JsonSerdeDeserializer<Event>> {
     batch(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::events_ndjson(RECORDS),
         RECORDS,

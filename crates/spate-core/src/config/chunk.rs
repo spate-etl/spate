@@ -7,22 +7,15 @@
 //! grow a serde surface; the only convention it shares with
 //! [`crate::sink::config`] is the `bytesize` field syntax.
 //!
-//! The framework peels this block out of the connector body (see
-//! [`ComponentConfig`](super::ComponentConfig)) and resolves it into a
-//! [`ChunkConfig`] at assembly time, so connectors never see it and need no
-//! `chunk` field of their own.
+//! The block sits beside the backend key of a sink section (see
+//! [`SinkSection`](super::SinkSection)) and resolves into a [`ChunkConfig`]
+//! at assembly time, so connectors never see it and need no `chunk` field of
+//! their own.
 
-use super::{ConfigError, SectionPath};
+use super::{ConfigError, SectionPath, de_byte_size};
 use crate::error::ErrorPolicy;
 use crate::ops::ChunkConfig;
-use bytesize::ByteSize;
-use serde::{Deserialize, Deserializer};
-
-/// Accept `64KiB`-style sizes on the wire while keeping the field a plain
-/// `u64`. Duplicated from [`crate::sink::config`].
-fn de_byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    ByteSize::deserialize(d).map(|b| b.as_u64())
-}
+use serde::Deserialize;
 
 /// The record-level encoder-failure policy as it appears on the wire
 /// (`skip` | `fail`). Keeps serde derives and wire tokens off the
@@ -43,7 +36,7 @@ impl From<EncodePolicyWire> for ErrorPolicy {
     }
 }
 
-/// The `chunk:` block inside a sink body:
+/// The `chunk:` block beside a sink's backend key:
 /// `{ target_bytes: 512KiB, encode_policy: skip }`. Framework-owned and
 /// identical across sinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -79,7 +72,7 @@ impl ChunkSection {
     /// Resolve into the runtime [`ChunkConfig`], validating bounds with
     /// field-named errors (the load-time counterpart to the cold-path
     /// `assert!` in `SinkHandoff::new`).
-    /// `at` is the path of the sink section holding the block.
+    /// `at` is the path of the sink section holding the block, such as `sinks.eu`.
     pub(crate) fn resolve(&self, at: &SectionPath) -> Result<ChunkConfig, ConfigError> {
         if self.target_bytes == 0 {
             return Err(at.invalid("chunk.target_bytes", "must be greater than zero"));

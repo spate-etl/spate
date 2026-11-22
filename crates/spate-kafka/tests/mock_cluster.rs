@@ -2742,7 +2742,7 @@ fn run_marker_pipeline(
     let yaml = format!(
         "pipeline: {{ name: {name}, threads: {threads} }}\nadmin: {{ listen: none }}\n\
          checkpoint: {checkpoint}\nmetrics: {{ exporter: prometheus, per_partition_detail: true }}\n\
-         source: {{ memory: {{}} }}\nsink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+         source: {{ memory: {{}} }}\nsink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n"
     );
     let config = spate_core::config::PipelineConfig::from_str(&yaml).expect("config");
     let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {

@@ -4,10 +4,11 @@
 //!
 //! The framework owns the typed sections (`admin`, `backpressure`,
 //! `checkpoint`, `metrics`, `pipeline`) and validates them strictly
-//! (`deny_unknown_fields` at every level). The `source`, `deserializer`,
-//! and `sink` sections are single-key mappings selecting a component type;
-//! their bodies are opaque [`ComponentConfig`]s handed to the component's
-//! factory, which deserializes its own typed config. The optional
+//! (`deny_unknown_fields` at every level). The `source` and `deserializer`
+//! sections are single-key mappings selecting a component type; their bodies
+//! are opaque [`ComponentConfig`]s handed to the component's factory, which
+//! deserializes its own typed config. A sink section is a [`SinkSection`]:
+//! one such key, with the framework's sink keys beside it. The optional
 //! `feed` section is a [`FeedSection`] naming the work feed a feed-reading
 //! source reads.
 //!
@@ -68,6 +69,7 @@ mod feed;
 mod interpolate;
 pub mod redact;
 mod reserved;
+mod sink;
 mod url_rule;
 
 pub use component::{ComponentConfig, SectionPath};
@@ -75,6 +77,7 @@ pub use duration::{DurationBounds, DurationBoundsError, check_duration};
 pub use error::ConfigError;
 pub use feed::FeedSection;
 pub use reserved::{Denylist, ReservedKeyError};
+pub use sink::SinkSection;
 pub use url_rule::{UrlRule, UrlRuleError};
 
 /// Re-export of `yaml_serde`'s `Value`, the opaque body a [`ComponentConfig`]
@@ -93,6 +96,12 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
+
+/// Accept `64KiB`-style sizes on the wire while keeping the field a plain
+/// `u64`. `ByteSize` is a parsing convenience, not part of the typed API.
+pub(crate) fn de_byte_size<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    ByteSize::deserialize(d).map(|b| b.as_u64())
+}
 
 /// The ceiling on a duration the runtime adds to a clock reading. A day is far
 /// above any working value, and keeps the sum inside `Instant`'s range.
@@ -138,16 +147,16 @@ pub struct PipelineConfig {
     /// ready-made records need none.
     #[serde(default)]
     pub deserializer: Option<ComponentConfig>,
-    /// Single sink component (opaque body), sugar for the common one-sink
-    /// case, addressed as `"default"`. Mutually exclusive with `sinks`.
-    /// Resolve via [`sink_config`](Self::sink_config).
+    /// Single sink, sugar for the common one-sink case, addressed as
+    /// `"default"`. Mutually exclusive with `sinks`. Resolve its backend via
+    /// [`sink_config`](Self::sink_config).
     #[serde(default)]
-    pub sink: Option<ComponentConfig>,
-    /// Named sinks for a multi-sink split: a `name -> component` map, each an
-    /// ordinary single-key component (`clickhouse: {...}`). Mutually exclusive
-    /// with `sink`. Resolve via [`sink_config`](Self::sink_config).
+    pub sink: Option<SinkSection>,
+    /// Named sinks for a multi-sink split: a `name -> section` map, each a
+    /// [`SinkSection`] like `sink:`. Mutually exclusive with `sink`. Resolve a
+    /// backend via [`sink_config`](Self::sink_config).
     #[serde(default)]
-    pub sinks: Option<BTreeMap<String, ComponentConfig>>,
+    pub sinks: Option<BTreeMap<String, SinkSection>>,
     /// The work feed a feed-reading source reads, and the keys every feed
     /// backend shares. `None` hands the source no feed.
     #[serde(default)]
@@ -488,7 +497,8 @@ impl PipelineConfig {
         source: ComponentConfig,
         sink: ComponentConfig,
     ) -> PipelineConfig {
-        Self::assemble(pipeline, source, Some(labelled(sink, "sink")), None)
+        let sink = SinkSection::new(labelled(sink, "sink"));
+        Self::assemble(pipeline, source, Some(sink), None)
     }
 
     /// A config for one source and a map of named sinks, the `sinks:` form.
@@ -528,7 +538,7 @@ impl PipelineConfig {
             .into_iter()
             .map(|(name, sink)| {
                 let section = sinks_entry(&name);
-                (name, labelled(sink, section))
+                (name, SinkSection::new(labelled(sink, section)))
             })
             .collect();
         Self::assemble(pipeline, source, None, Some(sinks))
@@ -564,8 +574,8 @@ impl PipelineConfig {
     fn assemble(
         pipeline: PipelineSection,
         source: ComponentConfig,
-        sink: Option<ComponentConfig>,
-        sinks: Option<BTreeMap<String, ComponentConfig>>,
+        sink: Option<SinkSection>,
+        sinks: Option<BTreeMap<String, SinkSection>>,
     ) -> PipelineConfig {
         PipelineConfig {
             pipeline,
@@ -712,51 +722,55 @@ impl PipelineConfig {
                 }
             }
         }
-        self.reject_stray_chunk()?;
+        self.reject_body_chunk()?;
         self.reject_keys_on_memory()?;
         self.reject_bad_settling_window()?;
-        // Resolve every declared sink's `chunk:` block now, so a malformed
+        // Resolve every declared sink's framework blocks now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
-        if let Some(sink) = &self.sink {
-            sink.resolved_sink_chunk(&self.sink_address("default"))?;
+        for (name, section) in self.sink_sections() {
+            section.check(&self.sink_address(name))?;
         }
-        if let Some(sinks) = &self.sinks {
-            for (name, sink) in sinks {
-                sink.resolved_sink_chunk(&self.sink_address(name))?;
+        Ok(())
+    }
+
+    /// Reject a `chunk:` key inside any component body. `chunk:` sits beside
+    /// a sink's backend key, and the name is reserved, so no component reads
+    /// it from its body; a sink that decodes no body would otherwise ignore
+    /// it. Split out of [`validate`](Self::validate) so
+    /// `Pipeline::from_config`, which skips full validation for minimal
+    /// programmatic configs, can still enforce it.
+    pub(crate) fn reject_body_chunk(&self) -> Result<(), ConfigError> {
+        let others = std::iter::once(&self.source)
+            .chain(self.deserializer.as_ref())
+            .chain(self.feed.as_ref().map(FeedSection::backend));
+        for component in others {
+            if component.has_body_key("chunk") {
+                return Err(component
+                    .path()
+                    .invalid("chunk", "`chunk:` is only valid on a sink section"));
+            }
+        }
+        for (_, section) in self.sink_sections() {
+            let backend = section.backend();
+            if backend.has_body_key("chunk") {
+                return Err(backend.path().invalid(
+                    "chunk",
+                    format!(
+                        "`chunk:` sits beside `{}:` in the sink section, not inside it",
+                        backend.type_tag()
+                    ),
+                ));
             }
         }
         Ok(())
     }
 
-    /// Reject the framework-reserved `chunk:` key on a non-sink section.
-    /// `chunk:` configures the chain terminal, which only sinks have; the
-    /// framework peels the key indiscriminately, so a stray `chunk:` under
-    /// `source`/`deserializer`, or under a `feed:` backend built in code,
-    /// would otherwise be silently swallowed. Split out of
-    /// [`validate`](Self::validate) so `Pipeline::from_config`, which skips
-    /// full validation for minimal programmatic configs, can still enforce it.
-    pub(crate) fn reject_stray_chunk(&self) -> Result<(), ConfigError> {
-        if self.source.resolved_chunk()?.is_some() {
-            return Err(ConfigError::Validation(
-                "`chunk:` is only valid on a sink section, not `source`".into(),
-            ));
-        }
-        if let Some(deser) = &self.deserializer
-            && deser.resolved_chunk()?.is_some()
-        {
-            return Err(ConfigError::Validation(
-                "`chunk:` is only valid on a sink section, not `deserializer`".into(),
-            ));
-        }
-        if let Some(feed) = &self.feed
-            && feed.backend().resolved_chunk()?.is_some()
-        {
-            return Err(ConfigError::Validation(
-                "`chunk:` is only valid on a sink section, not `feed`".into(),
-            ));
-        }
-        Ok(())
+    /// Every declared sink section with its name, `"default"` for `sink:`.
+    fn sink_sections(&self) -> impl Iterator<Item = (&str, &SinkSection)> {
+        let single = self.sink.iter().map(|s| ("default", s));
+        let named = self.sinks.iter().flatten().map(|(n, s)| (n.as_str(), s));
+        single.chain(named)
     }
 
     /// Reject the `feed:` keys the in-process feed cannot honor. Split out of
@@ -815,14 +829,19 @@ impl PipelineConfig {
             .map_err(|e| ConfigError::Validation(format!("`feed.settling_window` {e}")))
     }
 
-    /// The component config for the sink named `name`. The single-sink `sink:`
-    /// form is addressed as `"default"`. A connector factory calls this once
-    /// per sink to build it.
+    /// The backend component for the sink named `name`. The single-sink
+    /// `sink:` form is addressed as `"default"`. A connector factory calls
+    /// this once per sink to build it.
     ///
     /// # Errors
     ///
     /// [`ConfigError::Validation`] if no sink is configured under `name`.
     pub fn sink_config(&self, name: &str) -> Result<&ComponentConfig, ConfigError> {
+        self.sink_section(name).map(SinkSection::backend)
+    }
+
+    /// The section for the sink named `name`, framework keys included.
+    pub(crate) fn sink_section(&self, name: &str) -> Result<&SinkSection, ConfigError> {
         if let Some(sinks) = &self.sinks {
             sinks.get(name).ok_or_else(|| {
                 let known: Vec<&str> = sinks.keys().map(String::as_str).collect();
@@ -1056,38 +1075,142 @@ sink: { memory: {} }
         assert!(msg.contains("listen"), "{msg}");
     }
 
+    fn load(sinks: &str) -> Result<PipelineConfig, String> {
+        let yaml = format!("pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\n{sinks}");
+        PipelineConfig::from_str(&yaml).map_err(|e| e.to_string())
+    }
+
+    /// The six framework keys sit beside one backend key, and the backend's
+    /// body reaches the connector without them.
+    #[test]
+    fn framework_keys_sit_beside_one_backend() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            table: String,
+        }
+        let cfg = load(
+            "sink:\n  queue: { max_bytes: 8MiB }\n  chunk: { target_bytes: 512KiB }\n  \
+             batch: { max_rows: 10 }\n  inflight: { max_per_shard: 4 }\n  \
+             retry: { max_attempts: 3 }\n  breaker: { failure_threshold: 9 }\n  \
+             fake: { table: events }\n",
+        )
+        .unwrap();
+        let section = cfg.sink_section("default").unwrap();
+        assert_eq!(
+            section.declared(),
+            ["queue", "chunk", "batch", "inflight", "retry", "breaker"]
+        );
+        let body: Body = cfg.sink_config("default").unwrap().deserialize_into().unwrap();
+        assert_eq!(body.table, "events");
+        assert_eq!(cfg.sink_config("default").unwrap().path(), SectionPath::sink("fake"));
+    }
+
+    /// A misspelled framework key reads as a second backend, so it is refused
+    /// by name and never ignored.
+    #[test]
+    fn a_misspelled_framework_key_is_refused_as_a_second_backend() {
+        let err = load("sinks:\n  eu: { fake: {}, batc: { max_rows: 1 } }\n").unwrap_err();
+        assert!(err.contains("`sinks.eu`"), "{err}");
+        assert!(
+            err.contains(
+                "a sink section must name exactly one backend beside `queue`, `chunk`, \
+                 `batch`, `inflight`, `retry` and `breaker`; found `fake`, `batc`"
+            ),
+            "{err}"
+        );
+        let err = load("sink: { queue: { max_bytes: 1MiB } }\n").unwrap_err();
+        assert!(err.contains("a sink section names no backend"), "{err}");
+    }
+
     #[test]
     fn sink_chunk_block_parses_and_resolves() {
-        let yaml = r#"
-pipeline: { name: demo }
-source: { memory: {} }
-sink:
-  memory:
-    chunk: { target_bytes: 512KiB, encode_policy: fail }
-"#;
-        let cfg = PipelineConfig::from_str(yaml).unwrap();
+        let cfg = load(
+            "sink:\n  chunk: { target_bytes: 512KiB, encode_policy: fail }\n  memory: {}\n",
+        )
+        .unwrap();
         let chunk = cfg
-            .sink_config("default")
+            .sink_section("default")
             .unwrap()
-            .resolved_chunk()
+            .chunk("sink")
             .unwrap()
             .expect("chunk present");
         assert_eq!(chunk.target_bytes, 512 * 1024);
         assert_eq!(chunk.encode_policy, crate::error::ErrorPolicy::Fail);
     }
 
+    /// A bare `chunk:` reads as the defaults, the same as `chunk: {}`.
     #[test]
-    fn chunk_on_a_source_section_is_rejected() {
-        let yaml = r#"
-pipeline: { name: demo }
-source:
-  memory:
-    chunk: { target_bytes: 64KiB }
-sink: { memory: {} }
-"#;
-        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
-        assert!(err.contains("chunk"), "{err}");
-        assert!(err.contains("source"), "{err}");
+    fn bare_chunk_key_resolves_to_the_defaults() {
+        let cfg = load("sink:\n  chunk:\n  memory: {}\n").unwrap();
+        let chunk = cfg
+            .sink_section("default")
+            .unwrap()
+            .chunk("sink")
+            .unwrap()
+            .expect("chunk present");
+        assert_eq!(chunk.target_bytes, 64 * 1024);
+        assert_eq!(chunk.encode_policy, crate::error::ErrorPolicy::Skip);
+    }
+
+    /// A `chunk:` inside any component body is refused at load, naming where
+    /// it belongs.
+    #[test]
+    fn chunk_inside_a_body_is_rejected() {
+        let chunk = "chunk: { target_bytes: 64KiB }";
+        for (sections, want) in [
+            (
+                format!("source: {{ memory: {{ {chunk} }} }}\nsink: {{ memory: {{}} }}\n"),
+                "source.memory.chunk: `chunk:` is only valid on a sink section",
+            ),
+            (
+                format!(
+                    "source: {{ memory: {{}} }}\ndeserializer: {{ json: {{ {chunk} }} }}\n\
+                     sink: {{ memory: {{}} }}\n"
+                ),
+                "deserializer.json.chunk: `chunk:` is only valid on a sink section",
+            ),
+            (
+                format!(
+                    "source: {{ memory: {{}} }}\nsink: {{ memory: {{}} }}\n\
+                     feed: {{ memory: {{ {chunk} }} }}\n"
+                ),
+                "feed.memory.chunk: `chunk:` is only valid on a sink section",
+            ),
+            (
+                format!("source: {{ memory: {{}} }}\nsinks:\n  eu: {{ capture: {{ {chunk} }} }}\n"),
+                "sinks.eu.capture.chunk: `chunk:` sits beside `capture:` in the sink section, \
+                 not inside it",
+            ),
+        ] {
+            let yaml = format!("pipeline: {{ name: demo }}\n{sections}");
+            let err = PipelineConfig::from_str(&yaml).unwrap_err().to_string();
+            assert_eq!(err, want);
+        }
+    }
+
+    /// `validate` refuses a malformed framework block on a sink no code
+    /// installs, and leaves a pool block's rules to install, where the
+    /// connector's base is known.
+    #[test]
+    fn validate_checks_the_blocks_of_every_declared_sink() {
+        for (block, want) in [
+            ("queue: { max_bytes: 0 }", "sinks.cold.queue.max_bytes: must be greater than zero"),
+            ("queue: { bytes: 1MiB }", "sinks.cold.queue.bytes: unknown field `bytes`"),
+            ("batch: { max_rows: lots }", "sinks.cold.batch.max_rows: invalid type"),
+            ("inflight: { per_shard: 2 }", "sinks.cold.inflight.per_shard: unknown field"),
+            ("retry: { initial: soon }", "sinks.cold.retry.initial: "),
+            ("breaker: 7", "sinks.cold.breaker: invalid type"),
+        ] {
+            let err = load(&format!(
+                "sinks:\n  hot: {{ memory: {{}} }}\n  cold: {{ memory: {{}}, {block} }}\n"
+            ))
+            .unwrap_err();
+            assert!(err.starts_with(want), "{block}: {err}");
+        }
+        // Below core's default `initial`, but a connector's base may set a
+        // lower one, so only install can tell.
+        load("sinks:\n  cold: { memory: {}, retry: { max: 50ms } }\n").expect("loads");
     }
 
     /// A `coordination:` section in any spelling fails at load, and the
@@ -1128,46 +1251,24 @@ sink: { memory: {} }
 
     #[test]
     fn zero_target_bytes_in_yaml_is_rejected_at_load() {
-        let yaml = r#"
-pipeline: { name: demo }
-source: { memory: {} }
-sink:
-  memory:
-    chunk: { target_bytes: 0B }
-"#;
         // `validate` resolves every declared sink chunk, so the loader itself
         // rejects it. "Rejected at load" in the reference docs is literal.
-        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
-        assert!(err.contains("chunk.target_bytes"), "{err}");
+        let err = load("sink:\n  chunk: { target_bytes: 0B }\n  memory: {}\n").unwrap_err();
+        assert_eq!(err, "sink.chunk.target_bytes: must be greater than zero");
     }
 
     #[test]
     fn malformed_chunk_on_a_sinks_entry_is_rejected_at_load_naming_the_entry() {
-        // Two entries of the same connector type share the dotted path
-        // `sink.memory.…`, so the error must be re-anchored on the map key,
-        // and an entry must fail at load even if no binary ever installs it.
-        let yaml = r#"
-pipeline: { name: demo }
-source: { memory: {} }
-sinks:
-  hot: { memory: {} }
-  cold:
-    memory:
-      chunk: { encode_policy: retry }
-"#;
-        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
-        assert!(err.contains("sinks.cold"), "{err}");
-        let yaml = r#"
-pipeline: { name: demo }
-source: { memory: {} }
-sinks:
-  cold:
-    memory:
-      chunk: { target_bytes: 0B }
-"#;
-        let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
-        assert!(err.contains("sinks.cold"), "{err}");
-        assert!(err.contains("chunk.target_bytes"), "{err}");
+        // An entry must fail at load even if no binary ever installs it.
+        let err = load(
+            "sinks:\n  hot: { memory: {} }\n  cold:\n    chunk: { encode_policy: retry }\n    \
+             memory: {}\n",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("sinks.cold.chunk.encode_policy: "), "{err}");
+        let err = load("sinks:\n  cold:\n    chunk: { target_bytes: 0B }\n    memory: {}\n")
+            .unwrap_err();
+        assert_eq!(err, "sinks.cold.chunk.target_bytes: must be greater than zero");
     }
 
     #[test]

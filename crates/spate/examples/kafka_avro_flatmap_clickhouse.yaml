@@ -59,6 +59,12 @@ deserializer:
               {"name":"unit_cents","type":"int"}]}}}]}
 
 sink:
+  batch:
+    max_rows: 500000
+    max_bytes: 128MiB
+    linger: 1s
+  inflight:
+    max_per_shard: 2
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-order_lines}
     # Columnar Native blocks: offloads parse CPU to the client and shrinks the
@@ -86,9 +92,3 @@ sink:
     #   sharding_key: order_id
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    batch:
-      max_rows: 500000
-      max_bytes: 128MiB
-      linger: 1s
-    inflight:
-      max_per_shard: 2

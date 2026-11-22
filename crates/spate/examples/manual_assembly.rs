@@ -32,7 +32,7 @@ use spate::backpressure::InflightBudget;
 use spate::metrics::{ComponentLabels, MetricsSettings, SinkShardMetrics, install};
 use spate::pipeline::{PipelineRuntime, SinkRuntime, metrics_settings};
 use spate::prelude::*;
-use spate::sink::{SinkDrainFn, SinkFailures, SinkPool, shard_queues};
+use spate::sink::{QueueSection, SinkDrainFn, SinkFailures, SinkPool, shard_queues};
 use spate::source::LaneId;
 use spate::telemetry;
 use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
@@ -99,17 +99,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: sink
     // ── The layer above ─────────────────────────────────────────────────
-    // `SinkOptions` is the builder's home for wiring knobs that are neither
-    // connector config nor framework YAML. At that layer the whole of step
-    // 3 below is one line:
+    // `SinkOptions` sets the framework's sink keys in code; each one can
+    // come from the sink's YAML section instead. At that layer the whole of
+    // step 3 below is one line:
     //
     //     Pipeline::from_config(config)?.sink_with(sink, sink_options)?
     //
-    // Here `queue_capacity` is a number this file has to spend itself, on
-    // `shard_queues`. Sizing it is not free: queued chunks are charged to
-    // the budget above, so `shards × queue_capacity × chunk.target_bytes`
-    // has to fit under its low watermark alongside pending writes.
-    let sink_options = SinkOptions::default().with_queue_capacity(16);
+    // Here the queue's slot count is a number this file spends itself, on
+    // `shard_queues`. Sizing the queue is not free: queued chunks are charged
+    // to the budget above, so every shard's queue has to fit under its low
+    // watermark alongside pending writes. 1 MiB of the default 64 KiB chunks
+    // is 16 slots.
+    let sink_options = SinkOptions::default().with_queue(QueueSection::new(1024 * 1024));
 
     // ── 3. The sink — what `.sink(bundle)` does ─────────────────────────
     // Connectors are built exactly as they are under the builder: a bundle
@@ -130,18 +131,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with no replicas out of `SinkPool::spawn`), and the third is caught
     // nowhere: a surplus replica label publishes `spate_sink_replica_healthy`
     // for a replica that does not exist, and a missing one drops a live
-    // replica's health updates. The builder also checks the pool tuning with
-    // `SinkPoolConfig::validate` and returns `BuildError::Config`;
-    // `SinkPool::spawn` does not, so the manual path calls it here.
+    // replica's health updates.
     let parts = sink.into_parts();
-    parts.pool.validate()?;
+    // The builder's own resolution: this sink's chunking, queue slot count
+    // and pool, from its YAML section, `sink_options` and the connector's
+    // pool as the base, with the pool held to `SinkPoolConfig::validate`.
+    // `SinkPool::spawn` checks none of it.
+    let resolved = sink_options.resolve(&config, "default", parts.pool)?;
     let shards = parts.shard_endpoints.len();
     let component_type = parts.component_type.clone();
     let replica_labels = parts.effective_replica_labels();
 
     // One bounded chunk queue per shard: `queues` is the sending half the
     // chain terminals hold, `receivers` the half the workers own.
-    let (queues, receivers) = shard_queues(shards, sink_options.queue_capacity);
+    let (queues, receivers) = shard_queues(shards, resolved.queue_capacity);
 
     // A sink that codes its chunks (compression, typically) carries its
     // codec in the parts. Attach it before the queues reach any chain, so
@@ -191,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(parts.writer),
         parts.shard_endpoints,
         receivers,
-        parts.pool,
+        resolved.pool,
         Arc::clone(&budget),
         shard_metrics,
         &pipeline_name,
@@ -239,13 +242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .sink(
                 TestEncoder,
                 KeyHashRouter,
-                // The one builder step with no manual equivalent. Resolving
-                // this sink's chunking, from the YAML `chunk:` block or
-                // `SinkOptions::with_chunk`, is the config layer's job and
-                // its resolver is crate-internal. By hand it is a
-                // `ChunkConfig` you pass, and a `chunk:` block on the config
-                // above is read by nothing.
-                ChunkConfig::default(),
+                // This sink's chunking, as `resolve` gave it.
+                resolved.chunk,
                 queues.clone(),
                 Arc::clone(&chain_budget),
             )

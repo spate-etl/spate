@@ -747,7 +747,7 @@ fn launch_one_row_writes(
         .build()
         .replace(
             "sink: { capture: {} }",
-            "sink: { capture: { chunk: { target_bytes: 64 } } }",
+            "sink: { capture: {}, chunk: { target_bytes: 64 } }",
         );
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);

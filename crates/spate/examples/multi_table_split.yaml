@@ -63,6 +63,12 @@ deserializer:
 # independently.
 sinks:
   payments:
+    batch:
+      max_rows: 500000
+      max_bytes: 128MiB
+      linger: 1s
+    inflight:
+      max_per_shard: 2
     clickhouse:
       table: ${CLICKHOUSE_PAYMENTS_TABLE:-payments}
       format: native
@@ -70,14 +76,17 @@ sinks:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
       user: ${CLICKHOUSE_USER:-default}
       password: ${CLICKHOUSE_PASSWORD:-}
-      batch:
-        max_rows: 500000
-        max_bytes: 128MiB
-        linger: 1s
-      inflight:
-        max_per_shard: 2
 
   refunds:
+    # A low-volume table: linger longer to build bigger parts. The cost is
+    # checkpoint lag — a Kafka batch with even one refund in it holds its
+    # offsets until this fires (docs/user-guide/02-concepts/06-multi-sink.md).
+    batch:
+      max_rows: 500000
+      max_bytes: 128MiB
+      linger: 5s
+    inflight:
+      max_per_shard: 2
     clickhouse:
       table: ${CLICKHOUSE_REFUNDS_TABLE:-refunds}
       format: native
@@ -85,12 +94,3 @@ sinks:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
       user: ${CLICKHOUSE_USER:-default}
       password: ${CLICKHOUSE_PASSWORD:-}
-      # A low-volume table: linger longer to build bigger parts. The cost is
-      # checkpoint lag — a Kafka batch with even one refund in it holds its
-      # offsets until this fires (docs/user-guide/02-concepts/06-multi-sink.md).
-      batch:
-        max_rows: 500000
-        max_bytes: 128MiB
-        linger: 5s
-      inflight:
-        max_per_shard: 2

@@ -20,7 +20,7 @@ use spate_core::ops::{ChunkConfig, chain_owned};
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, SinkOptions};
 
 use spate_core::record::PartitionId;
-use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
+use spate_core::sink::{KeyHashRouter, QueueSection, SinkPoolConfig};
 use spate_core::source::LaneId;
 use spate_test::{
     BytesPassthrough, PipelineRun, TestEncoder, WriteOutcome, capture_sink, memory_source,
@@ -65,9 +65,10 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
             "a",
             sink,
             SinkOptions::default()
-                // A shallow queue so the chain blocks behind the stalled
-                // worker rather than buffering the whole push.
-                .with_queue_capacity(2)
+                // A shallow queue, two one-byte chunks, so the chain blocks
+                // behind the stalled worker rather than buffering the whole
+                // push.
+                .with_queue(QueueSection::new(2))
                 // One chunk per row. At the default 64KiB the driver hands
                 // the whole push over as a single chunk, the worker seals
                 // exactly one batch, and the in-flight window is never

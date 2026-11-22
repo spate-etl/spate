@@ -1,9 +1,7 @@
 //! Opaque per-component configuration passthrough.
 
 use super::ConfigError;
-use super::chunk::ChunkSection;
 use super::redact;
-use crate::ops::ChunkConfig;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
@@ -14,13 +12,9 @@ use std::fmt;
 /// The framework records which component type the section selects (`kafka`,
 /// `clickhouse`, `memory`, ...) and hands the body to that component's
 /// factory, which deserializes it into its own typed config via
-/// [`deserialize_into`](Self::deserialize_into). **`chunk` is
-/// framework-reserved** and is the one exception to that opacity. It
-/// configures the chain terminal, not the connector, and is peeled out of the
-/// body at construction. A connector must not declare its own `chunk` field;
-/// it would never receive a value (on a sink section the framework consumes
-/// the key, and on a `source`/`deserializer` section the key is rejected
-/// outright).
+/// [`deserialize_into`](Self::deserialize_into). The body is passed through
+/// untouched. `chunk` is reserved: the framework refuses it inside any body,
+/// so a connector must not declare a `chunk` field of its own.
 ///
 /// The nested-block shape (exactly one key) lets every typed struct in the
 /// tree keep `deny_unknown_fields`. A flattened shape would disable that
@@ -29,13 +23,6 @@ use std::fmt;
 pub struct ComponentConfig {
     type_tag: String,
     raw: serde_yaml::Value,
-    /// The framework-reserved `chunk:` block, peeled out of `raw` at
-    /// construction so the connector's `deny_unknown_fields` never sees it.
-    /// Stored unparsed and resolved lazily by
-    /// [`resolved_chunk`](Self::resolved_chunk). Construction, including the
-    /// infallible [`new`](Self::new), must not fail on a malformed block; it
-    /// surfaces at assembly/validation instead.
-    chunk: Option<serde_yaml::Value>,
     /// Where this section sits in the pipeline config (`source`, `sink`,
     /// `sinks.<name>`, `deserializer`, `feed`). Set after parsing, used to
     /// prefix error paths.
@@ -94,6 +81,11 @@ impl SectionPath {
     #[must_use]
     pub fn deserializer(tag: &str) -> SectionPath {
         SectionPath(format!("deserializer.{tag}"))
+    }
+
+    /// The path `path` from the config root, such as `sinks.eu`.
+    pub(crate) fn at(path: impl Into<String>) -> SectionPath {
+        SectionPath(path.into())
     }
 
     /// A [`ConfigError::Component`] for a rule `field` breaks, with context
@@ -172,23 +164,14 @@ impl fmt::Debug for ComponentConfig {
         let ComponentConfig {
             type_tag,
             raw,
-            chunk,
             section,
         } = self;
         f.debug_struct("ComponentConfig")
             .field("type_tag", type_tag)
             .field("raw", &redact::yaml(raw))
-            .field("chunk", &chunk.as_ref().map(redact::yaml))
             .field("section", section)
             .finish()
     }
-}
-
-/// Remove the framework-reserved `chunk` key from a component body so the
-/// connector never sees it. A non-mapping body (a `memory:` null, a scalar)
-/// has nothing to peel.
-fn peel_chunk(raw: &mut serde_yaml::Value) -> Option<serde_yaml::Value> {
-    raw.as_mapping_mut().and_then(|m| m.remove("chunk"))
 }
 
 impl ComponentConfig {
@@ -208,40 +191,10 @@ impl ComponentConfig {
             .map_err(|e| component_error(self.path(), None, e))
     }
 
-    /// Resolve the framework-reserved `chunk:` block, if present, into a
-    /// runtime [`ChunkConfig`]. `Ok(None)` when the section declared no
-    /// `chunk:`. Errors carry the dotted path (`sink.clickhouse.chunk.…`).
-    ///
-    /// Chunk configures the chain terminal, so this is only meaningful on a
-    /// sink section; [`PipelineConfig::validate`](super::PipelineConfig::validate)
-    /// rejects a stray `chunk:` on a `source`/`deserializer` section.
-    pub(crate) fn resolved_chunk(&self) -> Result<Option<ChunkConfig>, ConfigError> {
-        self.chunk_at(self.path())
-    }
-
-    /// [`resolved_chunk`](Self::resolved_chunk) for the sink at `address`
-    /// (`sink` or `sinks.<name>`), so its errors name the sink even when the
-    /// section was placed in the config without a label.
-    pub(crate) fn resolved_sink_chunk(
-        &self,
-        address: &str,
-    ) -> Result<Option<ChunkConfig>, ConfigError> {
-        self.chunk_at(SectionPath(format!("{address}.{}", self.type_tag)))
-    }
-
-    fn chunk_at(&self, at: SectionPath) -> Result<Option<ChunkConfig>, ConfigError> {
-        let Some(value) = &self.chunk else {
-            return Ok(None);
-        };
-        let section: ChunkSection = serde_path_to_error::deserialize(value.clone())
-            .map_err(|e| component_error(at.clone(), Some("chunk"), e))?;
-        section.resolve(&at).map(Some)
-    }
-
-    /// Whether this section declared a `chunk:` block (without resolving it).
-    /// Lets assembly warn about a block that nothing will ever read.
-    pub(crate) fn has_chunk(&self) -> bool {
-        self.chunk.is_some()
+    /// Whether the body is a mapping holding `key`. A non-mapping body (a
+    /// `memory:` null, a scalar) holds no key.
+    pub(crate) fn has_body_key(&self, key: &str) -> bool {
+        self.raw.as_mapping().is_some_and(|m| m.contains_key(key))
     }
 
     /// This section's path from the config root, such as `source.kafka` or
@@ -265,14 +218,11 @@ impl ComponentConfig {
     ///
     /// `raw` is the opaque connector body as a [`YamlValue`](super::YamlValue)
     /// (a `spate-core` re-export of `yaml_serde`'s `Value`, an INV-6
-    /// exception). The framework-reserved `chunk` key is
-    /// peeled out of `raw` here, as on the YAML path. See the struct docs.
-    pub fn new(type_tag: impl Into<String>, mut raw: super::YamlValue) -> Self {
-        let chunk = peel_chunk(&mut raw);
+    /// exception), passed through untouched as on the YAML path.
+    pub fn new(type_tag: impl Into<String>, raw: super::YamlValue) -> Self {
         ComponentConfig {
             type_tag: type_tag.into(),
             raw,
-            chunk,
             section: None,
         }
     }
@@ -280,7 +230,7 @@ impl ComponentConfig {
 
 /// A [`ConfigError::Component`] anchored at `at`, with an optional sub-block
 /// `suffix` (e.g. `chunk`) and the error's own inner path appended.
-fn component_error(
+pub(super) fn component_error(
     at: SectionPath,
     suffix: Option<&str>,
     e: serde_path_to_error::Error<serde_yaml::Error>,
@@ -315,17 +265,58 @@ impl<'de> Deserialize<'de> for ComponentConfig {
                 mapping.len()
             )));
         }
-        let (key, mut value) = mapping.into_iter().next().expect("len checked above");
+        let (key, value) = mapping.into_iter().next().expect("len checked above");
         let type_tag = key.as_str().ok_or_else(|| {
             D::Error::custom("component type tag must be a string, e.g. `kafka:`")
         })?;
-        let chunk = peel_chunk(&mut value);
         Ok(ComponentConfig {
             type_tag: type_tag.to_owned(),
             raw: value,
-            chunk,
             section: None,
         })
+    }
+}
+
+/// Split a role section (`feed:`, a sink section) into the values of its
+/// `common` keys, in order, and its one backend. Every key left after the
+/// common ones names a backend, so a misspelled common key shows up as a
+/// second backend. `role` names the section in an error, and `example`
+/// shows a backend key.
+pub(super) fn split_backend<E: serde::de::Error, const N: usize>(
+    mut keys: serde_yaml::Mapping,
+    role: &str,
+    common: [&str; N],
+    example: &str,
+) -> Result<([Option<serde_yaml::Value>; N], ComponentConfig), E> {
+    let values = common.map(|key| keys.remove(key));
+    if keys.len() != 1 {
+        let found: Vec<String> = keys
+            .keys()
+            .map(|k| match k.as_str() {
+                Some(name) => format!("`{name}`"),
+                None => "a non-string key".to_owned(),
+            })
+            .collect();
+        return Err(E::custom(if found.is_empty() {
+            format!("{role} names no backend; add one, e.g. {example}")
+        } else {
+            format!(
+                "{role} must name exactly one backend beside {}; found {}",
+                key_list(&common),
+                found.join(", ")
+            )
+        }));
+    }
+    let backend = ComponentConfig::deserialize(serde_yaml::Value::Mapping(keys)).map_err(E::custom)?;
+    Ok((values, backend))
+}
+
+/// `` `a`, `b` and `c` ``.
+fn key_list(keys: &[&str]) -> String {
+    let quoted: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => quoted.concat(),
     }
 }
 
@@ -381,14 +372,12 @@ mod tests {
     #[test]
     fn debug_never_prints_component_values() {
         let cc = parse(
-            "clickhouse:\n  password: hunter2\n  shards: [{replicas: [http://u:hunter2@ch]}]\n  \
-             chunk: {max_bytes: 1MiB}\n",
+            "clickhouse:\n  password: hunter2\n  shards: [{replicas: [http://u:hunter2@ch]}]\n",
         )
         .unwrap();
         let printed = format!("{cc:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
-        assert!(!printed.contains("1MiB"), "{printed}");
-        for visible in ["clickhouse", "password", "replicas", "max_bytes"] {
+        for visible in ["clickhouse", "password", "replicas"] {
             assert!(printed.contains(visible), "{visible}: {printed}");
         }
     }
@@ -574,60 +563,24 @@ mod tests {
         let _typed: Option<Empty> = cc.deserialize_into().unwrap();
     }
 
+    /// The body reaches the connector as written, a `chunk` key included;
+    /// the pipeline config refuses that key, not the section.
     #[test]
-    fn reserved_chunk_is_peeled_so_the_connector_never_sees_it() {
-        // A `chunk:` block sits beside the connector's own keys. It must be
-        // stripped before the body reaches the (deny_unknown_fields) connector
-        // config, and be resolvable by the framework.
-        let cc = parse(
-            "kafka:\n  brokers: b\n  topic: t\n  chunk:\n    target_bytes: 256KiB\n    encode_policy: fail\n",
-        )
-        .unwrap();
-        assert_eq!(cc.type_tag(), "kafka");
-        // The connector's strict config still deserializes; `chunk` is gone.
-        let typed: FakeKafkaConfig = cc.deserialize_into().unwrap();
-        assert_eq!(typed.brokers, "b");
-        // The framework resolves the peeled block.
-        let chunk = cc.resolved_chunk().unwrap().expect("chunk present");
-        assert_eq!(chunk.target_bytes, 256 * 1024);
-        assert_eq!(chunk.encode_policy, crate::error::ErrorPolicy::Fail);
-    }
-
-    #[test]
-    fn programmatic_new_also_peels_chunk() {
+    fn the_body_is_passed_through_untouched() {
         let body: super::super::YamlValue =
-            serde_yaml::from_str("brokers: b\ntopic: t\nchunk:\n  target_bytes: 32KiB\n").unwrap();
+            serde_yaml::from_str("brokers: b\ntopic: t\nchunk: { target_bytes: 32KiB }\n").unwrap();
         let cc = ComponentConfig::new("kafka", body);
-        let _typed: FakeKafkaConfig = cc.deserialize_into().unwrap();
-        let chunk = cc.resolved_chunk().unwrap().expect("chunk present");
-        assert_eq!(chunk.target_bytes, 32 * 1024);
+        assert!(cc.has_body_key("chunk"));
+        let err = cc.deserialize_into::<FakeKafkaConfig>().unwrap_err();
+        assert!(err.to_string().contains("chunk"), "{err}");
+        assert!(!parse("memory:\n").unwrap().has_body_key("chunk"));
     }
 
+    /// The key list in a split error reads as prose for one, two and more keys.
     #[test]
-    fn no_chunk_block_resolves_to_none() {
-        let cc = parse("kafka:\n  brokers: b\n  topic: t\n").unwrap();
-        assert!(cc.resolved_chunk().unwrap().is_none());
-        // A non-mapping body has nothing to peel.
-        let cc = parse("memory:\n").unwrap();
-        assert!(cc.resolved_chunk().unwrap().is_none());
-    }
-
-    #[test]
-    fn bare_chunk_key_resolves_to_the_defaults() {
-        // `chunk:` with no body (a natural "defaults, please"). The null value
-        // deserializes as an empty mapping, i.e. 64 KiB / Skip, matching
-        // `chunk: {}`. Pinned so a serde change can't turn it into an error.
-        let cc = parse("clickhouse:\n  chunk:\n").unwrap();
-        let chunk = cc.resolved_chunk().unwrap().expect("chunk present");
-        assert_eq!(chunk.target_bytes, 64 * 1024);
-        assert_eq!(chunk.encode_policy, crate::error::ErrorPolicy::Skip);
-    }
-
-    #[test]
-    fn malformed_chunk_surfaces_at_resolve_with_a_dotted_path() {
-        let mut cc = parse("clickhouse:\n  chunk:\n    target_bytes: 0B\n").unwrap();
-        cc.set_section("sink");
-        let err = cc.resolved_chunk().unwrap_err().to_string();
-        assert!(err.contains("chunk.target_bytes"), "{err}");
+    fn a_key_list_joins_the_last_with_and() {
+        assert_eq!(key_list(&["a"]), "`a`");
+        assert_eq!(key_list(&["a", "b"]), "`a` and `b`");
+        assert_eq!(key_list(&["a", "b", "c"]), "`a`, `b` and `c`");
     }
 }

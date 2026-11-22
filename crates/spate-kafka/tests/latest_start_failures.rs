@@ -97,7 +97,7 @@ mod another_topic {
              checkpoint: {{ drain_timeout: 200ms }}\n\
              metrics: {{ exporter: none }}\n\
              source: {{ memory: {{}} }}\n\
-             sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+             sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n"
         );
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).expect("config"))
             .expect("builder");
@@ -1023,7 +1023,7 @@ mod logical_committed_offset {
              checkpoint: {{ drain_timeout: 200ms }}\n\
              metrics: {{ exporter: none }}\n\
              source: {{ memory: {{}} }}\n\
-             sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+             sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n"
         );
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).expect("config"))
             .expect("builder");

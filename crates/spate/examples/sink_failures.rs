@@ -353,7 +353,7 @@ backpressure: { max_inflight_bytes: 1KiB, high_ratio: 0.5, low_ratio: 0.25, min_
 admin: { listen: none }
 metrics: { exporter: none }
 source: { memory: {} }
-sink: { capture: { chunk: { target_bytes: 256B } } }
+sink: { capture: {}, chunk: { target_bytes: 256B } }
 "#;
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);

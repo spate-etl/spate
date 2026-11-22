@@ -24,6 +24,12 @@ source:
   memory: {}
 
 sink:
+  batch:
+    # Larger blocks let the MV pre-aggregate more per insert (fewer partial
+    # state parts). Kept modest here so the demo flushes promptly.
+    max_rows: 500000
+    max_bytes: 128MiB
+    linger: 200ms
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-orders_null}
     shards:
@@ -39,9 +45,3 @@ sink:
     # engine) — see the DDL in the example.
     settings:
       deduplicate_blocks_in_dependent_materialized_views: "1"
-    batch:
-      # Larger blocks let the MV pre-aggregate more per insert (fewer partial
-      # state parts). Kept modest here so the demo flushes promptly.
-      max_rows: 500000
-      max_bytes: 128MiB
-      linger: 200ms

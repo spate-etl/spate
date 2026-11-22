@@ -324,7 +324,7 @@ pub fn pipeline_yaml(source_yaml: &str, feed_section: &str, checkpoint: &str) ->
         "pipeline: {{ name: feed-worker, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {checkpoint}\nmetrics: {{ exporter: none }}\n\
          source:\n{source_yaml}\
-         sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}"
+         sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n{feed_section}"
     )
 }
 

@@ -53,6 +53,16 @@ pub struct DatagenSource {
 impl DatagenSource {
     /// A source over `config`.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_datagen::{DatagenSource, DatagenSourceConfig};
+    ///
+    /// # fn main() -> Result<(), spate_core::config::ConfigError> {
+    /// let source = DatagenSource::new(DatagenSourceConfig::default())?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`DatagenSourceConfig::validate`].

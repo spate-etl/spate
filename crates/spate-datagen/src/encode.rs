@@ -38,7 +38,7 @@ impl Encoder {
                     })?;
                 Ok(Encoder::Avro(Box::new(schema)))
             }
-            // Unreachable through `DatagenSource::open`, whose `validate`
+            // Unreachable through `DatagenSource::new`, whose `validate`
             // refuses this combination first. This arm answers a direct call.
             #[cfg(not(feature = "avro"))]
             Encoding::Avro => Err(SourceError::fatal(

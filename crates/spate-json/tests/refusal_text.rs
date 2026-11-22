@@ -19,7 +19,7 @@ metrics: { exporter: none }
 checkpoint: { interval: 100ms }
 source: { memory: {} }
 deserializer:
-  json: { framing: single, on_error: fail }
+  json: { on_error: fail }
 sink: { capture: {} }
 "#;
 

@@ -48,6 +48,10 @@ name = "avro_registry_config"
 required-features = ["avro"]
 
 [[test]]
+name = "json_framing_refusal"
+required-features = ["s3", "json"]
+
+[[test]]
 name = "e2e_happy"
 required-features = ["kafka", "clickhouse", "avro"]
 

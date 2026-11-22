@@ -232,15 +232,15 @@ respective connector pages, indexed [below](#source-deserializer-sink).
 
 ## Chunk handoff (`chunk`) {#chunk}
 
-`chunk:` tunes the chain terminal's per-shard chunking, the granularity at
-which encoded rows are sealed and handed to the shard workers. It sits in the
+`chunk:` tunes the chain terminal's per-shard chunking, the granularity at which
+encoded rows are sealed and handed to the shard workers. It sits in the
 [sink section](#sink-section) beside the component key (`sink.chunk`, or per
 branch as `sinks.<name>.chunk`). It configures the *chain terminal*, not the
-sink worker, so connectors never see it. It is purely performance-shaping and never affects delivery correctness:
-a below-target chunk is sealed on every `checkpoint.interval` tick regardless,
-so the most a larger target can do is defer a commit by roughly one tick. It
-can never hold offsets back indefinitely. See
-[Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
+sink worker, so connectors never see it. It is purely performance-shaping and
+never affects delivery correctness: a below-target chunk is sealed on every
+`checkpoint.interval` tick regardless, so the most a larger target can do is
+defer a commit by roughly one tick. It can never hold offsets back indefinitely.
+See [Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
 
 ```yaml
 sink:

@@ -29,10 +29,9 @@ Two distinct steps turn source bytes into records:
   also the *format*, and it is identical whatever the source: the same JSON or
   Avro decoder serves Kafka and S3 alike.
 
-When a streaming source is given a framer it frames one record per payload, and
-the framework derives the deserializer's granularity from the source's contract.
-The framer is wired onto the source in code, so the `deserializer:` section
-carries only decode knobs and no `framing:`:
+When a streaming source is given a framer it frames one record per payload. The
+framer is wired onto the source in code, and the deserializer's framing is set
+in code too, so the `deserializer:` section carries only decode knobs:
 
 ```rust file=crates/spate/examples/s3_backfill.rs region=framer
 ```
@@ -47,14 +46,15 @@ configuration names the format and nothing about framing:
 source:
   s3: { url: "s3://bucket/exports/" }
 deserializer:
-  json: {}          # granularity derived from the source → single
+  json: {}          # framing stays at the default, Single
 ```
 
-Setting `framing: ndjson` here while the source already line-frames is a
-**double-framing** error, rejected at startup. A source that emits *whole*
-payloads (Kafka, or any other source that does not frame) instead lets the
-deserializer frame, so `framing: ndjson` / `array` then apply. The rule is:
-exactly one side frames.
+Building the JSON deserializer with `JsonFraming::Lines` or `JsonFraming::Array`
+while the source already line-frames is a **double-framing** error. The
+deserializer refuses it when the pipeline starts, and the run returns an error
+before the source opens. A source that emits *whole* payloads (Kafka, or any
+other source that does not frame) instead lets the deserializer frame, so
+`Lines` and `Array` then apply. The rule is: exactly one side frames.
 
 Deserialization is a small trait; the same
 [Extending](../../06-extending/README.mdx) guide covers writing your own

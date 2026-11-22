@@ -60,7 +60,6 @@ fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
     let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
         let chunk = ctx.chunk();
         let deser = JsonDeserializerBuilder::from_component_config(&deserializer)
-            .and_then(|b| b.for_source_framing(ctx.source_framing))
             .expect("the deserializer section was validated with the pipeline file")
             .build_serde::<PageView>();
         chain_owned::<PageView, _>(deser)

@@ -17,8 +17,10 @@ use crate::metrics::JsonDeserMetrics;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use spate_core::checkpoint::AckRef;
+use spate_core::config::{ConfigError, SectionPath};
 use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
+use spate_core::framing::FramingContract;
 use spate_core::record::{RawPayload, Record, RecordMeta};
 use spate_core::telemetry::RateLimit;
 use std::marker::PhantomData;
@@ -73,6 +75,23 @@ impl DecoderCore {
         self.metrics = cx.meter.as_ref().map(JsonDeserMetrics::new);
     }
 
+    /// Refuse a source that frames one record per payload unless each
+    /// payload decodes as one document.
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        match (source, self.framing) {
+            (FramingContract::PerRecord, JsonFraming::Lines | JsonFraming::Array) => {
+                Err(SectionPath::deserializer(TAG).error(format!(
+                    "splits each payload as `JsonFraming::{:?}`, but the source already frames \
+                     one record per payload; build the deserializer with \
+                     `JsonDeserializerBuilder::framing(JsonFraming::Single)`, or use a source \
+                     that leaves framing to the deserializer",
+                    self.framing
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Decode `raw` into 0..N records of type `P` and emit them.
     fn run<'buf, P>(
         &self,
@@ -91,7 +110,7 @@ impl DecoderCore {
         let meta = raw.meta();
         match self.framing {
             JsonFraming::Single => self.run_single(raw.bytes, meta, ack, out),
-            JsonFraming::Ndjson => self.run_ndjson(raw.bytes, meta, ack, out),
+            JsonFraming::Lines => self.run_ndjson(raw.bytes, meta, ack, out),
             JsonFraming::Array => self.run_array(raw.bytes, meta, ack, out),
         }
     }
@@ -170,7 +189,7 @@ impl DecoderCore {
     ) -> Result<(), DeserError> {
         // The array is decoded in one pass, so its error handling is atomic:
         // a malformed element fails the whole payload (per `on_error`). Use
-        // `ndjson` with `on_error: skip` when you need per-record isolation.
+        // `Lines` with `on_error: skip` when you need per-record isolation.
         if self.reject_duplicate_keys
             && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {
@@ -322,6 +341,10 @@ where
     fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
         self.core.attach_metrics(cx);
     }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        self.core.check_source_framing(source)
+    }
 }
 
 /// Dynamically-typed deserializer: emits [`serde_json::Value`] records, for
@@ -353,6 +376,10 @@ impl Deserializer<Owned<Value>> for JsonValueDeserializer {
 
     fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
         self.core.attach_metrics(cx);
+    }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        self.core.check_source_framing(source)
     }
 }
 
@@ -394,10 +421,51 @@ mod tests {
 
     fn builder(framing: JsonFraming, on_error: OnError, dup: bool) -> JsonDeserializerBuilder {
         JsonDeserializerBuilder::new(JsonDeserializerConfig {
-            framing,
             on_error,
             reject_duplicate_keys: dup,
         })
+        .framing(framing)
+    }
+
+    /// The refusal for a framing that splits payloads under a source that
+    /// frames one record per payload.
+    fn refusal(variant: &str) -> String {
+        format!(
+            "deserializer.json: splits each payload as `JsonFraming::{variant}`, but the source \
+             already frames one record per payload; build the deserializer with \
+             `JsonDeserializerBuilder::framing(JsonFraming::Single)`, or use a source that \
+             leaves framing to the deserializer"
+        )
+    }
+
+    /// Each framing against each source contract, through the typed and the
+    /// dynamically-typed deserializer, so neither may skip the check.
+    #[test]
+    fn a_per_record_source_is_refused_unless_framing_is_single() {
+        for (framing, variant) in [
+            (JsonFraming::Single, None),
+            (JsonFraming::Lines, Some("Lines")),
+            (JsonFraming::Array, Some("Array")),
+        ] {
+            let b = builder(framing, OnError::Skip, false);
+            let serde = b.build_serde::<Ev>();
+            let value = b.build_value();
+            for got in [
+                serde.check_source_framing(FramingContract::PerRecord),
+                value.check_source_framing(FramingContract::PerRecord),
+            ] {
+                match variant {
+                    None => got.unwrap(),
+                    Some(v) => assert_eq!(got.unwrap_err().to_string(), refusal(v)),
+                }
+            }
+            serde
+                .check_source_framing(FramingContract::WholePayload)
+                .unwrap();
+            value
+                .check_source_framing(FramingContract::WholePayload)
+                .unwrap();
+        }
     }
 
     #[test]
@@ -419,7 +487,7 @@ mod tests {
 
     #[test]
     fn ndjson_emits_a_record_per_line() {
-        let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload =
             b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}\n{\"id\":3,\"name\":\"c\"}";
@@ -464,13 +532,13 @@ mod tests {
                 1,
             ),
             (
-                JsonFraming::Ndjson,
+                JsonFraming::Lines,
                 OnError::Skip,
                 b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
                 2,
             ),
             (
-                JsonFraming::Ndjson,
+                JsonFraming::Lines,
                 OnError::Fail,
                 b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
                 2,
@@ -511,7 +579,7 @@ mod tests {
     fn a_blank_payload_emits_and_counts_nothing_under_any_framing() {
         const PIPELINE: &str = "blank-payloads";
         let rendered = render_metrics(|| {
-            for framing in [JsonFraming::Single, JsonFraming::Ndjson, JsonFraming::Array] {
+            for framing in [JsonFraming::Single, JsonFraming::Lines, JsonFraming::Array] {
                 for on_error in [OnError::Skip, OnError::Fail] {
                     let mut d = builder(framing, on_error, false).build_value();
                     d.attach_metrics(test_metrics(PIPELINE));
@@ -558,7 +626,7 @@ mod tests {
 
     #[test]
     fn ndjson_skip_isolates_the_bad_line() {
-        let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         d.deserialize(&raw(payload), &test_ack(), &mut out).unwrap();
@@ -569,7 +637,7 @@ mod tests {
 
     #[test]
     fn ndjson_fail_stops_on_the_bad_line() {
-        let mut d = builder(JsonFraming::Ndjson, OnError::Fail, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, OnError::Fail, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         let err = d
@@ -675,7 +743,7 @@ mod tests {
         const STD: &str =
             r#"pipeline="orders",component="main.deserializer",component_type="json""#;
         let rendered = render_metrics(|| {
-            let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
+            let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
             d.attach_metrics(test_metrics("orders"));
             let mut out = EmitCollector::new();
             let payload =

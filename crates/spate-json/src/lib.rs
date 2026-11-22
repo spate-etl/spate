@@ -3,19 +3,20 @@
 //! Decodes JSON payloads carried by a source (a Kafka message, a file line,
 //! an HTTP body) into either your own serde types ([`JsonSerdeDeserializer`])
 //! or dynamically-typed [`JsonValue`] records ([`JsonValueDeserializer`]).
-//! Three framings map onto the framework's "one payload → 0..N records"
-//! contract:
+//! Three framings, set with
+//! [`JsonDeserializerBuilder::framing`], map onto the framework's "one
+//! payload → 0..N records" contract:
 //!
-//! - **`single`** — the whole payload is one JSON document → one record (the
+//! - **`Single`** — the whole payload is one JSON document → one record (the
 //!   Kafka-message default). An empty or whitespace-only payload is a
 //!   tombstone: zero records, no error.
-//! - **`ndjson`** — newline-delimited JSON (JSON Lines): one JSON value per
+//! - **`Lines`** — newline-delimited JSON (JSON Lines): one JSON value per
 //!   `\n`-separated line → one record per line. Blank lines are skipped.
 //!   Under `on_error: skip` this is the framing with **per-line** error
 //!   isolation.
-//! - **`array`** — a top-level JSON array → one record per element, decoded in
+//! - **`Array`** — a top-level JSON array → one record per element, decoded in
 //!   a single pass. A malformed array is handled atomically by the configured
-//!   [error policy](JsonDeserializerConfig); use `ndjson` with `on_error: skip` when you
+//!   [error policy](JsonDeserializerConfig); use `Lines` with `on_error: skip` when you
 //!   need per-record isolation.
 //!
 //! Those three frame a payload already resident in memory (a Kafka message).
@@ -23,7 +24,9 @@
 //! `spate-s3` object, an HTTP body) the connector also owns the byte-stream
 //! framer: [`JsonLinesFramer`] is a chunk-fed, bounded
 //! [`RecordFramer`](spate_core::framing::RecordFramer) the source runs to cut the
-//! stream into records, then hands each to the deserializer in `single` mode.
+//! stream into records, then hands each to the deserializer under `Single`.
+//! The deserializer refuses `Lines` and `Array` under such a source when the
+//! pipeline starts.
 //! Framing this way is a format concern, so it lives here rather than in the
 //! source.
 //!
@@ -32,7 +35,7 @@
 //! A document that does not parse (or does not match the target type) is a
 //! record-level error. Under `on_error: skip` (the default) it is dropped,
 //! counted in `spate_json_deser_records_dropped_total{reason="malformed"}` on a
-//! chain built with `with_metrics`, and the decode continues. Under `array` one
+//! chain built with `with_metrics`, and the decode continues. Under `Array` one
 //! bad element drops the whole array. Under `on_error: fail` it surfaces a
 //! decode error on the first bad record, which the chain's deserializer error
 //! policy then

@@ -30,9 +30,10 @@ fn ndjson_payload_explodes_and_skips_poison_through_the_chain() {
 
     // Build the deserializer through the public builder, NDJSON with the skip policy.
     let mut config = JsonDeserializerConfig::default();
-    config.framing = JsonFraming::Ndjson;
     config.on_error = OnError::Skip;
-    let deser = JsonDeserializerBuilder::new(config).build_serde::<Event>();
+    let deser = JsonDeserializerBuilder::new(config)
+        .framing(JsonFraming::Lines)
+        .build_serde::<Event>();
 
     // Chain: decode → filter → project to a byte row → sink into one shard.
     let (queues, mut rxs) = shard_queues(1, 4096);

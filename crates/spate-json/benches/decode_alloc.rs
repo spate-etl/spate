@@ -69,7 +69,7 @@ fn reference(report: &mut Report) {
     report.case("single_value", || decode_once::<Owned<Value>, _>(&mut r));
 
     let mut r = rig(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         orders::lines_ndjson(BATCH),
         BATCH,
         |b| b.build_serde::<LineItem>(),
@@ -90,14 +90,14 @@ fn error_policy(report: &mut Report) {
     let cases = [
         (
             "ndjson_clean",
-            JsonFraming::Ndjson,
+            JsonFraming::Lines,
             OnError::Skip,
             orders::lines_ndjson(RECORDS),
             RECORDS,
         ),
         (
             "ndjson_fail_clean",
-            JsonFraming::Ndjson,
+            JsonFraming::Lines,
             OnError::Fail,
             orders::lines_ndjson(RECORDS),
             RECORDS,
@@ -116,7 +116,7 @@ fn error_policy(report: &mut Report) {
     }
 
     let mut r = batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Fail,
         orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,

@@ -284,7 +284,7 @@ fn suite() -> Suite {
     let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_typed",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         RECORDS,
         || orders::lines_ndjson(RECORDS),
@@ -303,7 +303,7 @@ fn suite() -> Suite {
     let suite = batch_case::<Event>(
         suite,
         "decode_ndjson_events",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         RECORDS,
         || orders::events_ndjson(RECORDS),
@@ -316,7 +316,7 @@ fn suite() -> Suite {
     let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_fail_clean",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Fail,
         RECORDS,
         || orders::lines_ndjson(RECORDS),
@@ -327,7 +327,7 @@ fn suite() -> Suite {
     let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_syntax_10pct",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
@@ -335,7 +335,7 @@ fn suite() -> Suite {
     let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_type_10pct",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
@@ -343,7 +343,7 @@ fn suite() -> Suite {
     let suite = batch_case::<LineItem>(
         suite,
         "decode_ndjson_syntax_all",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         0,
         || orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
@@ -353,7 +353,7 @@ fn suite() -> Suite {
     let suite = batch_fail_case(
         suite,
         "decode_ndjson_fail_bad_last",
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         || orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
     );
 

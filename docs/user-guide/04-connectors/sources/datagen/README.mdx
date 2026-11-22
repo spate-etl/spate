@@ -129,8 +129,9 @@ once every batch is acknowledged and the final watermark committed, so a clean
 exit from a bounded run is an end-to-end delivery assertion. That is the
 one durability claim this source makes.
 
-Payloads are framed one record each, so a deserializer takes its granularity
-from the source rather than from a `framing` key.
+Payloads are framed one record each, so a deserializer decodes each payload as
+one record. The JSON deserializer built with `JsonFraming::Lines` or
+`JsonFraming::Array` refuses this source when the pipeline starts.
 
 ## Metrics
 

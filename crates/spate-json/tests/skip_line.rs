@@ -12,7 +12,7 @@ use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
 use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
-use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, OnError};
 use spate_test::{HANG, LogCapture, PipelineRun, TestEncoder, capture_sink, memory_source};
 use tracing::Level;
 
@@ -53,7 +53,6 @@ struct Strict {
 
 fn builder(reject_duplicate_keys: bool) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
-    config.framing = JsonFraming::Single;
     config.on_error = OnError::Skip;
     config.reject_duplicate_keys = reject_duplicate_keys;
     JsonDeserializerBuilder::new(config)

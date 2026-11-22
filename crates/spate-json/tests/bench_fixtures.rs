@@ -43,8 +43,8 @@ use orders::{BAD_EVERY, Corruption, Event, LineItem, RECORDS};
 /// What one payload through one deserializer produced: whether the call
 /// failed, and how many records reached the sink. The same two quantities
 /// every bench case asserts.
-fn drive(settings: JsonDeserializerConfig, payload: &[u8]) -> (bool, u64) {
-    let mut deser = JsonDeserializerBuilder::new(settings).build_serde::<LineItem>();
+fn drive(settings: JsonDeserializerBuilder, payload: &[u8]) -> (bool, u64) {
+    let mut deser = settings.build_serde::<LineItem>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink::default();
     let failed = deser
@@ -53,8 +53,8 @@ fn drive(settings: JsonDeserializerConfig, payload: &[u8]) -> (bool, u64) {
     (failed, sink.count)
 }
 
-fn drive_value(settings: JsonDeserializerConfig, payload: &[u8]) -> (bool, u64) {
-    let mut deser = JsonDeserializerBuilder::new(settings).build_value();
+fn drive_value(settings: JsonDeserializerBuilder, payload: &[u8]) -> (bool, u64) {
+    let mut deser = settings.build_value();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink::default();
     let failed = deser
@@ -67,12 +67,11 @@ fn settings(
     framing: JsonFraming,
     on_error: OnError,
     reject_duplicate_keys: bool,
-) -> JsonDeserializerConfig {
+) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
-    config.framing = framing;
     config.on_error = on_error;
     config.reject_duplicate_keys = reject_duplicate_keys;
-    config
+    JsonDeserializerBuilder::new(config).framing(framing)
 }
 
 /// Feed `stream` through a fresh framer in `chunk`-sized pieces, popping as a
@@ -319,9 +318,7 @@ const STRING_SHARE_PCT: usize = 55;
 /// and still emit the same record count the bench asserts.
 #[test]
 fn the_event_corpus_decodes_to_its_samples() {
-    let mut deser =
-        JsonDeserializerBuilder::new(settings(JsonFraming::Ndjson, OnError::Fail, false))
-            .build_serde::<Event>();
+    let mut deser = settings(JsonFraming::Lines, OnError::Fail, false).build_serde::<Event>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = EmitCollector::new();
     deser
@@ -487,7 +484,7 @@ fn the_corpora_are_pinned_across_revisions() {
 /// clean and reporting a smaller number that reads like an improvement.
 #[test]
 fn the_error_cases_emit_what_they_claim() {
-    let skip_ndjson = settings(JsonFraming::Ndjson, OnError::Skip, false);
+    let skip_ndjson = settings(JsonFraming::Lines, OnError::Skip, false);
     assert_eq!(
         drive(skip_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
@@ -512,7 +509,7 @@ fn the_error_cases_emit_what_they_claim() {
         "ndjson_syntax_all"
     );
 
-    let fail_ndjson = settings(JsonFraming::Ndjson, OnError::Fail, false);
+    let fail_ndjson = settings(JsonFraming::Lines, OnError::Fail, false);
     assert_eq!(
         drive(fail_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
@@ -570,8 +567,7 @@ fn the_two_corruptions_fail_for_different_reasons() {
     // And both still fail the decode, whichever backend is compiled in.
     let one = |bytes: &[u8]| {
         let mut deser =
-            JsonDeserializerBuilder::new(settings(JsonFraming::Single, OnError::Fail, false))
-                .build_serde::<LineItem>();
+            settings(JsonFraming::Single, OnError::Fail, false).build_serde::<LineItem>();
         let (ack, _rx) = AckRef::test_pair();
         let mut sink = Sink::default();
         deser
@@ -832,7 +828,7 @@ fn the_wide_stream_is_the_same_quantity_of_bytes() {
 fn a_second_drive_emits_what_the_first_did() {
     // Both framings, since only ndjson decodes line by line.
     let mut ndjson = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,
@@ -849,14 +845,14 @@ fn a_second_drive_emits_what_the_first_did() {
     // the case that drops two thousand times per drive, which is where a
     // limiter or a counter that accumulated would show first.
     let mut poisoned = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
         orders::good_lines(RECORDS, BAD_EVERY),
         ("fixtures-poisoned", "json"),
     );
     let mut storm = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
         0,
@@ -864,7 +860,7 @@ fn a_second_drive_emits_what_the_first_did() {
     );
     // The event lines, the one typed corpus that is nested.
     let mut events = decode_rig::batch_rig::<Event>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::events_ndjson(RECORDS),
         RECORDS,
@@ -901,7 +897,7 @@ fn a_second_drive_emits_what_the_first_did() {
     // The failing arm too: a rig whose call must return `Err` has to keep
     // returning it, or the case silently starts measuring the happy path.
     let mut failing = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Fail,
         orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
@@ -987,7 +983,7 @@ fn a_second_drive_emits_what_the_first_did() {
 #[test]
 fn the_decode_rig_would_accumulate_without_its_reset() {
     let mut rig = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,
@@ -1027,7 +1023,7 @@ fn a_keyed_rig_decodes_with_its_key() {
         (
             "ndjson_keyed",
             keyed(
-                JsonFraming::Ndjson,
+                JsonFraming::Lines,
                 OnError::Skip,
                 orders::lines_ndjson(RECORDS),
                 "fixtures-keyed-ndjson",
@@ -1036,7 +1032,7 @@ fn a_keyed_rig_decodes_with_its_key() {
         (
             "ndjson_fail_keyed",
             keyed(
-                JsonFraming::Ndjson,
+                JsonFraming::Lines,
                 OnError::Fail,
                 orders::lines_ndjson(RECORDS),
                 "fixtures-keyed-fail",
@@ -1066,7 +1062,7 @@ fn a_keyed_rig_decodes_with_its_key() {
     }
 
     let mut twin = decode_rig::batch_rig::<LineItem>(
-        JsonFraming::Ndjson,
+        JsonFraming::Lines,
         OnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,

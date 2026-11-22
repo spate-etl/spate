@@ -172,11 +172,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_sink("payments", quick(payments_sink))?
         .add_sink("refunds", quick(refunds_sink))?
         .chains(move |ctx| {
-            // The generator frames one event per payload, so `for_source_framing`
-            // derives `single` from the source and rejects a `framing:` that
-            // would frame the payload a second time.
+            // The generator frames one event per payload, so the deserializer
+            // keeps the default `JsonFraming::Single`.
             let deser = JsonDeserializerBuilder::from_component_config(&deser_section)
-                .and_then(|b| b.for_source_framing(ctx.source_framing))
                 .expect("deserializer config")
                 .build_serde::<StorefrontEvent>();
 

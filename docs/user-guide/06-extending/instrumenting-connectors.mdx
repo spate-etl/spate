@@ -350,7 +350,7 @@ or the prefix.
   families land under `spate_<component_type>_deser_*` with
   `component="<component>.deserializer"`, the labels of the chain's own
   `spate_deser_*` stage, so the two join. A deserializer that wraps another
-  forwards both methods to the inner one.
+  forwards both methods to the inner one, and `check_source_framing` too.
 
 The source's two methods below are a shape rather than a program: the
 `impl Source for` header is left out and the rest of `open` is elided at the

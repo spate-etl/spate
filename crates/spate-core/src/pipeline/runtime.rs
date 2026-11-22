@@ -373,8 +373,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// [`StartError::Config`] before the source opens for a zero thread
     /// count, a zero [`RuntimeOptions::max_records`], a current-thread I/O
     /// runtime, a `checkpoint.interval` or `checkpoint.drain_timeout` above
-    /// one day, or a configuration the source or the feed refuses. Each other
-    /// [`StartError`] variant for the startup step it names.
+    /// one day, a configuration the source or the feed refuses, or a chain
+    /// whose deserializer refuses the source's
+    /// [`framing_contract`](crate::source::Source::framing_contract). Each
+    /// other [`StartError`] variant for the startup step it names.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         cpu::log_once();
         let threads = self.thread_count();
@@ -533,6 +535,18 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             None => None,
         };
 
+        // Each chain meets the source's framing before `run` starts any task
+        // or driver of its own.
+        let source_framing = self.source.framing_contract();
+        let mut chains = Vec::with_capacity(threads);
+        for i in 0..threads {
+            let chain = (self.chains)(i);
+            chain
+                .check_source_framing(source_framing)
+                .map_err(|e| StartError::Config(e.to_string()))?;
+            chains.push(chain);
+        }
+
         let health = HealthState::with_clock(
             threads,
             HealthThresholds::default(),
@@ -624,7 +638,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         let mut control_txs = Vec::with_capacity(threads);
         let mut driver_handles = Vec::with_capacity(threads);
-        for i in 0..threads {
+        for (i, chain) in chains.into_iter().enumerate() {
             let (control_tx, control_rx) = crossbeam_channel::unbounded::<ThreadControl<S::Lane>>();
             control_txs.push(control_tx);
             let ctx = DriverContext {
@@ -636,7 +650,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 ),
                 control: control_rx,
                 events: events_tx.clone(),
-                chain: (self.chains)(i),
+                chain,
                 bp: WatermarkController::new(bp_params),
                 budget: Arc::clone(&self.budget),
                 queues: self.sink.queues.clone(),

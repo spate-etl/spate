@@ -15,8 +15,10 @@
 
 use super::{BlockReason, Collector, CollectorFor, PushOutcome, RunnableChain};
 use crate::checkpoint::AckRef;
+use crate::config::ConfigError;
 use crate::deser::{Deserializer, EmitRecord, RecFamily};
 use crate::error::{DeserError, ErrorPolicy, FatalError};
+use crate::framing::FramingContract;
 use crate::metrics::{DeserMetrics, OperatorMetrics};
 use crate::record::{Flow, RawPayload, Record, RecordMeta};
 use crate::source::PayloadBatch;
@@ -821,5 +823,9 @@ where
         self.mid_batch = false;
         self.cursor = 0;
         self.pending = None;
+    }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        self.deser.check_source_framing(source)
     }
 }

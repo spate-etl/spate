@@ -116,7 +116,7 @@ mod chain;
 mod handoff;
 mod split;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use builder::{
     Assemble, ChainBuilder, ChainFactory, FilterPart, FlatMapPart, InspectPart, MapFn, MapPart,

@@ -3257,6 +3257,53 @@ fn each_chain_is_asked_about_the_source_contract() {
     assert_eq!(*asked.lock().unwrap(), [FramingContract::WholePayload]);
 }
 
+/// A chain `run` builds binds its metric handles to the recorder `run`
+/// installs, when nothing installed one before.
+#[test]
+fn a_chain_built_by_run_records_through_the_recorder_run_installs() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let settings = super::runtime::metrics_settings(&cfg);
+    let pipeline_name = cfg.pipeline.name.clone();
+    let chain_name = pipeline_name.clone();
+    let h = start_chains(
+        cfg,
+        test_options(),
+        |_| {},
+        |runtime, _| runtime,
+        move |_, _, _| {
+            let (queues, _receivers) = shard_queues(1, 8);
+            crate::ops::chain_owned(crate::deser::BytesPassthrough)
+                .with_metrics(chain_name.clone(), "main")
+                .sink(
+                    crate::ops::tests::VecEncoder,
+                    crate::sink::KeyHashRouter,
+                    crate::ops::ChunkConfig::default(),
+                    queues,
+                    Arc::new(crate::backpressure::InflightBudget::new()),
+                )
+                .build()
+        },
+    );
+    h.shutdown.trigger();
+    h.join.join().unwrap().expect("run");
+    let rendered = super::runtime::install_or_reuse(&settings)
+        .expect("the recorder run installed")
+        .render();
+    assert!(
+        !spate_test::metric_series(
+            &rendered,
+            names::DESER_RECORDS_TOTAL,
+            &[
+                ("pipeline", pipeline_name.as_str()),
+                ("component", "main.deserializer")
+            ],
+        )
+        .is_empty(),
+        "rendered:\n{rendered}"
+    );
+}
+
 /// Pins that the runtime hands a `feed:` section to the source, whose default
 /// `configure_feed` refuses it before the source opens.
 #[test]

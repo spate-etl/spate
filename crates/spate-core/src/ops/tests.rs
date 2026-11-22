@@ -174,7 +174,7 @@ impl RowEncoder<KeyF> for KeyEncoder {
 
 /// Length-prefixed encoder for owned byte records.
 #[derive(Clone, Default)]
-struct VecEncoder;
+pub(crate) struct VecEncoder;
 
 impl RowEncoder<Owned<Vec<u8>>> for VecEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {

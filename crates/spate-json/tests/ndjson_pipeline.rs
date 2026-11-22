@@ -32,6 +32,7 @@ fn ndjson_payload_explodes_and_skips_poison_through_the_chain() {
     let mut config = JsonDeserializerConfig::default();
     config.on_error = OnError::Skip;
     let deser = JsonDeserializerBuilder::new(config)
+        .expect("the config validates")
         .framing(JsonFraming::Lines)
         .build_serde::<Event>();
 

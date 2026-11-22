@@ -25,7 +25,9 @@ fn builder() -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
     config.on_error = OnError::Skip;
     config.reject_duplicate_keys = false;
-    JsonDeserializerBuilder::new(config).framing(JsonFraming::Lines)
+    JsonDeserializerBuilder::new(config)
+        .expect("the config validates")
+        .framing(JsonFraming::Lines)
 }
 
 /// Decode one NDJSON payload with one malformed line through a chain built with

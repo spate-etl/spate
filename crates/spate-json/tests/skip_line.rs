@@ -55,7 +55,7 @@ fn builder(reject_duplicate_keys: bool) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
     config.on_error = OnError::Skip;
     config.reject_duplicate_keys = reject_duplicate_keys;
-    JsonDeserializerBuilder::new(config)
+    JsonDeserializerBuilder::new(config).expect("the config validates")
 }
 
 /// Runs `good` and then `refused` through a pipeline on partition 3, so the

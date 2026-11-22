@@ -71,7 +71,9 @@ fn settings(
     let mut config = JsonDeserializerConfig::default();
     config.on_error = on_error;
     config.reject_duplicate_keys = reject_duplicate_keys;
-    JsonDeserializerBuilder::new(config).framing(framing)
+    JsonDeserializerBuilder::new(config)
+        .expect("the config validates")
+        .framing(framing)
 }
 
 /// Feed `stream` through a fresh framer in `chunk`-sized pieces, popping as a

@@ -45,8 +45,9 @@ an error for `on_error` to handle. The check parses each document a second time.
 
 `JsonDeserializerBuilder::from_component_config` reads the section, and
 `JsonDeserializerBuilder::new` takes a `JsonDeserializerConfig` built in code
-from its `Default`. `build_serde::<T>()` decodes each document into your own
-`T: DeserializeOwned`, and `build_value()` into `serde_json::Value`.
+from its `Default`. Both return a `Result` and run the config's `validate`.
+`build_serde::<T>()` decodes each document into your own `T: DeserializeOwned`,
+and `build_value()` into `serde_json::Value`.
 [`json_skip_bad_records.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/json_skip_bad_records.rs)
 builds one from a config in code, and
 [`s3_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_backfill.rs)

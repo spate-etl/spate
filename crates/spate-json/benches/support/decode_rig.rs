@@ -309,7 +309,9 @@ pub(crate) fn full_settings(
     let mut config = JsonDeserializerConfig::default();
     config.on_error = on_error;
     config.reject_duplicate_keys = reject_duplicate_keys;
-    JsonDeserializerBuilder::new(config).framing(framing)
+    JsonDeserializerBuilder::new(config)
+        .expect("the config validates")
+        .framing(framing)
 }
 
 pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerBuilder {
@@ -324,7 +326,9 @@ pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerBuilder {
     // Off: the structural check parses each document a second time, which
     // would measure the guard rather than the decode.
     config.reject_duplicate_keys = false;
-    JsonDeserializerBuilder::new(config).framing(framing)
+    JsonDeserializerBuilder::new(config)
+        .expect("the config validates")
+        .framing(framing)
 }
 
 /// An unwarmed rig with no metrics, for a case whose point is the decode

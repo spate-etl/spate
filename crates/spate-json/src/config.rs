@@ -111,12 +111,16 @@ pub struct JsonDeserializerBuilder {
 
 impl JsonDeserializerBuilder {
     /// Build from a config, with [`JsonFraming::Single`] framing.
-    #[must_use]
-    pub fn new(config: JsonDeserializerConfig) -> JsonDeserializerBuilder {
-        JsonDeserializerBuilder {
+    ///
+    /// # Errors
+    ///
+    /// As [`JsonDeserializerConfig::validate`].
+    pub fn new(config: JsonDeserializerConfig) -> Result<JsonDeserializerBuilder, ConfigError> {
+        config.validate()?;
+        Ok(JsonDeserializerBuilder {
             config,
             framing: JsonFraming::Single,
-        }
+        })
     }
 
     /// Build from the pipeline's `deserializer` component section.
@@ -127,9 +131,7 @@ impl JsonDeserializerBuilder {
     pub fn from_component_config(
         section: &ComponentConfig,
     ) -> Result<JsonDeserializerBuilder, ConfigError> {
-        Ok(Self::new(JsonDeserializerConfig::from_component_config(
-            section,
-        )?))
+        Self::new(JsonDeserializerConfig::from_component_config(section)?)
     }
 
     /// Split each payload as `framing`. The default, [`JsonFraming::Single`],
@@ -191,7 +193,7 @@ mod tests {
         let c = JsonDeserializerConfig::default();
         assert_eq!(c.on_error, OnError::Skip);
         assert!(!c.reject_duplicate_keys);
-        let b = JsonDeserializerBuilder::new(c);
+        let b = JsonDeserializerBuilder::new(c).expect("the default config validates");
         assert_eq!(b.framing, JsonFraming::Single);
     }
 

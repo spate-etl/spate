@@ -59,8 +59,8 @@
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*
-//!   for the objects' format via
-//!   [`S3Source::with_framer`](crate::S3Source::with_framer) (e.g.
+//!   for the objects' format to
+//!   [`S3Source::new`](crate::S3Source::new) (e.g.
 //!   `spate-json`'s `JsonLinesFramer` for NDJSON), emitting one raw payload per
 //!   framed record. Deserialization then stays in the operator chain
 //!   (`spate-json` etc.), as with the Kafka source.

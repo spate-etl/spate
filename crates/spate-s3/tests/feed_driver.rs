@@ -45,7 +45,7 @@ fn launch_on_feed(data: &Path, feed: Arc<dyn Feed>, pre: impl FnOnce(&SinkScript
         .fed_by_code()
         .build();
     launch_customized(&yaml, test_options(), pre, move |source, _io| {
-        line_framer(source).with_feed(feed)
+        source.with_feed(feed)
     })
 }
 
@@ -338,7 +338,7 @@ fn a_pipeline_with_no_feed_fails_at_start() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _io| line_framer(source).with_store(spy_store),
+        move |source, _io| source.with_store(spy_store),
     );
     let report = exit(&l);
     let ExitState::Failed(failure) = report.state else {
@@ -360,16 +360,15 @@ fn a_missing_feed_is_reported_before_the_store_is_built() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let mut source = line_framer(
-        S3Source::from_component_config(
-            &spate_test::component_config(
-                "s3",
-                "url: \"s3://bucket/p/\"\nstore:\n  aws_checksum_algorithm: \"nope\"\n",
-            ),
-            rt.handle().clone(),
-        )
-        .unwrap(),
-    );
+    let mut source = S3Source::from_component_config(
+        &spate_test::component_config(
+            "s3",
+            "url: \"s3://bucket/p/\"\nstore:\n  aws_checksum_algorithm: \"nope\"\n",
+        ),
+        rt.handle(),
+        line_framer,
+    )
+    .unwrap();
     let err = source
         .open(SourceCtx::new(Checkpointer::new().handle()))
         .expect_err("a source with no feed fails to open");
@@ -408,11 +407,7 @@ fn a_whole_unit_over_a_large_object_is_read_in_ranges() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _io| {
-            line_framer(source)
-                .with_store(store)
-                .with_feed(Arc::new(feed))
-        },
+        move |source, _io| source.with_store(store).with_feed(Arc::new(feed)),
     );
     wait_until(DEADLINE, "the unit is acknowledged", || {
         script.acknowledged() == vec![receipt]
@@ -454,9 +449,9 @@ fn renew_held_renews_the_unit_the_source_holds() {
         .unwrap();
     let (feed, script) = scripted_feed();
     let receipt = script.deliver(unit_over(&data, "a.ndjson"));
-    let mut source =
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
-            .with_feed(Arc::new(feed));
+    let mut source = S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+        .unwrap()
+        .with_feed(Arc::new(feed));
     source
         .open(SourceCtx::new(Checkpointer::new().handle()))
         .unwrap();
@@ -503,13 +498,14 @@ fn a_framer_with_no_delimiter_is_reported_when_the_feed_path_opens() {
         .build()
         .unwrap();
     let open_logs = |resync: bool| {
-        let source = S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
         let source = if resync {
-            line_framer(source)
+            S3Source::from_component_config(&config.source, rt.handle(), line_framer)
         } else {
-            source.with_framer(|| Box::new(NoResync(support::ndjson_framer())))
+            S3Source::from_component_config(&config.source, rt.handle(), || {
+                Box::new(NoResync(support::ndjson_framer()))
+            })
         };
-        let mut source = source.with_feed(Arc::new(MemoryFeed::new()));
+        let mut source = source.unwrap().with_feed(Arc::new(MemoryFeed::new()));
         spate_test::capture_logs(tracing::Level::INFO, || {
             source
                 .open(SourceCtx::new(Checkpointer::new().handle()))
@@ -559,7 +555,7 @@ fn units_held_at_start(name: &str, threads: u32, explicit: Option<usize>) -> usi
         test_options(),
         |_| {},
         Arc::new(feed),
-        |source, _io| line_framer(source).with_store(store),
+        |source, _io| source.with_store(store),
     );
     wait_until(DEADLINE, "the first receive lands", || {
         !script.held().is_empty()
@@ -616,9 +612,9 @@ fn a_source_opened_without_a_thread_count_holds_96() {
     for _ in 0..98 {
         script.deliver(unit_over(&data, "a.ndjson"));
     }
-    let mut source =
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
-            .with_feed(Arc::new(feed));
+    let mut source = S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+        .unwrap()
+        .with_feed(Arc::new(feed));
     source
         .open(SourceCtx::new(Checkpointer::new().handle()))
         .unwrap();
@@ -643,9 +639,8 @@ fn the_open_log_states_units_held_and_its_origin() {
         .build()
         .unwrap();
     let open_logs = |explicit: Option<usize>, threads: Option<usize>| {
-        let mut source = line_framer(
-            S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap(),
-        );
+        let mut source =
+            S3Source::from_component_config(&config.source, rt.handle(), line_framer).unwrap();
         match explicit {
             Some(n) => {
                 let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
@@ -712,7 +707,7 @@ fn the_open_log_on_a_seeded_feed_is_info() {
         .build()
         .unwrap();
     let mut source =
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap());
+        S3Source::from_component_config(&config.source, rt.handle(), line_framer).unwrap();
     let section = FeedSection::new(spate_test::component_config("memory", "{}"));
     source
         .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Seeded)
@@ -754,9 +749,9 @@ fn launch_one_row_writes(
     let name = config.pipeline.name.clone();
     let pipeline = Pipeline::from_config(config).unwrap();
     let io = pipeline.io_handle();
-    let source =
-        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
-            .with_feed(feed);
+    let source = S3Source::from_component_config(&pipeline.config().source, &io, line_framer)
+        .unwrap()
+        .with_feed(feed);
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 1;
     pool.batch.linger = Duration::from_millis(10);
@@ -988,10 +983,10 @@ fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
     let io = pipeline.io_handle();
-    let source =
-        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
-            .with_store(store)
-            .with_feed(Arc::new(feed));
+    let source = S3Source::from_component_config(&pipeline.config().source, &io, line_framer)
+        .unwrap()
+        .with_store(store)
+        .with_feed(Arc::new(feed));
     let mut pool = SinkPoolConfig::default();
     pool.batch.linger = Duration::from_millis(10);
     let (sink, sink_script) = capture_sink(1, 1);
@@ -1044,9 +1039,9 @@ fn a_unit_whose_write_outlasts_the_chase_is_acknowledged_before_the_tick() {
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
     let io = pipeline.io_handle();
-    let source =
-        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
-            .with_feed(Arc::new(feed));
+    let source = S3Source::from_component_config(&pipeline.config().source, &io, line_framer)
+        .unwrap()
+        .with_feed(Arc::new(feed));
     let mut pool = SinkPoolConfig::default();
     pool.batch.linger = Duration::from_millis(10);
     let (sink, sink_script) = capture_sink(1, 1);
@@ -1121,9 +1116,8 @@ fn a_feed_section_is_refused_beside_a_feed_given_in_code() {
         .enable_all()
         .build()
         .unwrap();
-    let source = || {
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
-    };
+    let source =
+        || S3Source::from_component_config(&config.source, rt.handle(), line_framer).unwrap();
 
     let err = source()
         .with_feed(Arc::new(MemoryFeed::new()))
@@ -1306,7 +1300,7 @@ fn the_lane_clock_reaches_the_lanes() {
         test_options(),
         |_| {},
         move |source, _io| {
-            line_framer(source)
+            source
                 .with_store(held_store)
                 .with_feed(feed)
                 .with_clock(lane_clock)
@@ -1349,7 +1343,7 @@ fn launch_on_store(
         &overwrite_yaml(),
         test_options(),
         pre,
-        move |source, _io| line_framer(source).with_store(store).with_feed(feed),
+        move |source, _io| source.with_store(store).with_feed(feed),
     )
 }
 
@@ -1364,7 +1358,7 @@ fn launch_on_store_on_clock(
         test_options(),
         |_| {},
         clock,
-        move |source, _io| line_framer(source).with_store(store).with_feed(feed),
+        move |source, _io| source.with_store(store).with_feed(feed),
     )
 }
 
@@ -1402,7 +1396,7 @@ fn a_finished_lane_waiting_on_the_sink_does_not_starve_its_sibling() {
         &yaml,
         test_options(),
         |sink| sink.enqueue_global(WriteOutcome::ok().held()),
-        move |source, _io| line_framer(source).with_store(held_store).with_feed(feed),
+        move |source, _io| source.with_store(held_store).with_feed(feed),
     );
     // The first object's write is held, so its lane stays on the thread,
     // finished and unacknowledged, while the second object's bytes arrive.
@@ -1791,7 +1785,7 @@ fn launch_stopping(data: &Path, feed: Arc<dyn Feed>, clock: Arc<TestClock>) -> L
         |sink| sink.enqueue_global(WriteOutcome::ok().held()),
         feed,
         clock,
-        |source, _io| line_framer(source),
+        |source, _io| source,
     )
 }
 
@@ -1991,7 +1985,7 @@ fn a_seeded_run_reads_its_re_enqueue_before_it_ends() {
         test_options(),
         |_| {},
         Arc::new(feed.clone()),
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     );
     let report = exit(&l);
     assert_eq!(report.state, ExitState::Completed);

@@ -129,11 +129,12 @@ impl Rig {
             inner: LocalFileSystem::new(),
             hold: self.hold,
         });
-        let source = S3Source::from_component_config(&pipeline.config().source, io)
-            .expect("the source config")
-            .with_framer(|| Box::new(JsonLinesFramer::new(LINE_BYTES)))
-            .with_store(store)
-            .with_feed(Arc::clone(&feed) as Arc<dyn Feed>);
+        let source = S3Source::from_component_config(&pipeline.config().source, &io, || {
+            Box::new(JsonLinesFramer::new(LINE_BYTES))
+        })
+        .expect("the source config")
+        .with_store(store)
+        .with_feed(Arc::clone(&feed) as Arc<dyn Feed>);
         let rows = Arc::new(AtomicU64::new(0));
         let mut pool = SinkPoolConfig::default();
         pool.batch.linger = self.linger;

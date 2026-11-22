@@ -57,10 +57,10 @@ enum State {
 pub struct S3Source {
     config: S3SourceConfig,
     handle: tokio::runtime::Handle,
-    /// The per-object record framer, supplied by the chosen format via
-    /// [`with_framer`](S3Source::with_framer). Required before the pipeline
-    /// opens the source; `spate-s3` is a transport and owns no framing itself.
-    framer: Option<crate::framer::FramerFactory>,
+    /// The per-object record framer, supplied by the chosen format to
+    /// [`new`](S3Source::new); `spate-s3` is a transport and owns no framing
+    /// itself.
+    framer: crate::framer::FramerFactory,
     /// A data store injected via the `testing`-gated `with_store` seam.
     store: Option<Arc<dyn ObjectStore>>,
     /// The feed to read units from: the one the `feed:` section names, or
@@ -104,7 +104,8 @@ impl std::fmt::Debug for S3Source {
 }
 
 impl S3Source {
-    /// A source over `config`, doing its network I/O on `io`. Pass the
+    /// A source over `config`, doing its network I/O on `io` and cutting each
+    /// object's bytes into records with the framers `framer` builds. Pass the
     /// pipeline's I/O runtime handle
     /// ([`Pipeline::io_handle`](spate_core::pipeline::Pipeline::io_handle)).
     ///
@@ -112,12 +113,32 @@ impl S3Source {
     /// the pipeline (the pipeline's I/O runtime satisfies both): the
     /// source and its lanes briefly block pipeline
     /// threads on it, which a current-thread runtime cannot drive.
-    #[must_use]
-    pub fn new(config: S3SourceConfig, io: tokio::runtime::Handle) -> S3Source {
-        S3Source {
+    ///
+    /// `spate-s3` is a transport and owns no framing, so the framer comes
+    /// from the objects' format, such as `spate-json`'s `JsonLinesFramer` for
+    /// NDJSON. `framer` builds a fresh
+    /// [`RecordFramer`](spate_core::framing::RecordFramer) per object, since
+    /// a framer holds per-object state and each lane frames its own split. A
+    /// framed source emits one record per payload, so its
+    /// [`FramingContract`] is [`PerRecord`](FramingContract::PerRecord) and
+    /// the paired deserializer decodes a single unit.
+    ///
+    /// # Errors
+    ///
+    /// As [`S3SourceConfig::validate`].
+    pub fn new<F>(
+        config: S3SourceConfig,
+        io: &tokio::runtime::Handle,
+        framer: F,
+    ) -> Result<S3Source, ConfigError>
+    where
+        F: Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
+    {
+        config.validate()?;
+        Ok(S3Source {
             config,
-            handle: io,
-            framer: None,
+            handle: io.clone(),
+            framer: Arc::new(framer),
             store: None,
             feed: None,
             units_held: None,
@@ -130,42 +151,24 @@ impl S3Source {
             ends: None,
             lister_task: None,
             state: State::Created,
-        }
+        })
     }
 
-    /// Build from the pipeline's opaque `source: { s3: ... }` section.
+    /// Build from the pipeline's opaque `source: { s3: ... }` section, with
+    /// `io` and `framer` as [`new`](S3Source::new) takes them.
     ///
     /// # Errors
     ///
     /// As [`S3SourceConfig::from_component_config`].
-    pub fn from_component_config(
+    pub fn from_component_config<F>(
         section: &ComponentConfig,
-        io: tokio::runtime::Handle,
-    ) -> Result<S3Source, ConfigError> {
-        Ok(S3Source::new(
-            S3SourceConfig::from_component_config(section)?,
-            io,
-        ))
-    }
-
-    /// Set the record framer that cuts each object's byte stream into records.
-    /// `spate-s3` is a transport and owns no framing, so this is **required**:
-    /// supply the framer for the objects' format (e.g. `spate-json`'s
-    /// `JsonLinesFramer` for NDJSON) before the pipeline opens the source.
-    ///
-    /// `factory` builds a fresh
-    /// [`RecordFramer`](spate_core::framing::RecordFramer) per object (framers are
-    /// per-object stateful and each lane frames its own split). A framed source
-    /// always emits one record per payload, so its
-    /// [`FramingContract`] is [`PerRecord`](FramingContract::PerRecord) and the
-    /// paired deserializer decodes a single unit.
-    #[must_use]
-    pub fn with_framer<F>(mut self, factory: F) -> S3Source
+        io: &tokio::runtime::Handle,
+        framer: F,
+    ) -> Result<S3Source, ConfigError>
     where
         F: Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
     {
-        self.framer = Some(Arc::new(factory));
-        self
+        S3Source::new(S3SourceConfig::from_component_config(section)?, io, framer)
     }
 
     /// Test seam: replace the data store built from `config.url` (the URL
@@ -279,8 +282,7 @@ impl S3Source {
     /// parse, the in-process feed, a durable feed with no `location`, a
     /// `feed` other than the one `section` names, and a call from a thread in a Tokio runtime context:
     /// async code, a `spawn_blocking` closure, or a thread holding a
-    /// `Handle::enter` guard. Fatal too for a source with no framer, a source
-    /// configuration that fails validation, a store the source or its
+    /// `Handle::enter` guard. Fatal too for a store the source or its
     /// location cannot build from its URL and `store` options, another
     /// fingerprint at the location, a checkpoint that is not a key under the
     /// listing prefix, and a store that cannot create an object
@@ -318,8 +320,7 @@ impl S3Source {
     ///     let section = pipeline.config().feed.clone().ok_or("the file names no feed")?;
     ///     let feed = connect_feed(&section, &pipeline.io_handle())?;
     ///     let source =
-    ///         S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-    ///             .with_framer(framer);
+    ///         S3Source::from_component_config(&pipeline.config().source, &pipeline.io_handle(), framer)?;
     ///     if std::env::args().nth(1).as_deref() == Some("list") {
     ///         // A failed run returns its error, so the process exits 1.
     ///         source.list_once(&section, feed)?;
@@ -373,12 +374,7 @@ impl S3Source {
                  `spawn_blocking` closure or `Handle::enter` guard",
             ));
         }
-        let make_framer = self.framer.clone().ok_or_else(|| {
-            SourceError::fatal("S3Source has no record framer; supply one with `with_framer(...)`")
-        })?;
-        self.config
-            .validate()
-            .map_err(|e| SourceError::fatal(e.to_string()))?;
+        let make_framer = Arc::clone(&self.framer);
         let (store, prefix, unaddressable, _, resume) = self.data_store()?;
         let delimiter = make_framer().resync_delimiter();
         let location = match location {
@@ -526,8 +522,7 @@ impl Source for S3Source {
     }
 
     fn framing_contract(&self) -> FramingContract {
-        // A framed source always emits one record per payload. (The framer is
-        // required; a missing one is caught at `open`.)
+        // A framed source always emits one record per payload.
         FramingContract::PerRecord
     }
 
@@ -588,16 +583,7 @@ impl Source for S3Source {
         if !matches!(self.state, State::Created) {
             return Err(SourceError::fatal("source opened twice"));
         }
-        let Some(make_framer) = self.framer.clone() else {
-            return Err(SourceError::fatal(
-                "S3Source has no record framer; supply one with `with_framer(...)` \
-                         (e.g. spate-json's JsonLinesFramer) before running the pipeline",
-            ));
-        };
-        // Defense in depth for hand-constructed configs; cheap.
-        self.config
-            .validate()
-            .map_err(|e| SourceError::fatal(e.to_string()))?;
+        let make_framer = Arc::clone(&self.framer);
 
         // Checked before the store is built, so a run with no feed touches no
         // store.
@@ -1587,7 +1573,8 @@ mod tests {
         let source = || {
             S3Source::from_component_config(
                 &spate_test::component_config("s3", "url: \"s3://b/data/\"\n"),
-                rt.handle().clone(),
+                rt.handle(),
+                crate::testutil::ndjson_framer,
             )
             .unwrap()
         };
@@ -1642,10 +1629,10 @@ mod tests {
                 "s3",
                 &format!("url: \"file://{}/\"\n", dir.path().display()),
             ),
-            rt.handle().clone(),
+            rt.handle(),
+            crate::testutil::ndjson_framer,
         )
         .unwrap()
-        .with_framer(crate::testutil::ndjson_framer)
         .with_feed(Arc::new(feed));
         source.open(ctx()).unwrap();
         let mut added = None;
@@ -1786,7 +1773,8 @@ mod tests {
             .unwrap();
         let source = S3Source::from_component_config(
             &spate_test::component_config("s3", body),
-            rt.handle().clone(),
+            rt.handle(),
+            crate::testutil::ndjson_framer,
         )
         .unwrap();
         (source, rt)
@@ -1885,7 +1873,8 @@ mod tests {
                 format!("url: \"https://0123abcd.r2.cloudflarestorage.com/data/events/\"\n{store}");
             S3Source::from_component_config(
                 &spate_test::component_config("s3", &body),
-                rt.handle().clone(),
+                rt.handle(),
+                crate::testutil::ndjson_framer,
             )
             .unwrap()
         };
@@ -1902,7 +1891,8 @@ mod tests {
                 "s3",
                 "url: \"https://data.s3.eu-west-2.amazonaws.com/events/\"\n",
             ),
-            rt.handle().clone(),
+            rt.handle(),
+            crate::testutil::ndjson_framer,
         )
         .unwrap();
         aws.parse_location("s3://ops/jobs/a/").unwrap();
@@ -1956,9 +1946,7 @@ mod tests {
     fn fed_source(body: &str) -> (S3Source, tokio::runtime::Runtime) {
         use spate_core::feed::memory::MemoryFeed;
         let (source, rt) = source_over(body);
-        let source = source
-            .with_framer(crate::testutil::ndjson_framer)
-            .with_feed(Arc::new(MemoryFeed::new()));
+        let source = source.with_feed(Arc::new(MemoryFeed::new()));
         (source, rt)
     }
 
@@ -1988,28 +1976,18 @@ mod tests {
         assert_eq!(err.reason(), "poll_events before open");
     }
 
-    /// Pins that `open` refuses a source with no framer as fatal.
+    /// Pins that `new` refuses what the config's `validate` refuses.
     #[test]
-    fn open_refuses_a_source_with_no_framer_as_fatal() {
-        let (mut source, _rt) = source_over("url: \"s3://b/data/\"\n");
-        let err = source.open(ctx()).unwrap_err();
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert_eq!(
-            err.reason(),
-            "S3Source has no record framer; supply one with `with_framer(...)` \
-             (e.g. spate-json's JsonLinesFramer) before running the pipeline"
-        );
-    }
-
-    /// Pins that `open` refuses a config changed after it was validated, as
-    /// fatal.
-    #[test]
-    fn open_refuses_an_invalid_config_as_fatal() {
-        let (mut source, _rt) = fed_source("url: \"s3://b/data/\"\n");
-        source.config.chunk_bytes = bytesize::ByteSize::b(0);
-        let err = source.open(ctx()).unwrap_err();
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(err.reason().contains("chunk_bytes"), "{err}");
+    fn new_refuses_an_invalid_config() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut config = S3SourceConfig::new("s3://b/data/");
+        config.chunk_bytes = bytesize::ByteSize::b(0);
+        let expected = config.validate().unwrap_err().to_string();
+        let err = S3Source::new(config, rt.handle(), crate::testutil::ndjson_framer).unwrap_err();
+        assert!(expected.contains("chunk_bytes"), "{expected}");
+        assert_eq!(err.to_string(), expected);
     }
 
     /// Pins that a data store or a location store that cannot be built is

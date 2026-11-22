@@ -272,10 +272,12 @@ impl Rig {
         let mut config = PipelineConfig::from_str(&self.yaml()).expect("the config parses");
         config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
         let pipeline = Pipeline::from_config(config).expect("the pipeline builds");
-        let source =
-            S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
-                .expect("the source config")
-                .with_framer(|| Box::new(JsonLinesFramer::new(MAX_LINE_BYTES)));
+        let source = S3Source::from_component_config(
+            &pipeline.config().source,
+            &pipeline.io_handle(),
+            || Box::new(JsonLinesFramer::new(MAX_LINE_BYTES)),
+        )
+        .expect("the source config");
         let json = JsonDeserializerBuilder::new(JsonDeserializerConfig::default())
             .expect("the default config validates")
             .build_serde::<Event>();

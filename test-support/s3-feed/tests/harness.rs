@@ -10,8 +10,8 @@ use spate_s3::{S3Source, SplitDescriptor};
 use spate_test::{FeedScript, HANG, ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
 use spate_test_s3_feed::{
     CHECKPOINT, PipelineConfigFeed, Recording, STEP, TWO_RANGES, Worker, assert_stalled, data_dir,
-    file_source, launch_customized, pipeline_yaml, publish, recs, sorted, stage, stage_with_etag,
-    two_range_unit, written,
+    file_source, launch_customized, launch_framed, pipeline_yaml, publish, recs, sorted, stage,
+    stage_with_etag, two_range_unit, written,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -219,12 +219,13 @@ fn pre_and_customize_reach_the_worker() {
     // A framer whose longest line is shorter than every record fails the unit.
     let (feed, script) = scripted_feed();
     let bad = script.deliver(stage(&data, "long.ndjson", &recs("l", 1)));
-    let worker = launch_customized(
+    let worker = launch_framed(
         move |_, _| Ok(feed),
         &file_source(&data, ""),
         SCRIPTED,
         |_| {},
-        |source| source.with_framer(|| Box::new(JsonLinesFramer::new(16))),
+        || Box::new(JsonLinesFramer::new(16)),
+        |source| source,
         CHECKPOINT,
         None,
     );
@@ -311,11 +312,12 @@ fn stalled_report() -> ExitReport {
         .build()
         .unwrap();
     let (lister, _) = scripted_feed();
-    S3Source::from_component_config(&config.source, rt.handle().clone())
-        .unwrap()
-        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
-        .list_once(config.feed.as_ref().unwrap(), Arc::new(lister))
-        .unwrap();
+    S3Source::from_component_config(&config.source, rt.handle(), || {
+        Box::new(JsonLinesFramer::new(1 << 20))
+    })
+    .unwrap()
+    .list_once(config.feed.as_ref().unwrap(), Arc::new(lister))
+    .unwrap();
 
     let (feed, script) = scripted_feed();
     let poison = script.deliver(Unit::new("poison", b"x".to_vec()));

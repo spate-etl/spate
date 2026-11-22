@@ -24,7 +24,7 @@ use std::time::Duration;
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
     Launched, PipelineYaml, captured_rows, data_dir, exit, fingerprint, launch_customized,
-    launch_with_feed, line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
+    launch_with_feed, lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
 /// A bounded backfill over `data` on the in-process feed holding
@@ -91,7 +91,7 @@ fn launch_spied(yaml: &str, options: SpyOptions) -> (Launched, StoreSpy) {
         yaml,
         test_options(),
         |_| {},
-        move |source, _| line_framer(source).with_store(spy_store),
+        move |source, _| source.with_store(spy_store),
     );
     (launched, spy)
 }
@@ -262,7 +262,7 @@ fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
         test_options(),
         |_| {},
         Arc::new(feed.clone()),
-        |source, _| line_framer(source),
+        |source, _| source,
     );
 
     spate_test::wait_until(
@@ -300,7 +300,7 @@ fn the_feed_section_sets_read_parallelism() {
         test_options(),
         |_| {},
         Arc::new(feed.clone()),
-        move |source, _| line_framer(source).with_store(spy_store),
+        move |source, _| source.with_store(spy_store),
     );
 
     spate_test::wait_until(
@@ -396,7 +396,7 @@ fn a_worker_on_a_durable_feed_issues_no_listing() {
             test_options(),
             |_| {},
             Arc::new(Tagged { inner, tag }),
-            move |source, _| line_framer(source).with_store(spy_store),
+            move |source, _| source.with_store(spy_store),
         );
         spate_test::wait_until(Duration::from_secs(30), "the unit is acknowledged", || {
             script.acknowledged() == vec![receipt]

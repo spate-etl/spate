@@ -11,11 +11,16 @@
 //! # use spate_json::JsonLinesFramer;
 //! # struct S3Source;
 //! # impl S3Source {
-//! #     fn with_framer<F: Fn() -> Box<dyn spate_core::framing::RecordFramer> + Send + Sync>(self, _: F) -> Self { self }
+//! #     fn new<F: Fn() -> Box<dyn spate_core::framing::RecordFramer> + Send + Sync>(
+//! #         _: (), _: &(), _: F,
+//! #     ) -> Result<Self, ()> { Ok(S3Source) }
 //! # }
-//! # let source = S3Source;
+//! # fn main() -> Result<(), ()> {
+//! # let (config, io) = ((), ());
 //! let max_record_bytes = 64 << 20;
-//! let source = source.with_framer(move || Box::new(JsonLinesFramer::new(max_record_bytes)));
+//! let source =
+//!     S3Source::new(config, &io, move || Box::new(JsonLinesFramer::new(max_record_bytes)))?;
+//! # Ok(()) }
 //! ```
 //!
 //! This is the source-side counterpart to the deserializer's in-memory

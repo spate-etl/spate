@@ -15,7 +15,7 @@
 //! transport. `spate-json` provides newline-delimited framing for NDJSON, a
 //! future `spate-avro` an object-container block framer, and so on. A source
 //! stays format-agnostic and receives its framer at pipeline-assembly time
-//! (e.g. `S3Source::with_framer`), so the same framer serves every streaming
+//! (e.g. as an argument of `S3Source::new`), so the same framer serves every streaming
 //! source and no source hard-codes a format.
 //!
 //! A [`RecordFramer`] is fed decoded bytes in arbitrary chunks and yields

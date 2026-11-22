@@ -1078,7 +1078,7 @@ Framing a byte stream is a format concern, so the framer is owned by the format
 crate: for NDJSON, that is [`spate-json`](../../formats/json/README.mdx)'s
 `JsonLinesFramer`.
 
-`with_framer` takes a factory rather than a framer, because framers are
+The constructor takes a factory rather than a framer, because framers are
 per-object stateful and each object gets a fresh one; the bound the framer is
 built with (`64 << 20` here) caps a single record's decoded bytes:
 
@@ -1098,9 +1098,8 @@ returns an error before the source opens:
 chain factory so each thread's closure owns it.
 
 A different object layout needs a different `RecordFramer`, either a custom one
-via `S3Source::with_framer` or another format's framer, and no fork is
-required. The framer is **required**: a source built without one refuses to
-start.
+or another format's framer, given to the constructor in place of
+`JsonLinesFramer`. No fork is required.
 
 A framer takes part in [byte ranges](#large-objects-and-byte-ranges)
 through `RecordFramer::resync_delimiter`. Returning `Some(byte)` declares that

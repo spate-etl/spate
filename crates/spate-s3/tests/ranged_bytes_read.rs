@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::spy::{RangeKind, SpyOptions, spying_local_store};
 use support::{
-    PipelineYaml, data_dir, launch_customized, line_framer, line_starts, lines_bytes, ranged_spec,
-    recs, stop, test_options,
+    PipelineYaml, data_dir, launch_customized, line_starts, lines_bytes, ranged_spec, recs, stop,
+    test_options,
 };
 
 /// A ranged unit's `bytes_read_total` equals the bytes of every window it
@@ -43,11 +43,7 @@ fn a_ranged_split_counts_every_fetched_byte_as_read() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _| {
-            line_framer(source)
-                .with_feed(Arc::new(feed))
-                .with_store(spy_store)
-        },
+        move |source, _| source.with_feed(Arc::new(feed)).with_store(spy_store),
     );
     wait_until(Duration::from_secs(30), "the unit is acknowledged", || {
         script.acknowledged().len() == 1

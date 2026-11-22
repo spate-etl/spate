@@ -102,11 +102,8 @@ fn launch_job(
         ))
         .build();
     let clock = Arc::clone(clock);
-    let make_source = move |source, _io| {
-        line_framer(source)
-            .with_location_store(store)
-            .with_clock(clock)
-    };
+    let make_source =
+        move |source: spate_s3::S3Source, _io| source.with_location_store(store).with_clock(clock);
     match stop_clock {
         Some(stop_clock) => {
             launch_with_feed_on_clock(&yaml, options(), pre, feed, stop_clock, make_source)
@@ -498,7 +495,7 @@ fn a_continuous_job_does_not_end_on_an_empty_feed() {
         options(),
         |_| {},
         Arc::new(feed),
-        move |source, _io| line_framer(source).with_clock(worker_clock),
+        move |source, _io| source.with_clock(worker_clock),
     );
     let fresh = script.deliver(unit_over(&data, "missing.ndjson"));
     wait_until(DEADLINE, "the worker takes a unit", || {
@@ -535,11 +532,7 @@ fn a_settling_window_key_sets_the_fingerprint_wait() {
         options(),
         |_| {},
         Arc::new(feed),
-        move |source, _io| {
-            line_framer(source)
-                .with_location_store(store)
-                .with_clock(worker_clock)
-        },
+        move |source, _io| source.with_location_store(store).with_clock(worker_clock),
     );
     wait_for_gets(&hooks, 1);
     let mut reads = 1;
@@ -594,7 +587,7 @@ fn a_settling_window_without_a_location_is_refused() {
         options(),
         |_| {},
         Arc::new(feed),
-        |source, _io| line_framer(source),
+        |source, _io| source,
     );
     let err = l
         .run
@@ -1064,7 +1057,8 @@ fn configure_feed_takes_a_settling_window_on_the_in_process_feed() {
         .build()
         .unwrap();
     let mut source =
-        spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+            .unwrap();
     source
         .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Section)
         .expect("the S3 source leaves the in-process feed's window to the core");
@@ -1079,7 +1073,7 @@ fn launch_solo(data: &Path, extra: &str, clock: &Arc<TestClock>) -> Launched {
         &yaml,
         options(),
         |_| {},
-        move |source, _io| line_framer(source).with_clock(clock),
+        move |source, _io| source.with_clock(clock),
     )
 }
 
@@ -1144,7 +1138,7 @@ fn a_solo_run_given_a_feed_in_code_keeps_running() {
         options(),
         |_| {},
         Arc::new(feed.clone()),
-        |source, _io| line_framer(source),
+        |source, _io| source,
     );
     wait_until(DEADLINE, "the listed object is read", || {
         sorted(captured_rows(&l.script)) == sorted(a.clone()) && feed.counts().acknowledged == 1
@@ -1180,7 +1174,7 @@ fn launch_seeded_scripted(
         options(),
         pre,
         Arc::new(feed.clone()),
-        |source, _io| line_framer(source).with_clock(TestClock::frozen()),
+        |source, _io| source.with_clock(TestClock::frozen()),
     )
 }
 
@@ -1289,8 +1283,9 @@ fn a_seeded_feed_on_a_durable_backend_is_refused() {
         .enable_all()
         .build()
         .unwrap();
-    let source =
-        || spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
+    let source = || {
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle(), line_framer).unwrap()
+    };
     let err = source()
         .configure_feed(&section, Arc::new(scripted_feed().0), FeedOrigin::Seeded)
         .unwrap_err();
@@ -1327,9 +1322,9 @@ fn a_section_feed_on_a_durable_backend_opens_without_a_depth() {
         .enable_all()
         .build()
         .unwrap();
-    let mut source = line_framer(
-        spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap(),
-    );
+    let mut source =
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+            .unwrap();
     source
         .configure_feed(
             &section,

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     DEADLINE, PipelineYaml, captured_rows, key_of, launch_customized, launch_on_notifications,
-    line_framer, lines_bytes, notification, recs, stop, test_options,
+    lines_bytes, notification, recs, stop, test_options,
 };
 
 /// A descriptor unit naming the whole object `key`.
@@ -101,7 +101,7 @@ fn a_descriptor_naming_a_file_outside_a_file_url_is_failed_back() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _io| line_framer(source).with_store(store).with_feed(feed),
+        move |source, _io| source.with_store(store).with_feed(feed),
     );
 
     wait_until(DEADLINE, "the unit is settled", || {

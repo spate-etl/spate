@@ -78,9 +78,11 @@ pub(crate) fn assemble(
 ) -> impl FnOnce() -> Result<(Pipeline, S3Source), BoxError> + Send + 'static {
     move || {
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml)?)?;
-        let source =
-            S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-                .with_framer(|| Box::new(JsonLinesFramer::new(MAX_RECORD_BYTES)));
+        let source = S3Source::from_component_config(
+            &pipeline.config().source,
+            &pipeline.io_handle(),
+            || Box::new(JsonLinesFramer::new(MAX_RECORD_BYTES)),
+        )?;
         let section = pipeline
             .config()
             .deserializer

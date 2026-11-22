@@ -728,11 +728,12 @@ fn list_once(data: &Path, feed_section: &str) {
         .unwrap();
     let feed =
         SqsFeed::connect_with_static_credentials(&section, rt.handle(), "test", "test").unwrap();
-    S3Source::from_component_config(&config.source, rt.handle().clone())
-        .unwrap()
-        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
-        .list_once(&section, Arc::new(feed))
-        .unwrap();
+    S3Source::from_component_config(&config.source, rt.handle(), || {
+        Box::new(JsonLinesFramer::new(1 << 20))
+    })
+    .unwrap()
+    .list_once(&section, Arc::new(feed))
+    .unwrap();
 }
 
 /// Launch a bounded worker whose end check runs on `clock`.

@@ -102,8 +102,7 @@ An invalid config fails at construction, as the `ConfigError` the rest of the co
 
 **Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs).
 
-**Departs:** the S3 source builds infallibly and validates in `open` ([#2335](https://github.com/spate-etl/spate/issues/2335)).
-The feed backends have no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
+**Departs:** the feed backends have no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 
@@ -117,7 +116,7 @@ Pass a value the role cannot run without to `new`, never to a `with_*` setter.
 
 **Follow:** `PipelineRuntime::with_feed` in [`crates/spate-core/src/pipeline/runtime.rs`](repo:crates/spate-core/src/pipeline/runtime.rs).
 
-**Departs:** `with_*` constructors that take no `self`, and `S3Source::with_framer`, whose framer `open` requires ([#1607](https://github.com/spate-etl/spate/issues/1607)).
+**Departs:** `with_*` constructors that take no `self` ([#1607](https://github.com/spate-etl/spate/issues/1607)).
 
 **Checked by:** review.
 

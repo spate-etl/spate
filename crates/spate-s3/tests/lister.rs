@@ -64,8 +64,7 @@ fn launch_worker_on(
     let yaml = PipelineYaml::file("s3-job-location", data)
         .section(&section)
         .build();
-    let make_source = move |source, _io| {
-        let mut source = line_framer(source);
+    let make_source = move |mut source: S3Source, _io| {
         if let Some(store) = store {
             source = source.with_location_store(store);
         }
@@ -290,13 +289,7 @@ fn a_worker_with_its_own_compression_refuses_the_listers_fingerprint() {
             "feed:\n  scripted: {{}}\n  location: {location}\n"
         ))
         .build();
-    let l = launch_with_feed(
-        &yaml,
-        test_options(),
-        |_| {},
-        Arc::new(feed),
-        |s, _| line_framer(s),
-    );
+    let l = launch_with_feed(&yaml, test_options(), |_| {}, Arc::new(feed), |s, _| s);
     let reason = failure_reason(&exit(&l));
     assert!(reason.contains("compression=None"), "{reason}");
     assert!(script.delivered().is_empty(), "nothing was received");
@@ -461,8 +454,7 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
             |_| {},
             Arc::new(feed),
             move |s, _| {
-                line_framer(s)
-                    .with_location_store(store)
+                s.with_location_store(store)
                     .with_clock(clock as Arc<dyn Clock>)
             },
         )
@@ -494,10 +486,10 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
     let (store, hooks) = location_store();
     hooks.fail_next_gets(usize::MAX);
     let clock = TestClock::frozen();
-    let mut source =
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
-            .with_location_store(store)
-            .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut source = S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+        .unwrap()
+        .with_location_store(store)
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     let (feed, _script) = scripted_feed();
     source
         .configure_feed(
@@ -615,10 +607,10 @@ fn the_fingerprint_wait_logs_the_location_and_window() {
         .unwrap();
     let (store, hooks) = location_store();
     let clock = TestClock::frozen();
-    let mut source =
-        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
-            .with_location_store(store)
-            .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+    let mut source = S3Source::from_component_config(&config.source, rt.handle(), line_framer)
+        .unwrap()
+        .with_location_store(store)
+        .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
     section.location = Some(LOCATION.to_owned());
     let (feed, _script) = scripted_feed();
@@ -679,7 +671,7 @@ fn a_continuous_job_reads_no_marker_or_fingerprint() {
         test_options(),
         |_| {},
         Arc::new(feed),
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     );
     wait_until(DEADLINE, "the unit is acknowledged", || {
         script.acknowledged() == vec![receipt]
@@ -704,7 +696,7 @@ fn lister_source(data: &Path, rt: &tokio::runtime::Runtime, extra: &str) -> S3So
         data.display()
     );
     let section = spate_test::component_config("s3", &body);
-    line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+    S3Source::from_component_config(&section, rt.handle(), line_framer).unwrap()
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -1038,7 +1030,8 @@ fn resuming_source(
         "s3",
         "url: \"s3://data-bucket/data/\"\nsplit_target_bytes: 1MiB\n",
     );
-    line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+    S3Source::from_component_config(&section, rt.handle(), line_framer)
+        .unwrap()
         .with_store(Arc::clone(data))
         .with_location_store(Arc::clone(location))
 }
@@ -1119,7 +1112,8 @@ fn a_lister_resumes_at_a_file_location() {
             "s3",
             "url: \"s3://data-bucket/data/\"\nsplit_target_bytes: 1MiB\n",
         );
-        line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+        S3Source::from_component_config(&section, rt.handle(), line_framer)
+            .unwrap()
             .with_store(Arc::clone(&data))
     };
     let (feed, script) = scripted_feed();
@@ -1433,7 +1427,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
             gw.store_options_yaml()
         );
         let config = spate_test::component_config("s3", &body);
-        line_framer(S3Source::from_component_config(&config, rt.handle().clone()).unwrap())
+        S3Source::from_component_config(&config, rt.handle(), line_framer).unwrap()
     };
     let (feed, script) = scripted_feed();
     source().list_once(&section, Arc::new(feed)).unwrap();
@@ -1502,7 +1496,7 @@ fn a_resumed_lister_run_publishes_the_ids_of_an_uninterrupted_one() {
             gw.store_options_yaml()
         );
         let config = spate_test::component_config("s3", &body);
-        line_framer(S3Source::from_component_config(&config, rt.handle().clone()).unwrap())
+        S3Source::from_component_config(&config, rt.handle(), line_framer).unwrap()
     };
     let units = |script: &spate_test::FeedScript| -> Vec<(String, Vec<String>)> {
         script
@@ -1687,46 +1681,6 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
     assert_eq!(hooks.requests(), 0);
 }
 
-/// Pins that a lister run refuses a source with no framer as fatal, before
-/// it publishes.
-#[test]
-fn a_lister_run_refuses_a_source_with_no_framer() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = data_dir(&dir);
-    let (location, _) = file_location(&dir);
-    let rt = runtime();
-    let (feed, script) = scripted_feed();
-    let config =
-        spate_test::component_config("s3", &format!("url: \"file://{}/\"\n", data.display()));
-    let err = S3Source::from_component_config(&config, rt.handle().clone())
-        .unwrap()
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
-        .unwrap_err();
-    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
-    assert!(err.reason().contains("with_framer"), "{err}");
-    assert!(script.published().is_empty());
-}
-
-/// Pins that a lister run refuses a config that fails validation as fatal,
-/// before it publishes. Built with `S3Source::new`, since
-/// `from_component_config` would refuse it early.
-#[test]
-fn a_lister_run_refuses_an_invalid_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = data_dir(&dir);
-    let (location, _) = file_location(&dir);
-    let rt = runtime();
-    let (feed, script) = scripted_feed();
-    let mut config = spate_s3::S3SourceConfig::new(format!("file://{}/", data.display()));
-    config.chunk_bytes = bytesize::ByteSize::b(0);
-    let err = line_framer(S3Source::new(config, rt.handle().clone()))
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
-        .unwrap_err();
-    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
-    assert!(err.reason().contains("chunk_bytes"), "{err}");
-    assert!(script.published().is_empty());
-}
-
 /// Pins that a lister run called from a thread in a Tokio runtime context
 /// refuses: from async code, where blocking on the I/O handle would panic,
 /// from a `spawn_blocking` closure and under a `Handle::enter` guard.
@@ -1784,7 +1738,7 @@ fn launch_solo(data: &Path, store: Arc<dyn object_store::ObjectStore>) -> Launch
         &yaml,
         test_options(),
         |_| {},
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     )
 }
 
@@ -1885,7 +1839,7 @@ fn a_solo_run_reads_while_it_lists() {
         test_options(),
         |_| {},
         Arc::new(feed.clone()),
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     );
     wait_until(
         DEADLINE,
@@ -1924,7 +1878,7 @@ fn a_solo_run_reads_small_objects_as_one_unit() {
         test_options(),
         |_| {},
         Arc::new(feed.clone()),
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     );
     wait_until(DEADLINE, "every row is written", || {
         captured_rows(&l.script).len() == all.len() && feed.counts().acknowledged >= 1
@@ -2004,7 +1958,7 @@ fn a_stopping_solo_run_receives_nothing_more_from_its_lister() {
         |sink| sink.enqueue_global(WriteOutcome::ok().held()),
         Arc::new(AsMemory(feed)),
         StopClock::frozen(),
-        |source, _io| line_framer(source),
+        |source, _io| source,
     );
     // The lister cuts `a.ndjson` into two range units, and `b` and `c`
     // share a unit unless `a` lists between them.
@@ -2138,7 +2092,7 @@ fn a_panicked_solo_lister_fails_the_run() {
         test_options(),
         |_| {},
         Arc::new(PanickingPublish(MemoryFeed::new())),
-        move |source, _io| line_framer(source).with_store(store),
+        move |source, _io| source.with_store(store),
     );
     let reason = failure_reason(&exit(&l));
     assert!(reason.contains("lister ended"), "{reason}");

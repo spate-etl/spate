@@ -31,7 +31,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseRowBinaryEncoder, ClickHouseSinkBuilder};
+use spate::clickhouse::ClickHouseSinkBuilder;
 use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
 use spate::kafka::KafkaSource;
@@ -471,7 +471,7 @@ impl Harness {
             .connect::<spate::deser::Owned<Event>>(),
         );
         let sink = sink.expect("schema fetch");
-        let schema = sink.schema();
+        let encoder = sink.encoder::<spate::deser::Owned<Event>>();
 
         let chunk_bytes = params.chunk_bytes;
         let runtime = pipeline
@@ -485,9 +485,7 @@ impl Harness {
                     .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
-                        ClickHouseRowBinaryEncoder::<spate::deser::Owned<Event>>::new(
-                            schema.clone(),
-                        ),
+                        encoder.clone(),
                         KeyHashRouter,
                         ChunkConfig {
                             target_bytes: chunk_bytes,

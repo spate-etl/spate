@@ -31,9 +31,9 @@
 //! 3. `AvroDeserializerBuilder::build_serde::<OrderPlaced>()` — the typed
 //!    decoder. The YAML uses `mode: raw` with an inline writer schema, so no
 //!    registry is needed.
-//! 4. `sink.native_schema()` — fetches `system.columns` and builds the columnar
-//!    template; `ClickHouseNativeEncoder::new` mints one encoder per shard on
-//!    `.clone()`.
+//! 4. `sink.encoder()` — the encoder for the sink's `format: native`, built
+//!    from the `system.columns` the sink fetched; the chain clones one per
+//!    shard.
 //! 5. `.flat_map` fans out the line array; `.filter` drops a line ordering no
 //!    units. Native column mapping is **positional**, off `OrderLineRow`'s
 //!    field declaration order via `#[derive(ClickHouseRow)]`, with a
@@ -98,7 +98,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{self, ClickHouseNativeEncoder, ClickHouseRow, DateTime64Millis, ShardKey};
+use spate::clickhouse::{self, ClickHouseRow, DateTime64Millis, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = sink.router::<Owned<OrderLineRow>>(order_key);
     // ANCHOR_END: router
     // ANCHOR: encoder
-    let encoder = ClickHouseNativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
+    let encoder = sink.encoder::<Owned<OrderLineRow>>();
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────
@@ -207,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `filter` drops a line that orders nothing. It is the only bad quantity
     // the filter can see: `qty` is unsigned, so a negative one fails to decode
     // and takes the whole order with it, one stage earlier.
-    // `ClickHouseNativeEncoder::encode` then writes each field into its
+    // The Native encoder then writes each field into its
     // per-column buffer on the pipeline thread, inside the terminal
     // sink-handoff stage.
     let report = pipeline

@@ -4,7 +4,8 @@
 
 use bytes::{Bytes, BytesMut};
 use serde::Serialize;
-use spate_clickhouse::{Compression, serialize_row};
+use spate_clickhouse::Compression;
+use spate_clickhouse::testing::serialize_row;
 use spate_core::sink::SealedBatch;
 
 /// `rows` encoded as a sealed batch of `frames` frames, the earlier frames

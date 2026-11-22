@@ -64,7 +64,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{self, ClickHouseNativeEncoder, ClickHouseRow, ShardKey};
+use spate::clickhouse::{self, ClickHouseRow, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -159,10 +159,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
     let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);
-    let payments_enc =
-        ClickHouseNativeEncoder::<Owned<PaymentRow>>::new(payments_sink.native_schema()?);
-    let refunds_enc =
-        ClickHouseNativeEncoder::<Owned<RefundRow>>::new(refunds_sink.native_schema()?);
+    let payments_enc = payments_sink.encoder::<Owned<PaymentRow>>();
+    let refunds_enc = refunds_sink.encoder::<Owned<RefundRow>>();
 
     // ── The chain, and run ──────────────────────────────────────────────
     // ANCHOR: install_sinks

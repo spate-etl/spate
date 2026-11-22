@@ -13,7 +13,7 @@
 )]
 
 use serde::Serialize;
-use spate_clickhouse::{ClickHouseNativeEncoder, NativeSchema};
+use spate_clickhouse::testing::{ClickHouseNativeEncoder, NativeSchema, native_format_encoder};
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::error::SinkError;
@@ -298,7 +298,9 @@ impl Rig {
                 chain_owned::<Event, _>(json.clone())
                     .map(EventRow::from)
                     .sink(
-                        ClickHouseNativeEncoder::<Owned<EventRow>>::new(Arc::clone(&schema)),
+                        native_format_encoder(ClickHouseNativeEncoder::<Owned<EventRow>>::new(
+                            Arc::clone(&schema),
+                        )),
                         KeyHashRouter,
                         chunk,
                         ctx.queues,

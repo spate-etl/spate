@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use spate_clickhouse::ClickHouseRow;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
-use spate_clickhouse::serialize_row;
+use spate_clickhouse::testing::serialize_row;
 use spate_clickhouse::testing::{ColumnRow, system_columns};
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
@@ -179,9 +179,14 @@ async fn capacity_class_exceptions_stay_retryable() {
 
 /// The error from building a sink whose schema fetch cannot succeed.
 async fn failed_sink(url: &str) -> spate_clickhouse::SchemaError {
+    failed_sink_as(url, "rowbinary").await
+}
+
+async fn failed_sink_as(url: &str, format: &str) -> spate_clickhouse::SchemaError {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
+format: {format}
 compression: off
 shards:
   - replicas: ["{url}"]
@@ -202,11 +207,10 @@ async fn matching_schema_passes_and_first_record_encodes() {
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
     let sink = sink_for(mock.url()).await;
-    let schema = sink.schema();
 
     // The first-record struct check passes and the bytes are the row's alone:
     // the header is the writer's, not the encoder's.
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<TestRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<TestRow>>();
     let row = TestRow {
         id: 7,
         name: "x".into(),
@@ -239,10 +243,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
 
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
-    let schema = sink_for(mock.url()).await.schema();
-
-    let mut encoder =
-        spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<WrongOrder>>::new(schema);
+    let mut encoder = sink_for(mock.url()).await.encoder::<Owned<WrongOrder>>();
     let err = encoder
         .encode(
             &record(WrongOrder {
@@ -280,8 +281,9 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
 
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
-    let schema = sink_for(mock.url()).await.schema();
-    let err = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<WrongType>>::new(schema)
+    let err = sink_for(mock.url())
+        .await
+        .encoder::<Owned<WrongType>>()
         .encode(&record(wrong), &mut BytesMut::new())
         .expect_err("the type check runs on every sink");
     let reason = err.reason();
@@ -294,7 +296,7 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
 
 #[tokio::test]
 async fn the_native_encoder_checks_wrapper_scale_against_the_fetched_precision() {
-    use spate_clickhouse::{ClickHouseNativeEncoder, DateTime64Millis};
+    use spate_clickhouse::DateTime64Millis;
     use spate_core::sink::RowEncoder;
 
     #[derive(Clone, Serialize, ClickHouseRow)]
@@ -332,11 +334,9 @@ shards:
         &mock,
         system_columns(&[("id", "UInt64", ""), ("ts", "DateTime64(6)", "")]),
     );
-    let schema = native_sink(mock.url())
+    let err = native_sink(mock.url())
         .await
-        .native_schema()
-        .expect("build native schema");
-    let err = ClickHouseNativeEncoder::<Owned<EventRow>>::new(schema)
+        .encoder::<Owned<EventRow>>()
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     let reason = err.reason();
@@ -352,18 +352,16 @@ shards:
         &mock,
         system_columns(&[("id", "UInt64", ""), ("ts", "DateTime64(3)", "")]),
     );
-    let schema = native_sink(mock.url())
+    native_sink(mock.url())
         .await
-        .native_schema()
-        .expect("build native schema");
-    ClickHouseNativeEncoder::<Owned<EventRow>>::new(schema)
+        .encoder::<Owned<EventRow>>()
         .encode(&record(row), &mut BytesMut::new())
         .expect("matching precision encodes");
 }
 
 #[tokio::test]
 async fn both_encoders_check_decimal_scale_against_the_fetched_column() {
-    use spate_clickhouse::{ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, Decimal64};
+    use spate_clickhouse::Decimal64;
     use spate_core::sink::RowEncoder;
 
     #[derive(Clone, Serialize, ClickHouseRow)]
@@ -412,20 +410,19 @@ shards:
     // record, before any frame is written.
     let mock = Mock::new();
     answer_build(&mock, mismatched_columns());
-    let schema = price_sink(mock.url(), "rowbinary").await.schema();
-    let err = ClickHouseRowBinaryEncoder::<Owned<PriceRow>>::new(schema)
+    let err = price_sink(mock.url(), "rowbinary")
+        .await
+        .encoder::<Owned<PriceRow>>()
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
 
-    // Native reaches the same check through its own schema.
+    // Native runs the same check.
     let mock = Mock::new();
     answer_build(&mock, mismatched_columns());
-    let schema = price_sink(mock.url(), "native")
+    let err = price_sink(mock.url(), "native")
         .await
-        .native_schema()
-        .expect("build native schema");
-    let err = ClickHouseNativeEncoder::<Owned<PriceRow>>::new(schema)
+        .encoder::<Owned<PriceRow>>()
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
@@ -435,18 +432,17 @@ shards:
 
     let mock = Mock::new();
     answer_build(&mock, agreeing());
-    let schema = price_sink(mock.url(), "rowbinary").await.schema();
-    ClickHouseRowBinaryEncoder::<Owned<PriceRow>>::new(schema)
+    price_sink(mock.url(), "rowbinary")
+        .await
+        .encoder::<Owned<PriceRow>>()
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect("rowbinary encodes an agreeing scale");
 
     let mock = Mock::new();
     answer_build(&mock, agreeing());
-    let schema = price_sink(mock.url(), "native")
+    price_sink(mock.url(), "native")
         .await
-        .native_schema()
-        .expect("build native schema");
-    ClickHouseNativeEncoder::<Owned<PriceRow>>::new(schema)
+        .encoder::<Owned<PriceRow>>()
         .encode(&record(row), &mut BytesMut::new())
         .expect("native encodes an agreeing scale");
 }
@@ -490,23 +486,158 @@ async fn a_column_type_past_what_clickhouse_accepts_fails_startup() {
             "declared column `name` has a FixedString wider than 16777215 bytes",
         ),
     ] {
-        let mock = Mock::new();
-        mock.add(handlers::provide(system_columns(&[
-            ("id", "UInt64", ""),
-            ("name", ty, ""),
-            ("score", "Nullable(Float64)", ""),
-        ])));
-        let err = failed_sink(mock.url()).await;
-        assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
-        let msg = err.to_string();
-        assert!(msg.contains(says), "{msg}");
-        assert!(msg.len() < 2048, "the error shows {} bytes", msg.len());
+        for format in ["rowbinary", "native"] {
+            let mock = Mock::new();
+            mock.add(handlers::provide(system_columns(&[
+                ("id", "UInt64", ""),
+                ("name", ty, ""),
+                ("score", "Nullable(Float64)", ""),
+            ])));
+            let err = failed_sink_as(mock.url(), format).await;
+            assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+            let msg = err.to_string();
+            assert!(msg.contains(says), "{format}: {msg}");
+            assert!(
+                msg.len() < 2048,
+                "{format}: the error shows {} bytes",
+                msg.len()
+            );
+        }
     }
 }
 
+/// Pins that `format: native` refuses, at `connect`, a declared column whose
+/// type the Native format does not support, with the whole schema diff,
+/// and that `rowbinary` builds the same table.
+#[tokio::test]
+async fn native_refuses_a_column_it_cannot_write_at_connect() {
+    let columns = || {
+        system_columns(&[
+            ("id", "UInt64", ""),
+            ("name", "Time64(3)", ""),
+            ("score", "Nullable(Float64)", ""),
+        ])
+    };
+    let mock = Mock::new();
+    mock.add(handlers::provide(columns()));
+    let err = failed_sink_as(mock.url(), "native").await;
+    assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "sink.clickhouse: schema validation failed for `orders` (replica {}):\n  \
+             - declared column `name` has type `Time64(3)`, which the Native format does not support\n  \
+             table columns:      id UInt64, name Time64(3), score Nullable(Float64)\n  \
+             declared columns:   id, name, score",
+            mock.url()
+        )
+    );
+
+    let mock = Mock::new();
+    answer_build(&mock, columns());
+    let sink = sink_with_format(mock.url(), "rowbinary").await;
+    assert_eq!(sink.format(), config::Format::RowBinary);
+}
+
+/// Pins that the refusal shows a server-sent type cut to a bounded length.
+#[tokio::test]
+async fn native_refusal_cuts_a_long_type() {
+    let long = format!("Variant({}String)", "Int64, ".repeat(60));
+    assert!(long.len() > 400);
+    let mock = Mock::new();
+    mock.add(handlers::provide(system_columns(&[
+        ("id", "UInt64", ""),
+        ("name", long.as_str(), ""),
+        ("score", "Nullable(Float64)", ""),
+    ])));
+    let msg = failed_sink_as(mock.url(), "native").await.to_string();
+    let shown = format!("{}…", &long[..256]);
+    assert!(
+        msg.contains(&format!(
+            "declared column `name` has type `{shown}`, which the Native"
+        )),
+        "{msg}"
+    );
+    assert!(!msg.contains(&long), "{msg}");
+    assert!(msg.len() < 2048, "the error shows {} bytes", msg.len());
+}
+
+async fn sink_with_format(url: &str, format: &str) -> config::ClickHouseSink {
+    let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        "table: orders\nformat: {format}\ncompression: off\nshards:\n  - replicas: [\"{url}\"]\n"
+    ))
+    .expect("config yaml");
+    ClickHouseSinkBuilder::new(cfg)
+        .expect("valid sink config")
+        .connect::<Owned<TestRow>>()
+        .await
+        .expect("schema fetch and column check")
+}
+
+/// Pins that the sink's encoder writes the configured format, byte for byte
+/// as the concrete encoder for that format writes a chunk.
+#[tokio::test]
+async fn the_encoder_follows_the_configured_format() {
+    use spate_clickhouse::testing::{ClickHouseNativeEncoder, NativeSchema};
+    use spate_core::sink::RowEncoder;
+
+    let rows = [
+        TestRow {
+            id: 7,
+            name: "x".into(),
+            score: None,
+        },
+        TestRow {
+            id: 8,
+            name: "yz".into(),
+            score: Some(0.5),
+        },
+    ];
+    fn chunk<E: RowEncoder<Owned<TestRow>>>(enc: &mut E, rows: &[TestRow]) -> BytesMut {
+        let mut buf = BytesMut::new();
+        for row in rows {
+            enc.encode(&record(row.clone()), &mut buf).expect("encode");
+        }
+        enc.finish_chunk(&mut buf).expect("finish the chunk");
+        buf
+    }
+
+    let mock = Mock::new();
+    answer_build(&mock, matching_columns());
+    let sink = sink_with_format(mock.url(), "rowbinary").await;
+    assert_eq!(sink.format(), config::Format::RowBinary);
+    let mut expected = BytesMut::new();
+    for row in &rows {
+        serialize_row(row, &mut expected).expect("encode");
+    }
+    assert_eq!(
+        chunk(&mut sink.encoder::<Owned<TestRow>>(), &rows),
+        expected
+    );
+
+    let mock = Mock::new();
+    answer_build(&mock, matching_columns());
+    let sink = sink_with_format(mock.url(), "native").await;
+    assert_eq!(sink.format(), config::Format::Native);
+    let schema = NativeSchema::from_columns(&[
+        ("id", "UInt64"),
+        ("name", "String"),
+        ("score", "Nullable(Float64)"),
+    ])
+    .expect("schema builds");
+    let expected = chunk(
+        &mut ClickHouseNativeEncoder::<Owned<TestRow>>::new(schema),
+        &rows,
+    );
+    assert_eq!(
+        chunk(&mut sink.encoder::<Owned<TestRow>>(), &rows),
+        expected
+    );
+}
+
 /// Pins that a declared column's type at the deepest nesting the schema
-/// check accepts builds the sink and its native schema on a test thread's
-/// 2 MiB stack, for each type that recurses per level.
+/// check accepts builds the sink in both formats on a test thread's 2 MiB
+/// stack, for each type that recurses per level.
 #[tokio::test]
 async fn the_deepest_accepted_column_type_builds_the_sink() {
     let nest = |open: &str, close: &str, n: usize, leaf: &str| {
@@ -533,16 +664,11 @@ async fn the_deepest_accepted_column_type_builds_the_sink() {
                 mock.url()
             ))
             .expect("config yaml");
-            let sink = ClickHouseSinkBuilder::new(cfg)
+            ClickHouseSinkBuilder::new(cfg)
                 .expect("valid sink config")
                 .connect::<Owned<TestRow>>()
                 .await
                 .unwrap_or_else(|e| panic!("{format}: {e}"));
-            if format == "native" {
-                // The native writer may refuse a shape it cannot encode; it
-                // must answer without exhausting the stack.
-                let _ = sink.native_schema();
-            }
         }
     }
 }

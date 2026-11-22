@@ -38,10 +38,9 @@ async fn insert_alone_reaches_system_columns() {
     let sink = as_writer("orders")
         .await
         .expect("INSERT alone reads system.columns");
-    let schema = sink.schema();
 
     // And the write the grant is for goes through, managed settings included.
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<Order>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<Order>>();
     let batch = encode_batch(
         &mut encoder,
         vec![Order {

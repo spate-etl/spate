@@ -18,7 +18,9 @@ object_store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 spate-bench = { workspace = true }
-spate-clickhouse = { workspace = true }
+# `testing`: `NativeSchema::from_columns` and `ClickHouseNativeEncoder`, to
+# encode without a table.
+spate-clickhouse = { workspace = true, features = ["testing"] }
 spate-core = { workspace = true, features = ["testing"] }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }

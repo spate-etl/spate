@@ -54,9 +54,9 @@ per-entry.
 ## Wiring: one sink, encoder, and router per table
 
 Each table is an ordinary `ClickHouseSink`, built from its named config section,
-minting its own Native encoder (from *its* `system.columns`) and its own shard
-router before `add_sink(name, ...)` moves it into its worker pool. That is the
-single-sink wiring, N times. The whole program is
+handing out its own encoder (from *its* `system.columns` and *its* `format`) and
+its own shard router before `add_sink(name, ...)` moves it into its worker pool.
+That is the single-sink wiring, N times. The whole program is
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs); it
 needs a Kafka topic of Avro storefront-event messages and both target tables,
 and runs with
@@ -66,8 +66,8 @@ and runs with
 ```
 
 `payments_sink` and `refunds_sink` come from the `sinks:` map's `payments` and
-`refunds` entries, resolved by `sink_config(name)`. Each mints a
-`ClickHouseNativeEncoder` over the row family that table receives
+`refunds` entries, resolved by `sink_config(name)`. Each hands out an encoder
+through `encoder()` over the row family that table receives
 (`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different columns)
 from its own fetched schema, and a `ClickHouseDistributedRouter` over the same
 family from the `ShardKey` extractors `payment_key` and `refund_key`, which

@@ -7,7 +7,7 @@
 // server-parsed literals, compared column by column.
 
 use super::*;
-use spate_clickhouse::{ClickHouseNativeEncoder, Int256, MultiPolygon, Polygon, Ring, UInt256};
+use spate_clickhouse::{Int256, MultiPolygon, Polygon, Ring, UInt256};
 
 #[derive(Serialize, ClickHouseRow)]
 struct EdgeRow {
@@ -61,8 +61,7 @@ async fn native_edge_case_columns_match_the_literal_row() {
         "format: native\nuser: default\npassword: edges-secret\n",
     )
     .await;
-    let schema = sink.native_schema().expect("native schema");
-    let mut encoder = ClickHouseNativeEncoder::<Owned<EdgeRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<EdgeRow>>();
     let batch = encode_native_batch(&mut encoder, vec![edge_row()], "edges-1").expect("encode");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)

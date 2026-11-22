@@ -68,7 +68,7 @@
 // ANCHOR: imports
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{self, ClickHouseRow, ClickHouseRowBinaryEncoder, DateTime64Millis};
+use spate::clickhouse::{self, ClickHouseRow, DateTime64Millis};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -168,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The encoder carries that same schema, and checks the row struct against
     // it on the first record each pipeline thread encodes.
     // ANCHOR: encoder
-    let encoder = ClickHouseRowBinaryEncoder::<Owned<OrderRow>>::new(sink.schema());
+    let encoder = sink.encoder::<Owned<OrderRow>>();
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────

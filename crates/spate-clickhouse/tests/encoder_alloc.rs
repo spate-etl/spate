@@ -5,10 +5,12 @@
 use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use serde::Serialize;
+use spate_clickhouse::ClickHouseRow;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::ClickHouseSinkConfig;
-use spate_clickhouse::testing::system_columns;
-use spate_clickhouse::{ClickHouseRow, ClickHouseRowBinaryEncoder};
+use spate_clickhouse::testing::{
+    ClickHouseRowBinaryEncoder, rowbinary_format_encoder, system_columns,
+};
 use spate_core::deser::Owned;
 use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
@@ -25,11 +27,7 @@ struct TestRow {
     score: Option<f64>,
 }
 
-fn chunk(
-    enc: &mut ClickHouseRowBinaryEncoder<Owned<TestRow>>,
-    rows: &[Record<TestRow>],
-    buf: &mut BytesMut,
-) {
+fn chunk<E: RowEncoder<Owned<TestRow>>>(enc: &mut E, rows: &[Record<TestRow>], buf: &mut BytesMut) {
     buf.clear();
     for r in rows {
         enc.encode(r, buf).unwrap();
@@ -38,8 +36,8 @@ fn chunk(
 }
 
 /// Pins that the first-record schema check runs once per encoder: after one
-/// warm chunk, an encoder built from the sink's fetched schema allocates what
-/// the unchecked bench encoder allocates.
+/// warm chunk, the sink's encoder allocates what the unchecked bench encoder
+/// allocates.
 #[tokio::test(flavor = "current_thread")]
 async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
     let mock = Mock::new();
@@ -60,7 +58,7 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
         .connect::<Owned<TestRow>>()
         .await
         .unwrap();
-    let schema = sink.schema();
+    let mut checked = sink.encoder::<Owned<TestRow>>();
     drop(sink);
     drop(mock);
 
@@ -74,8 +72,8 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
         })
         .collect();
     let mut buf = BytesMut::with_capacity(1 << 20);
-    let mut checked = ClickHouseRowBinaryEncoder::<Owned<TestRow>>::new(schema);
-    let mut unchecked = ClickHouseRowBinaryEncoder::<Owned<TestRow>>::unchecked();
+    let mut unchecked =
+        rowbinary_format_encoder(ClickHouseRowBinaryEncoder::<Owned<TestRow>>::unchecked());
     let c = measure(|| chunk(&mut checked, &rows, &mut buf)).unwrap();
     let u = measure(|| chunk(&mut unchecked, &rows, &mut buf)).unwrap();
     assert_eq!(c, u, "checked {c:?} vs unchecked {u:?}");

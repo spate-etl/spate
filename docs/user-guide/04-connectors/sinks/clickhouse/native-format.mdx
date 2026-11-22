@@ -46,11 +46,12 @@ egress / wire size is the constraint (cross-region, metered links).
 **Keep `rowbinary` (the default) when** ETL-worker CPU is the constraint;
 RowBinary's row encode is near-memcpy-fast and hard to beat.
 
-Native also encodes a narrower set of column types, and rejects the rest at
-construction, before any row is sent. What `rowbinary` does with a column Native
-refuses varies by type, and some it refuses too, so a table holding one is a
-question for [ClickHouse column types](./column-types.mdx) rather than for the
-CPU trade above.
+Native also encodes a narrower set of column types. Under `format: native`,
+building the sink refuses a column of any other type, before any row is sent.
+What `rowbinary` does with a column Native refuses varies by type, and some it
+refuses too, so a table holding one is a question for
+[ClickHouse column types](./column-types.mdx) rather than for the CPU trade
+above.
 
 ## Enabling it
 
@@ -75,8 +76,9 @@ is the positional contract, generated as the insert column list by
 scale, which is what lets the first-record check hold it against the column's
 declared precision.
 
-The encoder is built from the schema that sink fetched, where `sink` is the
-[ClickHouse sink](./README.mdx) constructed from its config section:
+`sink.encoder()` builds the encoder from the schema that sink fetched, where
+`sink` is the [ClickHouse sink](./README.mdx) constructed from its config
+section. It writes whichever format the `format` key names:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=encoder
 ```

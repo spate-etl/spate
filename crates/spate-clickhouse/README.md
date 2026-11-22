@@ -150,7 +150,8 @@ Three checks hold the struct to the table:
 
 - `connect` reads `system.columns` from every replica of every shard before
   the pipeline starts. It fails on a column the table lacks, a column that
-  cannot be inserted into, or replicas that disagree.
+  cannot be inserted into, or replicas that disagree. Under `format: native`
+  it also fails on a column whose type the Native format does not write.
 - Each request body opens with a header naming every column and the type
   `system.columns` reported for it, and the sink sets the two settings that
   make the server check it. An `ALTER` that changes a column's type fails the
@@ -193,7 +194,8 @@ says which ones to watch.
   — every key, the `settings` passthrough, TLS and the supported server
   versions.
 - [API documentation on docs.rs](https://docs.rs/spate-clickhouse) — the
-  configuration types, the encoders, the writer and the RowBinary type mapping.
+  configuration types, the sink's encoder, the writer and the RowBinary type
+  mapping.
 - [Native format](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse/native-format)
   — when the columnar format pays for its client CPU.
 - [Multi-table split](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse/multi-table)

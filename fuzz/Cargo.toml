@@ -22,7 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 zstd = { workspace = true }
 spate-avro = { workspace = true }
-spate-clickhouse = { workspace = true }
+# `testing`: `NativeSchema`, `ClickHouseNativeEncoder` and `serialize_row`.
+spate-clickhouse = { workspace = true, features = ["testing"] }
 spate-core = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }

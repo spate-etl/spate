@@ -48,7 +48,7 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 ### Name each type a role uses for the trait it implements
 
-Name an encoder, writer, lane, batch, framer or router `<Vendor><Variant><Noun>`, where the noun is the last word of the trait it implements, such as `ClickHouseRowBinaryEncoder` for a `RowEncoder` or `S3Lane` for a `SourceLane`.
+Name an encoder, writer, lane, batch, framer or router `<Vendor><Variant><Noun>`, where the noun is the last word of the trait it implements, such as `ClickHouseFormatEncoder` for a `RowEncoder` or `S3Lane` for a `SourceLane`.
 The variant names what sets the type apart, such as its format or its shard placement, as in `ClickHouseDistributedRouter`.
 A connector with one implementor of a trait may leave the variant out, as `KafkaWriter` does.
 A role type keeps its `<Vendor><Role>` name, so `ClickHouseSink` stays as it is although it implements `SinkBundle`.

@@ -9,18 +9,19 @@ the ones it does not. The `format` key selects between them; they carry the
 same rows and differ in which column types they can express.
 
 They reach that limit differently. `format: native` is type-driven: the encoder
-builds one writer per column from the type `system.columns` reports, so a type
-it does not model is rejected **at construction**, before any row is sent, with
-an error naming the column. RowBinary never sees the column type at all. The row
-struct's field types alone decide the bytes, positionally.
+builds one writer per column from the type `system.columns` reports, so building
+the sink refuses a type it does not model, before any row is sent, with an error
+naming the column. RowBinary never sees the column type at all. The row struct's
+field types alone decide the bytes, positionally.
 
-That gives the two format columns different meanings. Under Native, `no` is a
-refusal by the encoder. Under RowBinary, `no` means no field type, wrapper or
-serde module in the crate produces the bytes the column expects, and `manual`
-means one does, on a value the row has already scaled or ordered by hand.
+That gives the two format columns different meanings. Under Native, `no` means
+building the sink refuses the column. Under RowBinary, `no` means no field type,
+wrapper or serde module in the crate produces the bytes the column expects, and
+`manual` means one does, on a value the row has already scaled or ordered by
+hand.
 
 Which Rust field, wrapper or `#[serde(with = "…")]` module a given column takes
-is in the `rowbinary` module of the
+is in the row types section of the
 [`spate-clickhouse` reference](https://docs.rs/spate-clickhouse).
 
 | ClickHouse type | RowBinary | Native | Notes |
@@ -75,7 +76,7 @@ is in the `rowbinary` module of the
 | `Dynamic` | no | no | |
 | `SimpleAggregateFunction(f, T)` | yes | yes | The column stores the plain `T`, so the row declares the field `T` takes; Native accepts any inner it accepts on its own |
 | `AggregateFunction(f, T)` | no | no | See [Aggregate states](#aggregate-states) |
-| Any other type | no | no | Neither format is written for it. Native recognizes a closed set and refuses the rest at construction; RowBinary has no wrapper, and a plain field lands correctly only where the type's wire form happens to match one |
+| Any other type | no | no | Neither format is written for it. Native recognizes a closed set, and building the sink refuses the rest; RowBinary has no wrapper, and a plain field lands correctly only where the type's wire form happens to match one |
 
 ## Aggregate states
 

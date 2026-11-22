@@ -20,7 +20,8 @@
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use bytes::{Bytes, BytesMut};
-use spate_clickhouse::{ClickHouseNativeEncoder, ClickHouseRow, NativeSchema};
+use spate_clickhouse::ClickHouseRow;
+use spate_clickhouse::testing::{ClickHouseNativeEncoder, NativeSchema};
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, SealedBatch};
 

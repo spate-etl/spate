@@ -22,8 +22,8 @@ use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};
 use serde_repr::Serialize_repr;
 use spate_clickhouse::{
-    ClickHouseRowBinaryEncoder, DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256,
-    MultiPolygon, Point, Polygon, Ring, Time64Millis, TimeSeconds, UInt256,
+    DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256, MultiPolygon, Point, Polygon, Ring,
+    Time64Millis, TimeSeconds, UInt256,
 };
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -189,7 +189,7 @@ fn encoded_row() -> WideRow {
         t64: Time64Millis(3_723_250),
         // ClickHouse orders a Variant's members by type name, so `String` is
         // discriminant 0 and `UInt64` is 1; the enum declares them in that
-        // order (see the rowbinary module docs).
+        // order (see the crate docs on `Variant` ordering).
         v: Choice::Num(7),
         sagg: 42,
         lc: "repeat".into(),
@@ -223,8 +223,7 @@ async fn wide_type_table_round_trips() {
              settings: { input_format_binary_read_json_as_string: \"1\" }",
     )
     .await;
-    let schema = sink.schema();
-    let mut encoder = ClickHouseRowBinaryEncoder::<Owned<WideRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<WideRow>>();
     let batch =
         encode_batch(&mut encoder, vec![encoded_row()], "wide-1").expect("first-record check");
     sink.writer

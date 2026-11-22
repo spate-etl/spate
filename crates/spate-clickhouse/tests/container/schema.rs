@@ -64,8 +64,7 @@ async fn schema_validation_startup_scenarios() {
     // DEFAULT and the type default on insert. The insert column list is
     // narrower than the table, so the header describes a subset of it.
     let sink = sink_with::<Owned<IdOnly>>(&srv.url, "extras", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<IdOnly>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<IdOnly>>();
     let batch = encode_batch(&mut encoder, vec![IdOnly { id: 1 }], "extras-1").expect("encode");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
@@ -113,8 +112,7 @@ async fn schema_validation_first_record_scenarios() {
         amount: Option<f64>,
     }
     let sink = sink_with::<Owned<Reordered>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<Reordered>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<Reordered>>();
     let batch = encode_batch(
         &mut encoder,
         vec![Reordered {
@@ -140,8 +138,7 @@ async fn schema_validation_first_record_scenarios() {
     // The same struct against declared order [id, name, amount]: the
     // positional wire contract breaks, and the first record says so.
     let sink = sink_with::<Owned<Order>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<Reordered>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<Reordered>>();
     let err = encode_batch(
         &mut encoder,
         vec![Reordered {
@@ -166,8 +163,7 @@ async fn schema_validation_first_record_scenarios() {
         x: i32,
     }
     let sink = sink_with::<Owned<I32X>>(&srv.url, "dt_col", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<I32X>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<I32X>>();
     let err = encode_batch(&mut encoder, vec![I32X { id: 1, x: 100 }], "dt-1")
         .expect_err("i32 vs DateTime");
     let reason = fatal(err);
@@ -185,9 +181,7 @@ async fn schema_validation_first_record_scenarios() {
         amount: f64, // column is Nullable(Float64)
     }
     let sink = sink_with::<Owned<PlainAmount>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder =
-        spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<PlainAmount>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<PlainAmount>>();
     let err = encode_batch(
         &mut encoder,
         vec![PlainAmount {
@@ -206,8 +200,7 @@ async fn schema_validation_first_record_scenarios() {
         s: Option<String>, // column is plain String
     }
     let sink = sink_with::<Owned<OptS>>(&srv.url, "plain_s", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<OptS>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<OptS>>();
     let err = encode_batch(
         &mut encoder,
         vec![OptS {
@@ -227,8 +220,7 @@ async fn schema_validation_first_record_scenarios() {
         lc: String,
     }
     let sink = sink_with::<Owned<LcRow>>(&srv.url, "lowcard", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<LcRow>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<LcRow>>();
     let batch = encode_batch(
         &mut encoder,
         vec![LcRow {
@@ -273,8 +265,7 @@ async fn schema_validation_first_record_scenarios() {
     };
 
     let sink = sink_with::<Owned<Scale4>>(&srv.url, "dec_col", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<Scale4>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<Scale4>>();
     let err = encode_batch(
         &mut encoder,
         vec![Scale4 {
@@ -294,8 +285,7 @@ async fn schema_validation_first_record_scenarios() {
     // above, the same row against a scale-2 column stores 150 rather than
     // 1.5: same width, so nothing on the wire objects.
     let sink = sink_with::<Owned<Scale2>>(&srv.url, "dec_col", SERVER_CREDENTIALS).await;
-    let schema = sink.schema();
-    let mut encoder = spate_clickhouse::ClickHouseRowBinaryEncoder::<Owned<Scale2>>::new(schema);
+    let mut encoder = sink.encoder::<Owned<Scale2>>();
     let batch = encode_batch(
         &mut encoder,
         vec![Scale2 {

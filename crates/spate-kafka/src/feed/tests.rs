@@ -21,7 +21,7 @@ use super::write::{
     Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedPublisher, Ready};
-use crate::client::testing::raw_config;
+use crate::testutil::raw::raw_config;
 use crate::testutil::{assert_returns, returns_within};
 use rdkafka::Offset;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
@@ -2050,10 +2050,11 @@ mod cluster {
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, assert_returns, returns_within};
     use crate::client::read_position;
-    use crate::client::testing::{Raw as _, mark_errors, raw_config};
+    use crate::client::testing::mark_errors;
     use crate::context::Intent;
     use crate::feed::FeedRole;
     use crate::testutil::mock::MockKafka;
+    use crate::testutil::raw::{Raw as _, raw_config};
     use crate::testutil::wire::{self, Marker};
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
@@ -6485,9 +6486,9 @@ mod docker {
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
-    use crate::client::testing::{Raw as _, raw_config};
     use crate::feed::FeedRole;
     use crate::feed::KafkaFeed;
+    use crate::testutil::raw::{Raw as _, raw_config};
     use crate::testutil::topics::{ATTEMPT, WORK, feed_topics};
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;

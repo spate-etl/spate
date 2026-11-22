@@ -1,0 +1,3 @@
+**An application's own Kafka client can register OpenSSL's exit handler** (`spate-kafka`)
+
+With the `kafka-tls` feature, librdkafka 2.16.0 calls OpenSSL in the first Kafka client a process builds, whatever that client's security protocol. Spate's own clients initialise OpenSSL first, so OpenSSL registers no exit handler. An `rdkafka` client that the application builds itself before its first Spate client registers that handler. A process that then exits while a Kafka client is still running can end with SIGSEGV or SIGABRT. To avoid this, call `openssl_sys::init()` before building the application's own client. In previous versions, a client without TLS or SASL made no OpenSSL call.

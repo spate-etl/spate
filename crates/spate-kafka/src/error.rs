@@ -258,7 +258,7 @@ pub(crate) fn classify_poll_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::testing::{Raw as _, raw_config};
+    use crate::testutil::raw::{Raw as _, raw_config};
     use rdkafka::error::RDKafkaErrorCode as C;
 
     /// A start the group has moved past is discarded, a permanent code stops

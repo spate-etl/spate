@@ -202,7 +202,7 @@ impl ProducerHooks for SinkHooks {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::client::testing::{Raw as _, raw_config};
+    use crate::testutil::raw::{Raw as _, raw_config};
     use rdkafka::client::ClientContext;
     use rdkafka::producer::ProducerContext;
     use spate_core::clock::TestClock;

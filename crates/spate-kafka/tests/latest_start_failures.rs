@@ -2,11 +2,6 @@
 //! behaviour, against rdkafka's in-process MockCluster and, for a silent
 //! coordinator, a real broker.
 
-#![expect(
-    clippy::disallowed_methods,
-    reason = "test scaffolding builds its own clients and threads"
-)]
-
 mod support;
 
 /// A rebalance offer that names another topic must not move the group's commit
@@ -15,9 +10,10 @@ mod support;
 /// receives the bytes a hostile coordinator would send.
 mod another_topic {
     use crate::support::MockKafka;
+    use crate::support::{Raw as _, raw_config};
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use rdkafka::{Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
@@ -35,10 +31,10 @@ mod another_topic {
     const END: i64 = 10;
 
     fn probe(brokers: &str) -> BaseConsumer {
-        ClientConfig::new()
+        raw_config()
             .set("bootstrap.servers", brokers)
             .set("group.id", GROUP)
-            .create()
+            .build()
             .unwrap()
     }
 
@@ -56,9 +52,9 @@ mod another_topic {
         cluster.create_topic(OTHER, 1, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
 
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for i in 0..END {
             let payload = i.to_string();
@@ -501,6 +497,10 @@ mod silent_coordinator {
     }
 
     impl Proxy {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each relay thread ends when either side of its connection closes"
+        )]
         fn on(listener: TcpListener, upstream: String) -> Proxy {
             let armed = Arc::new(AtomicBool::new(false));
             let trigger = Arc::new(AtomicI16::new(OFFSET_COMMIT));
@@ -594,6 +594,7 @@ mod silent_coordinator {
 
     /// The source's deadline error, and then its drop, with the coordinator still
     /// silent. Returns what the driver thread reported, in order.
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
     fn deadline_then_drop(trigger: i16) -> (Vec<String>, Duration) {
         let (_container, proxy, brokers) = broker_behind_a_proxy();
         support::create_topic(&brokers, TOPIC, 1);
@@ -739,6 +740,10 @@ mod silent_coordinator {
     /// at the start commit.
     #[test]
     #[ignore = "requires Docker"]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test joins the thread, or leaves it behind on failure"
+    )]
     fn a_source_whose_broker_dies_at_the_start_commit_drops_at_the_startup_deadline() {
         let (kafka, proxy, brokers) = broker_behind_a_proxy();
         support::create_topic(&brokers, TOPIC, 1);
@@ -790,6 +795,10 @@ mod silent_coordinator {
     /// proxy is armed. `committed` waits for the units' commit to land before
     /// it arms the proxy. Returns the close's outcome, `None` when it had not
     /// settled within `HANG`, and whether the feed's drop then returned.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the thread ends when the feed's drop returns, or with the process"
+    )]
     fn feed_closed_in_silence(
         trigger: i16,
         committed: bool,
@@ -886,10 +895,11 @@ mod silent_coordinator {
 mod logical_committed_offset {
     use crate::support::MockKafka;
     use crate::support::wire::{request, str16};
+    use crate::support::{Raw as _, raw_config};
+    use rdkafka::Offset;
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::types::RDKafkaApiKey;
-    use rdkafka::{ClientConfig, Offset};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
     use spate_core::config::PipelineConfig;
@@ -992,9 +1002,9 @@ mod logical_committed_offset {
         cluster.track_requests();
         let brokers = cluster.bootstrap_servers();
 
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for i in 0..END {
             let payload = i.to_string();
@@ -1009,10 +1019,10 @@ mod logical_committed_offset {
         producer.flush(Duration::from_secs(30)).unwrap();
 
         raw_commit(&brokers, raw);
-        let probe: BaseConsumer = ClientConfig::new()
+        let probe: BaseConsumer = raw_config()
             .set("bootstrap.servers", &brokers)
             .set("group.id", GROUP)
-            .create()
+            .build()
             .unwrap();
         assert_eq!(committed(&probe), read, "the reply carries {raw}");
 

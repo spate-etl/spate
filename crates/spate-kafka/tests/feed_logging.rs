@@ -2,6 +2,8 @@
 
 #[path = "support/mock.rs"]
 mod mock;
+#[path = "support/raw.rs"]
+mod raw;
 
 use mock::MockKafka;
 use spate_core::config::FeedSection;

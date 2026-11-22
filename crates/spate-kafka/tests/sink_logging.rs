@@ -2,6 +2,8 @@
 
 #[path = "support/mock.rs"]
 mod mock;
+#[path = "support/raw.rs"]
+mod raw;
 #[path = "support/sink.rs"]
 mod sink;
 

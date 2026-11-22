@@ -1,0 +1,7 @@
+**Breaking:** **JSON framing is set in code, and a double split stops the pipeline at start** (`spate-json`, `spate-core`)
+
+`JsonDeserializerBuilder::framing` sets how each payload splits into documents, and the default is `JsonFraming::Single`. The `deserializer: { json: ... }` section has no `framing` key now, and a section that has one is refused as an unknown field. In previous versions `framing: ndjson` and `framing: array` set the split in YAML. `JsonFraming::Ndjson` is renamed `JsonFraming::Lines`.
+
+The JSON deserializer refuses `JsonFraming::Lines` and `JsonFraming::Array` under a source that frames one record per payload, such as the S3 source with a `JsonLinesFramer`. `run` then returns `StartError::Config` before the source opens. In previous versions only a chain that called `JsonDeserializerBuilder::for_source_framing` was refused, and a chain that did not call it split each record again. `for_source_framing` and `ChainCtx::source_framing` are removed.
+
+To migrate, remove `framing` from the pipeline file. For a source that hands over whole payloads, such as the Kafka source, call `.framing(JsonFraming::Lines)` or `.framing(JsonFraming::Array)` on the builder. Remove any call to `for_source_framing`, because the check now runs when the pipeline starts.

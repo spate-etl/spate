@@ -3,8 +3,8 @@
 //! The framework already wraps every deserializer in generic `spate_deser_*`
 //! stage metrics, but those count at **payload** granularity. A drop under
 //! `on_error: skip` leaves the `deserialize` call returning `Ok` under every
-//! framing, so the framework never sees it. Under `ndjson` the good lines around
-//! a bad one are still emitted; under `array` the whole array is dropped.
+//! framing, so the framework never sees it. Under `Lines` the good lines around
+//! a bad one are still emitted; under `Array` the whole array is dropped.
 //! [`JsonDeserMetrics`] surfaces those drops, mirroring the connector-owned
 //! convention used by `spate_kafka_source_*` / `spate_kafka_sink_*`.
 //!
@@ -45,14 +45,14 @@ impl JsonDeserMetrics {
     }
 
     /// Count one record dropped by `on_error: skip` because it did not parse
-    /// or did not match the target type. Under `array` one count is the whole
+    /// or did not match the target type. Under `Array` one count is the whole
     /// array.
     pub(crate) fn dropped_malformed(&self) {
         self.malformed.increment(1);
     }
 
     /// Count one record dropped by `on_error: skip` because it contained a
-    /// duplicate object key (`reject_duplicate_keys`). Under `array` one count
+    /// duplicate object key (`reject_duplicate_keys`). Under `Array` one count
     /// is the whole array.
     pub(crate) fn dropped_duplicate_key(&self) {
         self.duplicate_key.increment(1);

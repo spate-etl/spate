@@ -1086,10 +1086,10 @@ built with (`64 << 20` here) caps a single record's decoded bytes:
 ```
 
 A framed source emits one record per payload, so its framing contract is
-`PerRecord` and the deserializer decodes a single document. Let
-`for_source_framing` derive the deserializer's granularity from the source's
-`ctx.source_framing`. There is no hand-set `framing: single`, and a `framing:`
-that would double-frame is rejected at startup:
+`PerRecord` and the deserializer decodes a single document. The JSON
+deserializer keeps its default framing, `JsonFraming::Single`. A framing that
+would split each line again is refused when the pipeline starts, and the run
+returns an error before the source opens:
 
 ```rust file=crates/spate/examples/s3_backfill.rs region=deserializer
 ```

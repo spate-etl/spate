@@ -14,9 +14,8 @@
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
 //! through the `store` map. The S3 source is format-agnostic: we wire the
 //! format's framer into it in code, here `spate-json`'s [`JsonLinesFramer`], so
-//! it hands each NDJSON line to the chain as one payload, and
-//! `for_source_framing` then derives the JSON deserializer's `single`
-//! granularity from the source instead of it being hand-set.
+//! it hands each line to the chain as one payload, and the JSON
+//! deserializer keeps its default `JsonFraming::Single`.
 //!
 //! ```sh
 //! cargo run -p spate --features s3,json --example s3_backfill
@@ -78,10 +77,9 @@ sink: {{ capture: {{}} }}
 /// One full pipeline run; returns the rows the sink durably wrote.
 fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // The S3 source is a transport; the format supplies the framer. Wire in
-    // `spate-json`'s NDJSON framer (bounded at 64 MiB per record) so each line
-    // becomes one payload. The `deserializer: { json: {} }` section carries
-    // only decode knobs and no `framing:`, and the framework derives the
-    // granularity from the source.
+    // `spate-json`'s JSON Lines framer (bounded at 64 MiB per record) so each
+    // line becomes one payload. The `deserializer: { json: {} }` section
+    // carries only decode knobs.
     // ANCHOR: source
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
     // ANCHOR: framer

@@ -1,4 +1,4 @@
-//! Streaming NDJSON record framing.
+//! Streaming JSON Lines record framing.
 //!
 //! [`JsonLinesFramer`] is the JSON connector's
 //! [`RecordFramer`](spate_core::framing::RecordFramer): it cuts a byte *stream*
@@ -19,11 +19,12 @@
 //! ```
 //!
 //! This is the source-side counterpart to the deserializer's in-memory
-//! [`ndjson`](crate::JsonFraming::Lines) framing, which splits a whole payload
+//! [`Lines`](crate::JsonFraming::Lines) framing, which splits a whole payload
 //! already resident in RAM (a Kafka message). `JsonLinesFramer` is bounded and
 //! chunk-fed instead, for byte streams that never fit in memory. A source that
-//! frames one record per payload pairs with the deserializer's `single` mode
-//! (the [`PerRecord`](spate_core::framing::FramingContract::PerRecord) contract).
+//! frames one record per payload pairs with the deserializer's `Single`
+//! framing (the [`PerRecord`](spate_core::framing::FramingContract::PerRecord)
+//! contract).
 
 use spate_core::framing::RecordFramer;
 use std::collections::VecDeque;

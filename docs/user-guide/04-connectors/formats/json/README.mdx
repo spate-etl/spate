@@ -1,5 +1,5 @@
 ---
-description: "The JSON deserializer decodes single, NDJSON, and array framings into records. Only NDJSON with on_error skip keeps the good records around a bad one."
+description: "The JSON deserializer decodes single, JSON Lines, and array framings into records. Only JSON Lines with on_error skip keeps the good records around a bad one."
 ---
 
 # JSON format
@@ -12,7 +12,7 @@ dynamically-typed values. The framings map onto the framework's "one payload →
 Construct it from the pipeline's opaque section with
 `JsonDeserializerBuilder::from_component_config`, or from a
 `JsonDeserializerConfig` built in code with `JsonDeserializerBuilder::new`. The
-runnable NDJSON example builds one in code, starting from the config's
+runnable JSON Lines example builds one in code, starting from the config's
 `Default`:
 
 ```rust file=crates/spate/examples/json_skip_bad_records.rs region=deserializer
@@ -36,33 +36,37 @@ fields are rejected with the offending key.
 ```yaml
 deserializer:
   json:
-    framing: single              # single | ndjson | array
     on_error: skip               # skip | fail
     reject_duplicate_keys: false # error on any repeated object key
 ```
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `framing` | string | `single` | How a payload is split into documents: `single`, `ndjson`, or `array`. |
 | `on_error` | string | `skip` | Per-record policy for a document that does not parse or match the target type: `skip` (drop, and count on a chain built with `with_metrics`) or `fail` (surface a decode error). |
 | `reject_duplicate_keys` | bool | `false` | Reject (rather than silently keep the last value of) any JSON object with a duplicate key, at any depth. Parses each document a second time for the check. |
 
 ## The three framings
 
-- **`single`** — the whole payload is one JSON document → one record. The
+`JsonDeserializerBuilder::framing` sets the framing in code, with a
+`JsonFraming`. The section has no `framing` key, and one there is rejected as
+an unknown field.
+
+- **`Single`** — the whole payload is one JSON document → one record. The
   default, and what a source emitting whole payloads produces. An empty or
   whitespace-only payload is a **tombstone**: zero records, no error.
-- **`ndjson`** — newline-delimited JSON ([JSON Lines](https://jsonlines.org/)):
+- **`Lines`** — newline-delimited JSON ([JSON Lines](https://jsonlines.org/)):
   one JSON value per `\n`-separated line → one record per line. Blank lines are
   skipped. Under `on_error: skip` a malformed line is dropped and the other
   lines still decode. Under `on_error: fail` the first malformed line fails the
   whole payload; see [Error handling](#error-handling).
-- **`array`** — a top-level JSON array → one record per element, decoded in a
+- **`Array`** — a top-level JSON array → one record per element, decoded in a
   single pass. Error handling is **atomic**: one malformed element drops the
   whole array, or fails it as one payload.
 
 A source that frames its own byte stream supplies this crate's `JsonLinesFramer`
-instead, and then the granularity is derived rather than configured; see
+instead. The deserializer then keeps `Single`: under such a source it refuses
+`Lines` and `Array` when the pipeline starts, and the run returns an error
+before the source opens. See
 [Framing vs deserialization](../README.mdx#framing-vs-deserialization).
 
 ## Typed or dynamic records
@@ -81,8 +85,8 @@ record-level error, handled by `on_error`:
 
 - **`skip`** (default) — drop the record, count it in
   `spate_json_deser_records_dropped_total{reason}` on a chain built with
-  `with_metrics` (see [Metrics](#metrics)), and continue. Under `ndjson`
-  the good lines around a bad one still flow. Under `array` one bad element
+  `with_metrics` (see [Metrics](#metrics)), and continue. Under `Lines`
+  the good lines around a bad one still flow. Under `Array` one bad element
   drops the whole array.
 - **`fail`** — surface a decode error on the first bad record. Under every
   framing, no record from that payload is emitted.
@@ -106,7 +110,7 @@ ends in the line and column. With the `simd` feature a parse error gives the
 character index, and a document that does not match the record type gives no
 position.
 
-Under `ndjson` framing the position counts within the refused line, so the line
+Under `Lines` framing the position counts within the refused line, so the line
 is always 1. The text does not say which line of the payload was refused.
 
 ## Fidelity & features
@@ -151,15 +155,15 @@ small for the measurement to resolve.
 
 | Payload | Framing | c7i | c7a | c8g |
 |---|---|---:|---:|---:|
-| Event lines of about 600 bytes, nested and mostly strings | `ndjson` | under 5% | −7.7% | +13.4% |
-| Flat records of seven fields | `ndjson` | under 5% | −9.3% | under 5% |
-| Flat records of seven fields | `array` | −8.5% | −15.0% | −16.4% |
-| One array of 40 objects, each nested 64 levels deep | `single` | −7.9% | −13.3% | −12.9% |
-| One string of half a megabyte | `single` | −44.4% | −73.7% | −26.3% |
-| An array of 40,000 numbers | `single` | +113.4% | +162.3% | +58.9% |
-| One object of 4,000 fields | `single` | under 5% | under 5% | −5.5% |
+| Event lines of about 600 bytes, nested and mostly strings | `Lines` | under 5% | −7.7% | +13.4% |
+| Flat records of seven fields | `Lines` | under 5% | −9.3% | under 5% |
+| Flat records of seven fields | `Array` | −8.5% | −15.0% | −16.4% |
+| One array of 40 objects, each nested 64 levels deep | `Single` | −7.9% | −13.3% | −12.9% |
+| One string of half a megabyte | `Single` | −44.4% | −73.7% | −26.3% |
+| An array of 40,000 numbers | `Single` | +113.4% | +162.3% | +58.9% |
+| One object of 4,000 fields | `Single` | under 5% | under 5% | −5.5% |
 
-The record rows decode into a struct, and the `single` rows decode into
+The record rows decode into a struct, and the `Single` rows decode into
 `serde_json::Value`. The figures come from the
 [`decode_wall.rs`](repo:crates/spate-json/benches/decode_wall.rs) bench, run
 with `simd-json` 0.19 and `serde_json` 1.0 over 20 interleaved replicates.
@@ -210,8 +214,8 @@ families exist only on a chain built with `.with_metrics(pipeline, component)`.
 The family exists because the framework's payload-granular `spate_deser_*` stage
 metrics cannot see a drop under `on_error: skip`. Under every framing the
 `deserialize` call returns `Ok` after the drop, so no
-`spate_deser_records_total{outcome="error"}` is counted. Under `ndjson` the good
-lines around a bad one are still emitted. Under `array` the whole array is
+`spate_deser_records_total{outcome="error"}` is counted. Under `Lines` the good
+lines around a bad one are still emitted. Under `Array` the whole array is
 dropped.
 
 The family carries the standard labels with the values of the chain's

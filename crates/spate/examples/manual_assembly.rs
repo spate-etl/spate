@@ -219,11 +219,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 4. The runtime — what `.chains` + `.into_runtime` do ────────────
     // The factory takes a bare thread index and threads the queues, budget
     // and pipeline name itself, covering most of what `ChainCtx` carries.
-    // The rest is `source_framing`, read from `Source::framing_contract`
-    // before the source moves into the runtime so a deserializer derives its
-    // granularity from the source rather than restating it (this chain's
-    // deserializer takes none), and, for a split pipeline, each named sink's
-    // queues and chunking.
+    // The rest, for a split pipeline, is each named sink's queues and
+    // chunking.
     //
     // The contract `ChainCtx` discharges structurally is yours here: every
     // `ShardQueues` clone must die with the chains that hold it, because the

@@ -189,7 +189,7 @@ impl DecoderCore {
     ) -> Result<(), DeserError> {
         // The array is decoded in one pass, so its error handling is atomic:
         // a malformed element fails the whole payload (per `on_error`). Use
-        // `ndjson` with `on_error: skip` when you need per-record isolation.
+        // `Lines` with `on_error: skip` when you need per-record isolation.
         if self.reject_duplicate_keys
             && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {

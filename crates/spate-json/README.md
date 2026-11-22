@@ -29,12 +29,13 @@ section. An unknown key is rejected.
 ```yaml
 deserializer:
   json:
-    framing: single               # single | ndjson | array
     on_error: skip                # skip | fail
     reject_duplicate_keys: false  # true: a repeated object key is an error
 ```
 
-Each value above is the default.
+Each value above is the default. Framing is set in code, with
+`JsonDeserializerBuilder::framing`. A `framing` key in the section is rejected
+as an unknown key.
 
 With `reject_duplicate_keys: false`, `build_value()` keeps the last value of a
 repeated key. A `#[derive(Deserialize)]` struct rejects a repeated field on its
@@ -57,12 +58,13 @@ has the full key table.
 
 ## Framings
 
-`framing` decides how many records one payload yields:
+`JsonDeserializerBuilder::framing` takes a `JsonFraming`, which decides how many
+records one payload yields. The default is `Single`.
 
-- `single` — the whole payload is one document and yields one record.
-- `ndjson` — newline-delimited JSON. Each `\n`-separated line is one document
+- `Single` — the whole payload is one document and yields one record.
+- `Lines` — newline-delimited JSON. Each `\n`-separated line is one document
   and yields one record. Blank lines are skipped.
-- `array` — the payload is one top-level JSON array, decoded in one pass. Each
+- `Array` — the payload is one top-level JSON array, decoded in one pass. Each
   element yields one record.
 
 Under every framing, an empty or whitespace-only payload is a tombstone: it
@@ -77,9 +79,10 @@ counting that `\r`, is an error. `S3Source::with_framer` takes a factory that bu
 `s3_backfill.rs` wires one in.
 
 Exactly one side frames. A source with a framer hands over one record per
-payload, and `for_source_framing` then keeps `single` and returns an error for
-`ndjson` or `array`. A source that hands over whole payloads, such as the Kafka
-source, leaves the configured `framing` in force.
+payload, and under it the deserializer refuses `Lines` and `Array` when the
+pipeline starts, so the run returns an error before the source opens. A source
+that hands over whole payloads, such as the Kafka source, leaves the framing set
+on the builder in force.
 [Framing vs deserialization](https://spate.kainth.dev/docs/user-guide/connectors/formats#framing-vs-deserialization)
 explains the split.
 
@@ -90,8 +93,8 @@ under `reject_duplicate_keys` is a record error. `on_error` decides what the
 decoder does with it:
 
 - `skip` (the default) drops the record and decodes the rest of the payload.
-  Under `ndjson` the good lines around a bad one still produce records. Under
-  `array` one bad element drops the whole array.
+  Under `Lines` the good lines around a bad one still produce records. Under
+  `Array` one bad element drops the whole array.
 - `fail` returns a decode error at the first bad record, and the decoder emits
   no record from that payload under any framing.
 
@@ -109,9 +112,9 @@ past it once the rest of its batch is written.
 Drops under `on_error: skip` log a rate-limited `WARN`. The line carries the
 record's partition and offset, and an error text that holds the kind of failure,
 with no content from the record. The text gives a position where the parser
-reports one, counted within the refused line under `ndjson`. The crate also counts
-each drop, on a chain built with `with_metrics`. A dropped array counts once.
-The framework's deserializer metrics on the same chain count each payload that
+reports one, counted within the refused line under `Lines`. The crate also
+counts each drop, on a chain built with `with_metrics`. A dropped array counts
+once. The framework's deserializer metrics on the same chain count each payload that
 the chain's `Skip` policy drops, and never see these drops, because the decode
 call succeeds.
 
@@ -153,8 +156,8 @@ their labels.
 - [API documentation on docs.rs](https://docs.rs/spate-json) — the builder, both
   deserializers, the config types and `JsonLinesFramer`.
 - [`json_skip_bad_records.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/json_skip_bad_records.rs)
-  — one NDJSON payload with a malformed line skipped and counted, with nothing
-  installed
+  — one JSON Lines payload with a malformed line skipped and counted, with
+  nothing installed
   (`cargo run -p spate --features json --example json_skip_bad_records`).
 - [`s3_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_backfill.rs)
   — `JsonLinesFramer` wired into the S3 source over a staged local directory

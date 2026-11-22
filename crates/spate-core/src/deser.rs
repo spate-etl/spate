@@ -8,7 +8,9 @@
 //! the provided [`Owned`] family.
 
 use crate::checkpoint::AckRef;
+use crate::config::ConfigError;
 use crate::error::DeserError;
+use crate::framing::FramingContract;
 use crate::metrics::Meter;
 use crate::metrics::names::DESERIALIZER_DEFAULT;
 use crate::record::{Flow, RawPayload, Record};
@@ -75,6 +77,25 @@ pub trait Deserializer<F: RecFamily>: Send {
     ///
     /// A deserializer that wraps another passes it on.
     fn attach_metrics(&mut self, _cx: DeserMetricsCtx) {}
+
+    /// Accept or refuse a source that frames its payloads as `source`. The
+    /// runtime calls it once per chain at start with the source's
+    /// [`framing_contract`](crate::source::Source::framing_contract), and a
+    /// refusal stops the run before the source opens.
+    ///
+    /// A deserializer that splits one payload into several records refuses
+    /// [`FramingContract::PerRecord`], since that source has already split
+    /// them. The default accepts every contract, which fits a deserializer
+    /// that decodes one record per payload.
+    ///
+    /// A deserializer that wraps another passes it on.
+    ///
+    /// # Errors
+    ///
+    /// The [`ConfigError`] the run returns, naming what to change.
+    fn check_source_framing(&self, _source: FramingContract) -> Result<(), ConfigError> {
+        Ok(())
+    }
 }
 
 /// What a chain hands its deserializer for the deserializer's own metric

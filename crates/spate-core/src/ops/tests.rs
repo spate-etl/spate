@@ -3,8 +3,10 @@
 use super::*;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
+use crate::config::{ConfigError, SectionPath};
 use crate::deser::{BytesPassthrough, Deserializer, EmitRecord, Owned, RecFamily};
 use crate::error::{DeserError, ErrorPolicy, SinkError};
+use crate::framing::FramingContract;
 use crate::metrics::names;
 use crate::record::{NO_EVENT_TIME_MS, PartitionId, RawPayload, Record};
 use crate::sink::{
@@ -340,6 +342,52 @@ impl Deserializer<Owned<Vec<u8>>> for OwnedPassthrough {
         });
         Ok(())
     }
+}
+
+/// A passthrough that refuses a source framing one record per payload, as a
+/// deserializer that splits payloads does.
+struct RefusesPerRecord;
+
+impl Deserializer<Owned<Vec<u8>>> for RefusesPerRecord {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, Vec<u8>>,
+    ) -> Result<(), DeserError> {
+        OwnedPassthrough.deserialize(raw, ack, out)
+    }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        match source {
+            FramingContract::PerRecord => {
+                Err(SectionPath::deserializer("probe").error("frames each payload"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A compiled chain answers for its deserializer when asked to accept the
+/// source's framing.
+#[test]
+fn a_compiled_chain_passes_on_its_deserializer_framing_check() {
+    let (queues, _rxs) = shard_queues(1, 64);
+    let c = chain_owned(RefusesPerRecord)
+        .sink(
+            VecEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+    let err = c
+        .check_source_framing(FramingContract::PerRecord)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "deserializer.probe: frames each payload");
+    c.check_source_framing(FramingContract::WholePayload)
+        .unwrap();
 }
 
 /// Route a row whose payload starts `s1:` to shard 1, every other row to

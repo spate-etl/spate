@@ -10,11 +10,12 @@
 
 use super::fakes::*;
 use super::*;
-use crate::config::PipelineConfig;
+use crate::config::{ConfigError, PipelineConfig, SectionPath};
 use crate::error::SourceError;
+use crate::framing::FramingContract;
 use crate::feed::memory::MemoryFeed;
 use crate::metrics::names;
-use crate::ops::RunnableChain;
+use crate::ops::{PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
@@ -122,6 +123,22 @@ fn start_prepared(
     customize: impl FnOnce(PipelineRuntime<FakeSource>, &SharedLog) -> PipelineRuntime<FakeSource>,
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
+    start_chains(config, options, prepare, customize, move |_thread, cs, log| {
+        Box::new(mode_factory(cs, log))
+    })
+}
+
+/// [`start_prepared`] with a chain factory that sees the thread index and
+/// returns any chain.
+fn start_chains(
+    config: PipelineConfig,
+    options: RuntimeOptions,
+    prepare: impl FnOnce(&mut SourceLog),
+    customize: impl FnOnce(PipelineRuntime<FakeSource>, &SharedLog) -> PipelineRuntime<FakeSource>,
+    chain_factory: impl Fn(usize, Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> Box<dyn RunnableChain>
+    + Send
+    + 'static,
+) -> Harness {
     let (source, shared, script) = FakeSource::new();
     prepare(&mut shared.lock().unwrap());
     let chain_shared = Arc::new(ChainShared::default());
@@ -135,9 +152,7 @@ fn start_prepared(
     let runtime = PipelineRuntime::new(
         config,
         source,
-        move |_thread| {
-            Box::new(mode_factory(Arc::clone(&cs), Arc::clone(&log))) as Box<dyn RunnableChain>
-        },
+        move |thread| chain_factory(thread, Arc::clone(&cs), Arc::clone(&log)),
         sink,
         budget,
     )
@@ -3144,6 +3159,102 @@ fn zero_max_records_is_refused_at_start() {
         err,
         "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1"
     );
+}
+
+/// A chain that records each framing contract it is asked to accept,
+/// refuses `refuse`, and flags its own drop.
+struct FramingChain {
+    refuse: Option<FramingContract>,
+    asked: Arc<Mutex<Vec<FramingContract>>>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl RunnableChain for FramingChain {
+    fn push_batch<'buf>(
+        &mut self,
+        _batch: &mut dyn crate::source::PayloadBatch<'buf>,
+        _from: usize,
+    ) -> PushOutcome {
+        PushOutcome::Done
+    }
+
+    fn flush(&mut self) -> PushOutcome {
+        PushOutcome::Done
+    }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        self.asked.lock().unwrap().push(source);
+        if self.refuse == Some(source) {
+            return Err(SectionPath::deserializer("probe").error("frames each payload"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FramingChain {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A chain whose deserializer refuses the source's framing stops the run
+/// before the source opens and before any driver holds a chain.
+#[test]
+fn a_chain_that_refuses_the_source_framing_stops_the_start() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let dropped: Vec<Arc<AtomicBool>> = (0..3).map(|_| Arc::default()).collect();
+    let (a, d) = (Arc::clone(&asked), dropped.clone());
+    let h = start_chains(
+        test_config(3),
+        test_options(),
+        |_| {},
+        |runtime, _| runtime,
+        move |thread, _, _| {
+            Box::new(FramingChain {
+                refuse: (thread == 1).then_some(FramingContract::PerRecord),
+                asked: Arc::clone(&a),
+                dropped: Arc::clone(&d[thread]),
+            })
+        },
+    );
+    let err = config_error_before_open(h);
+    assert_eq!(
+        err,
+        "invalid runtime configuration: deserializer.probe: frames each payload"
+    );
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [FramingContract::PerRecord, FramingContract::PerRecord],
+        "threads 0 and 1 are asked, and the refusal stops before thread 2"
+    );
+    assert!(
+        dropped[0].load(Ordering::Relaxed),
+        "the chain built before the refusal is dropped, never handed to a driver"
+    );
+}
+
+/// The contract a chain is asked about is the one the source reports.
+#[test]
+fn each_chain_is_asked_about_the_source_contract() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let a = Arc::clone(&asked);
+    let h = start_chains(
+        test_config(1),
+        test_options(),
+        |log| log.framing = Some(FramingContract::WholePayload),
+        |runtime, _| runtime,
+        move |_, _, _| {
+            Box::new(FramingChain {
+                refuse: Some(FramingContract::PerRecord),
+                asked: Arc::clone(&a),
+                dropped: Arc::default(),
+            })
+        },
+    );
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().expect("a whole-payload source starts");
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(*asked.lock().unwrap(), [FramingContract::WholePayload]);
 }
 
 /// Pins that the runtime hands a `feed:` section to the source, whose default

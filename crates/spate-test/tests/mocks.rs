@@ -4,6 +4,7 @@
 use spate_core::checkpoint::Checkpointer;
 use spate_core::deser::Deserializer;
 use spate_core::error::ErrorClass;
+use spate_core::framing::FramingContract;
 use spate_core::record::{Flow, PartitionId, RawPayload};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
@@ -529,6 +530,29 @@ fn deserializer_modes() {
         .unwrap_err();
     assert!(err.to_string().contains("test marker"));
     assert!(out.records.is_empty());
+}
+
+#[test]
+fn split_on_refuses_a_source_that_frames_each_record() {
+    const REFUSAL: &str = "deserializer: TestDeserializer::split_on splits each payload into \
+                           records, but the source already frames one record per payload; use \
+                           TestDeserializer::passthrough";
+    let split = TestDeserializer::split_on(b',');
+    let err = split
+        .check_source_framing(FramingContract::PerRecord)
+        .unwrap_err();
+    assert_eq!(err.to_string(), REFUSAL);
+    split
+        .check_source_framing(FramingContract::WholePayload)
+        .unwrap();
+    for one in [
+        TestDeserializer::passthrough(),
+        TestDeserializer::fail_on_prefix(&b"x"[..]),
+    ] {
+        one.check_source_framing(FramingContract::PerRecord).unwrap();
+        one.check_source_framing(FramingContract::WholePayload)
+            .unwrap();
+    }
 }
 
 #[test]

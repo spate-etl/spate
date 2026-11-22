@@ -46,6 +46,8 @@ pub(crate) struct SourceLog {
     pub(crate) releases: Vec<LaneId>,
     pub(crate) flush_commits: usize,
     pub(crate) opened: bool,
+    /// The contract `framing_contract` reports; `None` is `PerRecord`.
+    pub(crate) framing: Option<crate::framing::FramingContract>,
     /// Whether `open` received the framework's source-stage handles. Guards
     /// the seam a source publishes consumer lag through; if the handles never
     /// arrive, the lag gauge renders a permanent zero on every pipeline.
@@ -188,7 +190,11 @@ impl Source for FakeSource {
     // A distinctive non-default value so tests can prove the source's own
     // contract (not the trait default) reaches `ChainCtx`.
     fn framing_contract(&self) -> crate::framing::FramingContract {
-        crate::framing::FramingContract::PerRecord
+        self.shared
+            .lock()
+            .unwrap()
+            .framing
+            .unwrap_or(crate::framing::FramingContract::PerRecord)
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {

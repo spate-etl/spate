@@ -126,8 +126,10 @@ pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, 
 pub use handoff::{ChunkConfig, SinkHandoff};
 pub use split::{SplitBranch, SplitEmitter, SplitTarget, SplitTerminal};
 
+use crate::config::ConfigError;
 use crate::deser::RecFamily;
 use crate::error::FatalError;
+use crate::framing::FramingContract;
 use crate::record::{Flow, Record};
 use crate::source::PayloadBatch;
 
@@ -196,6 +198,19 @@ pub trait RunnableChain: Send {
     ///
     /// The default is a no-op for chains that keep no cross-call batch state.
     fn abandon_batch(&mut self) {}
+
+    /// Accept or refuse the source's framing, as the chain's deserializer
+    /// does through [`Deserializer::check_source_framing`](crate::deser::Deserializer::check_source_framing).
+    /// The runtime calls it once per chain at start.
+    ///
+    /// The default accepts every contract.
+    ///
+    /// # Errors
+    ///
+    /// The deserializer's refusal.
+    fn check_source_framing(&self, _source: FramingContract) -> Result<(), ConfigError> {
+        Ok(())
+    }
 }
 
 /// Push-model stage: receives one record, forwards 0..N downstream.

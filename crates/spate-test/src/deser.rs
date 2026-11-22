@@ -2,8 +2,10 @@
 
 use crate::wait_for_value;
 use spate_core::checkpoint::AckRef;
+use spate_core::config::ConfigError;
 use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
 use spate_core::error::DeserError;
+use spate_core::framing::FramingContract;
 use spate_core::record::{Flow, RawPayload, Record};
 use std::time::Duration;
 
@@ -20,7 +22,9 @@ enum Mode {
 /// - [`passthrough`](Self::passthrough): one record per payload;
 /// - [`split_on`](Self::split_on): one record per delimiter-separated
 ///   segment, exercising 1→N fan-out (`b"a,b"` → `["a", "b"]`; empty
-///   segments are emitted, so `b"a,,b"` yields three records);
+///   segments are emitted, so `b"a,,b"` yields three records). It refuses a
+///   source that frames one record per payload, so a pipeline over such a
+///   source fails at start;
 /// - [`fail_on_prefix`](Self::fail_on_prefix): payloads starting with the
 ///   marker fail with [`DeserError::Malformed`], everything else passes
 ///   through, exercising `Skip`/`Fail` error policies.
@@ -41,7 +45,9 @@ impl TestDeserializer {
         }
     }
 
-    /// One record per `delimiter`-separated segment of the payload.
+    /// One record per `delimiter`-separated segment of the payload. A
+    /// pipeline whose source reports
+    /// [`FramingContract::PerRecord`] refuses to start with it.
     #[must_use]
     pub fn split_on(delimiter: u8) -> Self {
         TestDeserializer {
@@ -94,6 +100,19 @@ impl Deserializer<Owned<Vec<u8>>> for TestDeserializer {
             }
         }
         Ok(())
+    }
+
+    fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
+        match (&self.mode, source) {
+            (Mode::SplitOn(_), FramingContract::PerRecord) => Err(ConfigError::Component {
+                context: "deserializer".to_owned(),
+                message: "TestDeserializer::split_on splits each payload into records, but the \
+                          source already frames one record per payload; use \
+                          TestDeserializer::passthrough"
+                    .to_owned(),
+            }),
+            _ => Ok(()),
+        }
     }
 }
 

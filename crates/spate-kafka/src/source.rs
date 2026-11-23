@@ -456,6 +456,16 @@ fn poll_order(
 impl KafkaSource {
     /// A source over `config`.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    ///
+    /// # fn main() -> Result<(), spate_core::config::ConfigError> {
+    /// let source = KafkaSource::new(KafkaSourceConfig::new("localhost:9092", "orders", "orders-etl"))?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`KafkaSourceConfig::validate`].
@@ -500,6 +510,17 @@ impl KafkaSource {
 
     /// Create a source from the pipeline's opaque `source: { kafka: ... }`
     /// section.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::config::ComponentConfig;
+    /// use spate_kafka::KafkaSource;
+    ///
+    /// # fn run(section: &ComponentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = KafkaSource::from_component_config(section)?;
+    /// # Ok(()) }
+    /// ```
     ///
     /// # Errors
     ///

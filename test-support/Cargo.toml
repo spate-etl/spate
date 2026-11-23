@@ -28,6 +28,10 @@ kafka = ["dep:testcontainers"]
 # `transactional_producer` and `send`, and `KafkaCluster::await_brokers` and
 # `partition_states`, which read the cluster's metadata.
 kafka-client = ["kafka", "dep:rdkafka", "dep:tokio"]
+# Vendored OpenSSL in rdkafka, as spate-kafka's `tls` builds it: each client
+# then initialises OpenSSL first, and `assert_openssl_runs_through_exit` checks
+# that a client leaves OpenSSL's exit handler unregistered.
+kafka-tls = ["kafka-client", "rdkafka/ssl-vendored", "dep:openssl-sys"]
 # `S3Store`. A notifying store reaches the broker on `BROKER_FROM_INSIDE`.
 s3 = ["container", "kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
@@ -44,6 +48,7 @@ base64 = { workspace = true, optional = true }
 # `object_store` keeps the signer's `Method` private at its declared floor.
 http = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true, features = ["aws"] }
+openssl-sys = { workspace = true, optional = true }
 rdkafka = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }

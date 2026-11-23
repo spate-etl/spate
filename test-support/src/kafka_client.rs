@@ -49,12 +49,14 @@ fn client<T: FromClientConfig>(bootstrap: &str, settings: &[(&str, &str)]) -> Re
 }
 
 /// The configuration of every client this module builds: `bootstrap` with
-/// `settings`.
+/// `settings`. OpenSSL is initialised first, as
+/// [`leave_openssl_running`](crate::leave_openssl_running) says.
 #[expect(
     clippy::disallowed_methods,
     reason = "test helpers build their clients outside spate-kafka's factory"
 )]
 fn config(bootstrap: &str, settings: &[(&str, &str)]) -> rdkafka::ClientConfig {
+    crate::leave_openssl_running();
     let mut config = rdkafka::ClientConfig::new();
     config.set("bootstrap.servers", bootstrap);
     for &(key, value) in settings {
@@ -441,6 +443,24 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(message.payload().unwrap_or_default().to_vec());
         }
+    }
+
+    /// Pins that a client built from `config` leaves OpenSSL's exit handler
+    /// unregistered. Every client this module builds starts there.
+    #[cfg(feature = "kafka-tls")]
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the client is built straight from `config`, as each builder here does"
+    )]
+    fn a_client_leaves_openssl_running_through_process_exit() {
+        crate::assert_openssl_runs_through_exit(
+            "kafka_client::tests::a_client_leaves_openssl_running_through_process_exit",
+            || {
+                let client: BaseProducer = config(NOWHERE, &[]).create().expect("producer");
+                drop(client);
+            },
+        );
     }
 
     #[test]

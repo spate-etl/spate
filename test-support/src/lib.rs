@@ -17,6 +17,8 @@ mod http;
 mod kafka;
 #[cfg(feature = "kafka-client")]
 mod kafka_client;
+#[cfg(feature = "kafka-client")]
+mod openssl;
 mod registry_stub;
 mod returns;
 #[cfg(feature = "s3")]
@@ -46,6 +48,10 @@ pub use kafka_client::{
     committed, committed_offsets, consumer, create_topics, from_start, high_watermark, producer,
     send, transactional_producer,
 };
+#[cfg(feature = "kafka-tls")]
+pub use openssl::assert_openssl_runs_through_exit;
+#[cfg(feature = "kafka-client")]
+pub use openssl::leave_openssl_running;
 pub use registry_stub::{RegistryRequest, RegistryStub};
 pub use returns::{assert_returns, returns_within};
 #[cfg(feature = "s3")]

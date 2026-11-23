@@ -34,7 +34,7 @@ impl Raw for ClientConfig {
         reason = "a test client is built outside every role"
     )]
     fn build<T: FromClientConfig>(&self) -> KafkaResult<T> {
-        leave_openssl_running();
+        spate_test_support::leave_openssl_running();
         self.create()
     }
 
@@ -47,16 +47,7 @@ impl Raw for ClientConfig {
         C: ClientContext,
         T: FromClientConfigAndContext<C>,
     {
-        leave_openssl_running();
+        spate_test_support::leave_openssl_running();
         self.create_with_context(context)
     }
-}
-
-/// Leaves OpenSSL's exit handler unregistered, as the crate's own client
-/// constructor does. librdkafka seeds its random numbers through OpenSSL in the
-/// first client a process builds, and that call registers the handler unless
-/// OpenSSL was initialised without it first.
-fn leave_openssl_running() {
-    #[cfg(feature = "tls")]
-    openssl_sys::init();
 }

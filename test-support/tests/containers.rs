@@ -12,13 +12,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures_util::TryStreamExt as _;
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
-use rdkafka::ClientConfig;
 use rdkafka::Message as _;
 use rdkafka::admin::{NewTopic, TopicReplication};
-use rdkafka::consumer::{BaseConsumer, Consumer as _};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::producer::{BaseRecord, Producer as _};
 use spate_test_support::{
-    ElasticMq, KafkaBroker, Message, S3Store, SingleBroker, Store, create_topics, producer, send,
+    ElasticMq, KafkaBroker, Message, S3Store, SingleBroker, Store, consumer, create_topics,
+    producer, send,
 };
 
 /// Bounds a hang only.
@@ -125,10 +125,6 @@ fn s3_store_round_trips_an_object() {
 /// from the start of a topic created for it.
 #[test]
 #[ignore = "requires Docker"]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a smoke test builds its consumer outside spate-kafka's factory"
-)]
 fn kafka_broker_round_trips_a_record() {
     let broker = SingleBroker::start(KafkaBroker::selected()).unwrap_or_else(|e| panic!("{e}"));
     let brokers = broker.bootstrap();
@@ -147,12 +143,11 @@ fn kafka_broker_round_trips_a_record() {
     .unwrap_or_else(|e| panic!("{e}"));
     producer.flush(HANG).expect("flush");
 
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", "smoke")
-        .set("auto.offset.reset", "earliest")
-        .create()
-        .expect("consumer");
+    let consumer = consumer(
+        brokers,
+        &[("group.id", "smoke"), ("auto.offset.reset", "earliest")],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     consumer.subscribe(&["smoke"]).expect("subscribe");
     // Bounds a hang only: the record is read as soon as the group assigns.
     let until = Instant::now() + HANG;

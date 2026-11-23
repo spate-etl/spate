@@ -208,41 +208,11 @@ fn api_versions(ver: i16, apis: &[(i16, i16, i16)], body: &mut Vec<u8>) {
     }
 }
 
-/// Runs the test `name` again in a child process, where `build` builds and
-/// drops a client after the child registers an exit handler of its own. That
-/// handler runs after any OpenSSL registers later, and aborts if OpenSSL
-/// refuses to initialise because its cleanup has run.
-#[cfg(feature = "tls")]
-pub(crate) fn assert_openssl_runs_through_exit(name: &str, build: impl FnOnce()) {
-    use std::ffi::c_int;
-
-    const CHILD: &str = "SPATE_TEST_OPENSSL_EXIT";
-
-    unsafe extern "C" {
-        fn atexit(handler: extern "C" fn()) -> c_int;
-    }
-
-    extern "C" fn abort_after_openssl_cleanup() {
-        // SAFETY: a null settings pointer selects OpenSSL's defaults.
-        if unsafe { openssl_sys::OPENSSL_init_ssl(0, std::ptr::null()) } != 1 {
-            std::process::abort();
-        }
-    }
-
-    if std::env::var_os(CHILD).is_none() {
-        spate_test_support::run_in_child(name, |child| child.env(CHILD, "1"));
-        return;
-    }
-    // SAFETY: the handler is a function item, valid for the whole process.
-    assert_eq!(unsafe { atexit(abort_after_openssl_cleanup) }, 0);
-    build();
-}
-
 #[cfg(all(test, feature = "tls"))]
 mod tests {
-    use super::assert_openssl_runs_through_exit;
     use super::raw::{Raw as _, raw_config};
     use rdkafka::producer::{BaseProducer, DefaultProducerContext};
+    use spate_test_support::assert_openssl_runs_through_exit;
 
     /// Pins that the mock cluster's own client leaves OpenSSL's exit handler
     /// unregistered. It is the first client of every mock test.

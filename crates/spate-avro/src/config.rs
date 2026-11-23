@@ -34,6 +34,7 @@ use spate_core::clock::SyncClock;
 use spate_core::config::{
     ComponentConfig, ConfigError, DurationBounds, SectionPath, check_duration, redact,
 };
+use spate_core::tls::TlsSection;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -138,7 +139,8 @@ pub struct RegistrySection {
     /// `username`.
     #[serde(default)]
     pub password: Option<String>,
-    /// Trust settings for an `https://` registry.
+    /// Trust settings: `registry.tls.root_ca`, which requires an `https://`
+    /// URL.
     #[serde(default)]
     pub tls: TlsSection,
 }
@@ -155,10 +157,6 @@ impl RegistrySection {
         }
     }
 }
-
-/// Trust settings for an `https://` registry: `registry.tls.root_ca`, which
-/// requires an `https://` URL.
-pub use spate_core::tls::TlsSection;
 
 // Hand-written: `password` and the URL userinfo are credentials. The
 // destructure lists every field so a new one cannot reach `Debug` unredacted.

@@ -24,7 +24,7 @@ use spate_core::deser::RecFamily;
 use spate_core::sink::{
     FrameCodecFactory, SinkBundle, SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
 };
-use spate_core::tls::SystemRoots;
+use spate_core::tls::{SystemRoots, TlsSection};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -71,7 +71,8 @@ pub struct ClickHouseSinkConfig {
     /// Password (interpolate secrets upstream via `${VAR}`).
     #[serde(default)]
     pub password: Option<String>,
-    /// Trust settings for `https://` replicas (see [`TlsSection`]).
+    /// Trust settings: `tls.root_ca`, which requires at least one `https://`
+    /// URL. The URL scheme decides whether a connection uses TLS.
     #[serde(default)]
     pub tls: TlsSection,
     /// Extra per-insert ClickHouse settings (beyond the deduplication
@@ -542,11 +543,6 @@ impl DistributedCheckSection {
         }
     }
 }
-
-/// Trust settings for `https://` replicas: `tls.root_ca`, which requires at
-/// least one `https://` URL. The URL scheme decides whether a connection uses
-/// TLS.
-pub use spate_core::tls::TlsSection;
 
 /// Client-side timeouts for one insert, and for one startup request.
 ///

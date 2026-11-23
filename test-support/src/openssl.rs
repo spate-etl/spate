@@ -14,6 +14,10 @@ pub fn leave_openssl_running() {
     openssl_sys::init();
 }
 
+/// Set in the child process [`assert_openssl_runs_through_exit`] starts.
+#[cfg(feature = "kafka-tls")]
+const CHILD: &str = "SPATE_TEST_OPENSSL_EXIT";
+
 /// Runs the test `name` again in a child process, where `build` builds and
 /// drops a client after the child registers an exit handler of its own. That
 /// handler runs after any OpenSSL registers later, and aborts if OpenSSL
@@ -26,8 +30,6 @@ pub fn leave_openssl_running() {
 #[cfg(feature = "kafka-tls")]
 pub fn assert_openssl_runs_through_exit(name: &str, build: impl FnOnce()) {
     use std::ffi::c_int;
-
-    const CHILD: &str = "SPATE_TEST_OPENSSL_EXIT";
 
     unsafe extern "C" {
         fn atexit(handler: extern "C" fn()) -> c_int;
@@ -47,4 +49,40 @@ pub fn assert_openssl_runs_through_exit(name: &str, build: impl FnOnce()) {
     // SAFETY: the handler is a function item, valid for the whole process.
     assert_eq!(unsafe { atexit(abort_after_openssl_cleanup) }, 0);
     build();
+}
+
+#[cfg(all(test, feature = "kafka-tls"))]
+mod tests {
+    use rdkafka::producer::BaseProducer;
+
+    use super::{CHILD, assert_openssl_runs_through_exit};
+
+    /// Pins that the check fails a client built without initialising OpenSSL
+    /// first. That client registers OpenSSL's exit handler, which then runs
+    /// before the child's own.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the client skips `leave_openssl_running` on purpose"
+    )]
+    fn the_check_fails_a_client_that_registers_the_exit_handler() {
+        let checked = std::panic::catch_unwind(|| {
+            assert_openssl_runs_through_exit(
+                "openssl::tests::the_check_fails_a_client_that_registers_the_exit_handler",
+                || {
+                    let client: BaseProducer = rdkafka::ClientConfig::new()
+                        .set("bootstrap.servers", "127.0.0.1:1")
+                        .create()
+                        .expect("producer");
+                    drop(client);
+                },
+            );
+        });
+        if std::env::var_os(CHILD).is_none() {
+            assert!(
+                checked.is_err(),
+                "the check passed a client that registers OpenSSL's exit handler"
+            );
+        }
+    }
 }

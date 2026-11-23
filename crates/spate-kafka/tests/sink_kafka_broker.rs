@@ -36,15 +36,12 @@ admin: { listen: none }
 metrics: { exporter: none }
 source: { kafka: {} }
 sinks:
-  a: { kafka: {} }
-  b: { kafka: {} }
+  a: { batch: { linger: 100ms }, kafka: {} }
+  b: { batch: { linger: 100ms }, kafka: {} }
 "#;
 
 fn sink_config(brokers: &str, topic: &str) -> KafkaSinkConfig {
-    let yaml = format!(
-        "brokers: {brokers}\ntopic: {topic}\nstatistics_interval: 0s\n\
-         batch:\n  linger: 100ms\n"
-    );
+    let yaml = format!("brokers: {brokers}\ntopic: {topic}\nstatistics_interval: 0s\n");
     serde_yaml::from_str(&yaml).expect("sink config")
 }
 

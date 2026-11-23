@@ -41,10 +41,7 @@ use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock as IoClock, SystemClock as IoSystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
 use spate_core::deser::{Owned, RecFamily};
-use spate_core::sink::{
-    BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
-    SinkProbeFn, endpoint_probe,
-};
+use spate_core::sink::{SinkBundle, SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe};
 use std::collections::BTreeMap;
 use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
@@ -223,18 +220,6 @@ pub struct KafkaSinkConfig {
     /// Producer compression codec (librdkafka `compression.codec`).
     #[serde(default)]
     pub compression: Option<Compression>,
-    /// Batch sealing thresholds.
-    #[serde(default)]
-    pub batch: BatchConfig,
-    /// In-flight limits.
-    #[serde(default)]
-    pub inflight: InflightConfig,
-    /// Write retry policy.
-    #[serde(default)]
-    pub retry: RetryConfig,
-    /// Endpoint circuit breaker.
-    #[serde(default)]
-    pub breaker: BreakerConfig,
     /// Raw librdkafka producer properties, applied verbatim after
     /// validation. Sink-owned properties (see [`KafkaSinkConfig`] docs and
     /// the connector guide) are rejected; batching knobs like `linger.ms`
@@ -259,10 +244,6 @@ impl std::fmt::Debug for KafkaSinkConfig {
             max_message_bytes,
             statistics_interval,
             compression,
-            batch,
-            inflight,
-            retry,
-            breaker,
             rdkafka,
         } = self;
         f.debug_struct("KafkaSinkConfig")
@@ -273,10 +254,6 @@ impl std::fmt::Debug for KafkaSinkConfig {
             .field("max_message_bytes", max_message_bytes)
             .field("statistics_interval", statistics_interval)
             .field("compression", compression)
-            .field("batch", batch)
-            .field("inflight", inflight)
-            .field("retry", retry)
-            .field("breaker", breaker)
             .field("rdkafka", &redact::map(rdkafka.keys()))
             .finish()
     }
@@ -295,10 +272,6 @@ impl KafkaSinkConfig {
             max_message_bytes: default_max_message_bytes(),
             statistics_interval: default_statistics_interval(),
             compression: None,
-            batch: BatchConfig::default(),
-            inflight: InflightConfig::default(),
-            retry: RetryConfig::default(),
-            breaker: BreakerConfig::default(),
             rdkafka: BTreeMap::new(),
         }
     }
@@ -319,8 +292,7 @@ impl KafkaSinkConfig {
         Ok(cfg)
     }
 
-    /// Cross-field validation, including the passthrough denylist and the pool
-    /// sections' [`SinkPoolConfig::validate`] rules.
+    /// Cross-field validation, including the passthrough denylist.
     ///
     /// # Errors
     ///
@@ -357,9 +329,6 @@ impl KafkaSinkConfig {
                      range), got {mmb}"
                 ),
             ));
-        }
-        if let Err(why) = self.pool().validate() {
-            return Err(at.error(why.to_string()));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
             return Err(at.invalid("statistics_interval", why));
@@ -409,11 +378,6 @@ impl KafkaSinkConfig {
         self.delivery_timeout + DELIVERY_GRACE + REPEATED_ERROR_INTERVAL + reconnect_backoff_max
     }
 
-    /// The worker-pool tuning the four pool sections describe.
-    fn pool(&self) -> SinkPoolConfig {
-        SinkPoolConfig::new(self.batch, self.inflight, self.retry, self.breaker)
-    }
-
     /// What the sink's producers share with every Kafka client.
     pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
         Base {
@@ -455,8 +419,6 @@ pub struct KafkaSink {
     /// Per-shard endpoints, one replica each, cloned from the single
     /// shared producer.
     pub endpoints: Vec<Vec<KafkaEndpoint>>,
-    /// Pool knobs mapped onto the framework's configuration.
-    pub pool: SinkPoolConfig,
     /// A probe-only producer (no statistics), independent of the write
     /// path. One entry: every shard shares the producer, so probing once
     /// probes them all.
@@ -510,7 +472,7 @@ impl SinkBundle for KafkaSink {
             .iter()
             .map(|shard| shard.iter().map(|e| e.label().to_string()).collect())
             .collect();
-        SinkParts::new(self.writer, self.endpoints, self.pool)
+        SinkParts::new(self.writer, self.endpoints, SinkPoolConfig::default())
             .with_component_type("kafka")
             .with_replica_labels(replica_labels)
             .with_probe(probe)
@@ -639,7 +601,6 @@ fn build_on(
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
     let rejection_window = cfg.rejection_window();
-    let pool = cfg.pool();
 
     Ok(KafkaSink {
         writer: KafkaWriter::new(
@@ -651,7 +612,6 @@ fn build_on(
             io_clock,
         ),
         endpoints,
-        pool,
         probe_endpoints,
         max_message_bytes: cfg.max_message_bytes.as_u64() as usize,
     })
@@ -661,7 +621,6 @@ fn build_on(
 mod tests {
     use super::*;
     use crate::testutil::raw::Raw as _;
-    use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
 
     fn section(body: &str) -> ComponentConfig {
         spate_test::component_config("kafka", body)
@@ -819,8 +778,6 @@ mod tests {
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
         assert_eq!(cfg.compression, None);
         assert!(cfg.rdkafka.is_empty());
-        assert_eq!(cfg.batch, BatchConfig::default());
-        assert_eq!(cfg.retry, RetryConfig::default());
     }
 
     /// `new` and the YAML defaults are two spellings of one config, so a
@@ -879,19 +836,6 @@ mod tests {
             .insert("allow.auto.create.topics".to_owned(), "true".to_owned());
         let msg = refusal(KafkaSink::new(cfg).map(drop));
         assert!(msg.contains("allow.auto.create.topics"), "{msg}");
-    }
-
-    /// `KafkaSink::new` refuses a programmatic zero batch threshold with core's
-    /// message for the key, under the sink's prefix.
-    #[test]
-    fn new_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
-        let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
-        cfg.batch.max_bytes = 0;
-        let msg = refusal(KafkaSink::new(cfg).map(drop));
-        assert_eq!(
-            msg,
-            format!("sink.kafka: {}", SinkPoolConfigError::ZeroMaxBytes)
-        );
     }
 
     /// `KafkaSink::new` refuses a programmatic `delivery_timeout` under 1 ms before
@@ -1306,110 +1250,32 @@ mod tests {
                 format!("{}  max_message_bytes: 2GB\n", minimal()),
                 "max_message_bytes",
             ),
-            (
-                format!("{}  retry:\n    multiplier: 0.5\n", minimal()),
-                "retry.multiplier",
-            ),
-            (
-                format!("{}  retry:\n    jitter: 1.5\n", minimal()),
-                "retry.jitter",
-            ),
-            (
-                format!("{}  breaker:\n    failure_threshold: 0\n", minimal()),
-                "breaker.failure_threshold",
-            ),
-            (
-                format!("{}  inflight:\n    max_per_shard: 0\n", minimal()),
-                "inflight.max_per_shard",
-            ),
         ] {
             let msg = parse(&body).unwrap_err().to_string();
             assert!(msg.contains(needle), "`{needle}` in: {msg}");
         }
     }
 
-    /// Pins that each pool section is refused by core's rule, with core's
-    /// message under the sink's prefix.
+    /// The framework's pool blocks sit beside `kafka:` in the sink section,
+    /// so the body refuses each one by name.
     #[test]
-    fn pool_rules_are_core_rules_under_the_sink_prefix() {
-        for (yaml, want) in [
-            (
-                "  batch:\n    max_rows: 0\n",
-                SinkPoolConfigError::ZeroMaxRows,
-            ),
-            (
-                "  batch:\n    max_bytes: 0\n",
-                SinkPoolConfigError::ZeroMaxBytes,
-            ),
-            (
-                "  batch:\n    max_rows: 0\n    max_bytes: 0\n",
-                SinkPoolConfigError::ZeroMaxRows,
-            ),
-            (
-                "  inflight:\n    max_per_shard: 0\n",
-                SinkPoolConfigError::ZeroMaxPerShard,
-            ),
-            (
-                "  retry:\n    multiplier: 0.5\n",
-                SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5)),
-            ),
-            (
-                "  breaker:\n    failure_threshold: 0\n",
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
-            ),
-            (
-                "  breaker:\n    half_open_probes: 0\n",
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroHalfOpenProbes),
-            ),
-        ] {
-            let body = format!("{}{yaml}", minimal());
+    fn a_pool_block_in_the_body_is_refused() {
+        for key in ["batch", "inflight", "retry", "breaker"] {
+            let body = format!("{}  {key}: {{}}\n", minimal());
             let msg = refusal(parse(&body).map(drop));
-            assert_eq!(msg, format!("sink.kafka: {want}"), "{yaml:?}");
+            assert!(msg.contains(&format!("unknown field `{key}`")), "{msg}");
         }
     }
 
-    /// Pins the pool check's place in `validate`: after `max_message_bytes`
-    /// and before `statistics_interval`.
     #[test]
-    fn a_pool_refusal_keeps_its_place_in_validate() {
-        let earlier = format!(
-            "{}  max_message_bytes: 10\n  batch:\n    max_rows: 0\n",
-            minimal()
-        );
-        let msg = refusal(parse(&earlier).map(drop));
-        assert!(msg.starts_with("sink.kafka.max_message_bytes: "), "{msg}");
-
-        let later = format!(
-            "{}  statistics_interval: 500us\n  batch:\n    max_rows: 0\n",
-            minimal()
-        );
-        let msg = refusal(parse(&later).map(drop));
-        assert_eq!(
-            msg,
-            format!("sink.kafka: {}", SinkPoolConfigError::ZeroMaxRows)
-        );
-    }
-
-    #[test]
-    fn tuning_sections_map_to_pool_config() {
-        let body = format!(
-            "{}  shards: 3\n  batch:\n    max_rows: 1000\n    max_bytes: 1MiB\n    linger: 250ms\n  \
-             inflight:\n    max_per_shard: 4\n  retry:\n    initial: 50ms\n    max: 5s\n  \
-             breaker:\n    failure_threshold: 7\n",
-            minimal()
-        );
+    fn each_shard_gets_one_endpoint() {
+        let body = format!("{}  shards: 3\n", minimal());
         let sink = KafkaSink::new(parse(&body).unwrap()).unwrap();
         assert_eq!(sink.endpoints.len(), 3, "one worker per shard");
         assert!(
             sink.endpoints.iter().all(|shard| shard.len() == 1),
             "single-replica shards"
         );
-        assert_eq!(sink.pool.batch.max_rows, 1000);
-        assert_eq!(sink.pool.batch.max_bytes, 1024 * 1024);
-        assert_eq!(sink.pool.batch.linger, Duration::from_millis(250));
-        assert_eq!(sink.pool.inflight.max_per_shard, 4);
-        assert_eq!(sink.pool.retry.initial, Duration::from_millis(50));
-        assert_eq!(sink.pool.breaker.failure_threshold, 7);
     }
 
     #[test]
@@ -1422,6 +1288,7 @@ mod tests {
             vec![vec!["localhost:9092/orders".to_string()]]
         );
         assert!(parts.probe.is_some(), "readiness probe attached");
+        assert_eq!(parts.pool, SinkPoolConfig::default(), "the base pool");
     }
 
     /// The forced durability settings and an incompatible passthrough must

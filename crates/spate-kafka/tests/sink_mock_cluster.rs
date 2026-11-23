@@ -143,8 +143,9 @@ async fn write_batch_round_trips_keys_headers_payloads() {
     );
 }
 
-/// One pipeline config per spawn, with a distinct pipeline name.
-fn pipeline_config() -> String {
+/// One pipeline config per spawn, with a distinct pipeline name and
+/// `sink_keys` beside `kafka:`.
+fn pipeline_config(sink_keys: &str) -> String {
     let name = unique_name("kafka-sink-test");
     format!(
         r#"
@@ -152,15 +153,17 @@ pipeline: {{ name: {name}, threads: 1, io_threads: 1 }}
 admin: {{ listen: none }}
 metrics: {{ exporter: none }}
 source: {{ memory: {{}} }}
-sink: {{ kafka: {{}} }}
+sink: {{ {sink_keys}kafka: {{}} }}
 "#
     )
 }
 
-/// Spawn a memory→kafka pipeline over `sink`; returns the source handle,
-/// the shutdown trigger, and the bounded-join handle.
+/// Spawn a memory→kafka pipeline over `sink`, with `sink_keys` beside
+/// `kafka:`; returns the source handle, the shutdown trigger, and the
+/// bounded-join handle.
 fn spawn_pipeline(
     sink: KafkaSink,
+    sink_keys: &str,
 ) -> (
     spate_test::SourceHandle,
     spate_core::pipeline::ShutdownHandle,
@@ -168,9 +171,10 @@ fn spawn_pipeline(
 ) {
     let (source, handle) = memory_source();
     let encoder = sink.encoder_bytes();
-    let pipeline =
-        Pipeline::from_config(PipelineConfig::from_str(&pipeline_config()).expect("config"))
-            .expect("builder");
+    let pipeline = Pipeline::from_config(
+        PipelineConfig::from_str(&pipeline_config(sink_keys)).expect("config"),
+    )
+    .expect("builder");
     let runtime = passthrough_runtime(pipeline, source, sink, encoder, RuntimeOptions::default());
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
@@ -185,7 +189,7 @@ fn pipeline_commits_only_after_delivery_reports() {
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     // Short linger so steady-state batches seal quickly.
-    let (handle, shutdown, run) = spawn_pipeline(sink(&brokers, "batch:\n  linger: 100ms\n"));
+    let (handle, shutdown, run) = spawn_pipeline(sink(&brokers, ""), "batch: { linger: 100ms }, ");
 
     let p = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), p)]);
@@ -232,7 +236,7 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     let brokers = cluster.bootstrap_servers();
     // Linger far beyond the test: any durable write after the trigger can
     // only come from the drain's force-seal.
-    let (handle, shutdown, run) = spawn_pipeline(sink(&brokers, "batch:\n  linger: 60s\n"));
+    let (handle, shutdown, run) = spawn_pipeline(sink(&brokers, ""), "batch: { linger: 60s }, ");
 
     let p = PartitionId(0);
     handle.assign_lanes(&[(LaneId(0), p)]);

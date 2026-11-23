@@ -109,9 +109,8 @@ sink:
     rdkafka: {}               # raw librdkafka producer properties
 ```
 
-Each value after `topic` except `compression` is the default. The `batch`,
-`inflight`, `retry` and `breaker` sections tune the framework's sink pool, and
-are checked at load against its rules.
+Each value after `topic` except `compression` is the default. The framework's
+sink keys, such as `batch` and `queue`, sit beside `kafka:` in the sink section.
 
 Loading refuses a `topic` over 512 bytes, `shards: 0`, a `delivery_timeout`
 under 1ms or above about 24.8 days, a `max_message_bytes` outside 1000 to
@@ -124,8 +123,8 @@ and the properties the framework owns for every client.
 The
 [Kafka sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/kafka#configuration)
 has the full key table, and the
-[sink-pool reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-pool)
-has the pool sections' keys.
+[sink section reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-section)
+lists the framework's keys.
 
 ### Writes and retries
 

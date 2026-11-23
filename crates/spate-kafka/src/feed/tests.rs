@@ -3366,7 +3366,8 @@ mod cluster {
     /// Pins that a pass which reads every watermark it needs admits its
     /// units and returns without waiting a step: with a step of an hour, a
     /// pass over one unit on a partition with a leader returns, and the unit
-    /// is buffered for the reader.
+    /// is buffered for the reader once the broker acks its attempt record
+    /// after the pass has returned.
     #[test]
     fn a_pass_that_reads_every_watermark_returns_without_waiting() {
         let cluster = cluster_with(0);
@@ -3390,6 +3391,11 @@ mod cluster {
                 .fetch_watermarks(ATTEMPTS, 0, Duration::from_millis(500))
                 .is_ok()
         });
+        // The ack lands after the pass returns, so the unit is buffered only
+        // while the test's producer outlives the gate's.
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(300))
+            .unwrap();
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3402,7 +3408,7 @@ mod cluster {
         }
         let gate = Gate::new(
             Arc::clone(&core),
-            producer,
+            Producer::clone(&producer),
             attempt::test_lister(&config),
             Duration::from_secs(3600),
         )

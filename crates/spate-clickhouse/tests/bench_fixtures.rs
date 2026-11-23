@@ -15,7 +15,9 @@ use bytes::BytesMut;
 use spate_clickhouse::testing::{
     ClickHouseNativeEncoder, ClickHouseRowBinaryEncoder, NativeSchema,
 };
-use spate_clickhouse::{ClickHouseDistributedRouter, ClickHouseRow, Compression, ShardKey};
+use spate_clickhouse::{
+    ClickHouseCompression, ClickHouseDistributedRouter, ClickHouseRow, ShardKey,
+};
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
 use spate_test::record;
@@ -460,7 +462,10 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
 /// zstd:3 give different blocks.
 #[test]
 fn the_codec_export_codes_under_every_compression() {
-    let compression = |s: &str| s.parse::<Compression>().expect("a compression value");
+    let compression = |s: &str| {
+        s.parse::<ClickHouseCompression>()
+            .expect("a compression value")
+    };
     assert!(
         spate_clickhouse::testing::frame_codec(compression("off")).is_none(),
         "off: no codec"

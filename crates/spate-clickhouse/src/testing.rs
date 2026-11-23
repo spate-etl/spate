@@ -21,7 +21,7 @@ pub use crate::encoder::ClickHouseRowBinaryEncoder;
 pub use crate::native::{ClickHouseNativeEncoder, NativeError, NativeSchema};
 pub use crate::rowbinary::{RowBinaryError, serialize_row};
 pub use crate::schema::ColumnRow;
-use crate::{ClickHouseFormatEncoder, Compression};
+use crate::{ClickHouseCompression, ClickHouseFormatEncoder};
 
 /// The format encoder over a Native encoder, as the sink hands it out under
 /// `format: native`.
@@ -46,7 +46,7 @@ pub fn rowbinary_format_encoder<F>(
 /// ClickHouse's native framing, the form an insert body sent with
 /// `decompress=1` carries.
 #[must_use]
-pub fn frame_codec(compression: Compression) -> Option<FrameCodecFactory> {
+pub fn frame_codec(compression: ClickHouseCompression) -> Option<FrameCodecFactory> {
     crate::codec::BlockCodec::factory(compression)
 }
 

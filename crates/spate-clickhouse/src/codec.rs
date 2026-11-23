@@ -15,7 +15,7 @@
 //! `decompress=1`. The bytes equal what the `clickhouse` client writes for
 //! the same chunk, which the tests pin against the client's own codec.
 
-use crate::Compression;
+use crate::ClickHouseCompression;
 use lz4_flex::block::{CompressTable, compress_into_with_table};
 use spate_core::error::SinkError;
 use spate_core::sink::{FrameCodec, FrameCodecFactory};
@@ -44,11 +44,11 @@ pub(crate) enum BlockMethod {
 
 impl BlockMethod {
     /// The method for `compression`, or `None` under `off`.
-    pub(crate) fn of(compression: Compression) -> Option<Self> {
+    pub(crate) fn of(compression: ClickHouseCompression) -> Option<Self> {
         match compression {
-            Compression::None => None,
-            Compression::Lz4 => Some(BlockMethod::Lz4),
-            Compression::Zstd(_) => Some(BlockMethod::Zstd),
+            ClickHouseCompression::None => None,
+            ClickHouseCompression::Lz4 => Some(BlockMethod::Lz4),
+            ClickHouseCompression::Zstd(_) => Some(BlockMethod::Zstd),
         }
     }
 
@@ -122,11 +122,11 @@ enum Method {
 impl BlockCodec {
     /// The factory for `compression`, or `None` under `off`, where frames
     /// ship as the encoder wrote them.
-    pub(crate) fn factory(compression: Compression) -> Option<FrameCodecFactory> {
+    pub(crate) fn factory(compression: ClickHouseCompression) -> Option<FrameCodecFactory> {
         let zstd_level = match compression {
-            Compression::None => return None,
-            Compression::Lz4 => None,
-            Compression::Zstd(level) => Some(level),
+            ClickHouseCompression::None => return None,
+            ClickHouseCompression::Lz4 => None,
+            ClickHouseCompression::Zstd(level) => Some(level),
         };
         Some(FrameCodecFactory::new(move || {
             Box::new(BlockCodec::new(zstd_level))

@@ -536,7 +536,7 @@ async fn native_refuses_a_column_it_cannot_write_at_connect() {
     let mock = Mock::new();
     answer_build(&mock, columns());
     let sink = sink_with_format(mock.url(), "rowbinary").await;
-    assert_eq!(sink.format(), config::Format::RowBinary);
+    assert_eq!(sink.format(), config::ClickHouseFormat::RowBinary);
 }
 
 /// Pins that the refusal shows a server-sent type cut to a bounded length.
@@ -605,7 +605,7 @@ async fn the_encoder_follows_the_configured_format() {
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
     let sink = sink_with_format(mock.url(), "rowbinary").await;
-    assert_eq!(sink.format(), config::Format::RowBinary);
+    assert_eq!(sink.format(), config::ClickHouseFormat::RowBinary);
     let mut expected = BytesMut::new();
     for row in &rows {
         serialize_row(row, &mut expected).expect("encode");
@@ -618,7 +618,7 @@ async fn the_encoder_follows_the_configured_format() {
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
     let sink = sink_with_format(mock.url(), "native").await;
-    assert_eq!(sink.format(), config::Format::Native);
+    assert_eq!(sink.format(), config::ClickHouseFormat::Native);
     let schema = NativeSchema::from_columns(&[
         ("id", "UInt64"),
         ("name", "String"),

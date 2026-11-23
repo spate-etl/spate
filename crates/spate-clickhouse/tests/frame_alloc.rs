@@ -2,7 +2,7 @@
 //!
 //! Its own binary, because the global allocator is the binary's.
 
-use spate_clickhouse::Compression;
+use spate_clickhouse::ClickHouseCompression;
 use spate_clickhouse::testing::frame_codec;
 use spate_test_support::alloc::{Counting, measure};
 
@@ -13,7 +13,7 @@ static ALLOC: Counting = Counting;
 /// of the 65,535-byte hash table boundary. Regression for #1433.
 #[test]
 fn a_warm_lz4_frame_allocates_nothing() {
-    let mut codec = frame_codec(Compression::Lz4)
+    let mut codec = frame_codec(ClickHouseCompression::Lz4)
         .expect("a compressing codec")
         .make();
     for len in [40_000_usize, 70_000] {

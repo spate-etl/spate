@@ -61,7 +61,7 @@ pub struct ClickHouseSinkConfig {
     /// Shard topology: one entry per shard, each with its replica URLs.
     /// Writes go directly to shard-local tables; replicas of a shard are
     /// rotated per batch.
-    pub shards: Vec<ShardConfig>,
+    pub shards: Vec<ClickHouseShardSection>,
     /// Default database for unqualified tables.
     #[serde(default)]
     pub database: Option<String>,
@@ -83,18 +83,18 @@ pub struct ClickHouseSinkConfig {
     #[serde(default)]
     pub timeouts: TimeoutSection,
     /// Transport compression of insert bodies. `lz4` by
-    /// default (see [`Compression`]).
+    /// default (see [`ClickHouseCompression`]).
     #[serde(default)]
-    pub compression: Compression,
-    /// Insert wire format (see [`Format`]). `rowbinary` by default;
+    pub compression: ClickHouseCompression,
+    /// Insert wire format (see [`ClickHouseFormat`]). `rowbinary` by default;
     /// `native` selects the columnar block format.
     #[serde(default)]
-    pub format: Format,
+    pub format: ClickHouseFormat,
     /// Opt-in startup parity check against the cluster topology and a
-    /// `Distributed` table's DDL (see [`DistributedCheckSection`]).
+    /// `Distributed` table's DDL (see [`ClickHouseDistributedCheckSection`]).
     /// Absent by default: no queries issued.
     #[serde(default)]
-    pub distributed_check: Option<DistributedCheckSection>,
+    pub distributed_check: Option<ClickHouseDistributedCheckSection>,
 }
 
 // Hand-written: `password` is a credential, and a `settings` value can be one.
@@ -150,7 +150,7 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum Format {
+pub enum ClickHouseFormat {
     /// Row-wise RowBinary (default).
     #[default]
     RowBinary,
@@ -158,12 +158,12 @@ pub enum Format {
     Native,
 }
 
-impl Format {
+impl ClickHouseFormat {
     /// The `FORMAT` keyword for the `INSERT` statement.
     fn keyword(self) -> &'static str {
         match self {
-            Format::RowBinary => "RowBinaryWithNamesAndTypes",
-            Format::Native => "Native",
+            ClickHouseFormat::RowBinary => "RowBinaryWithNamesAndTypes",
+            ClickHouseFormat::Native => "Native",
         }
     }
 }
@@ -190,7 +190,7 @@ impl Format {
 /// arrive uncompressed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Compression {
+pub enum ClickHouseCompression {
     /// No transport compression.
     None,
     /// LZ4 (default): fast, low CPU, moderate ratio.
@@ -206,14 +206,14 @@ const ZSTD_DEFAULT_LEVEL: i32 = 3;
 /// The ZSTD levels the sink accepts, from YAML and from a config built in code.
 const ZSTD_LEVELS: std::ops::RangeInclusive<i32> = 1..=22;
 
-impl FromStr for Compression {
+impl FromStr for ClickHouseCompression {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "off" | "none" => Ok(Compression::None),
-            "lz4" => Ok(Compression::Lz4),
-            "zstd" => Ok(Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
+            "off" | "none" => Ok(ClickHouseCompression::None),
+            "lz4" => Ok(ClickHouseCompression::Lz4),
+            "zstd" => Ok(ClickHouseCompression::Zstd(ZSTD_DEFAULT_LEVEL)),
             other => {
                 let (lo, hi) = (ZSTD_LEVELS.start(), ZSTD_LEVELS.end());
                 let raw = other.strip_prefix("zstd:").ok_or_else(|| {
@@ -225,13 +225,13 @@ impl FromStr for Compression {
                 if !ZSTD_LEVELS.contains(&level) {
                     return Err(format!("zstd level must be in [{lo}, {hi}]"));
                 }
-                Ok(Compression::Zstd(level))
+                Ok(ClickHouseCompression::Zstd(level))
             }
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Compression {
+impl<'de> Deserialize<'de> for ClickHouseCompression {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -247,7 +247,10 @@ impl ClickHouseSinkConfig {
     /// A config for `table` and the shard topology. Every other field
     /// starts at its YAML default.
     #[must_use]
-    pub fn new(table: impl Into<String>, shards: Vec<ShardConfig>) -> ClickHouseSinkConfig {
+    pub fn new(
+        table: impl Into<String>,
+        shards: Vec<ClickHouseShardSection>,
+    ) -> ClickHouseSinkConfig {
         ClickHouseSinkConfig {
             table: table.into(),
             shards,
@@ -257,8 +260,8 @@ impl ClickHouseSinkConfig {
             tls: TlsSection::default(),
             settings: BTreeMap::new(),
             timeouts: TimeoutSection::default(),
-            compression: Compression::default(),
-            format: Format::default(),
+            compression: ClickHouseCompression::default(),
+            format: ClickHouseFormat::default(),
             distributed_check: None,
         }
     }
@@ -337,7 +340,7 @@ impl ClickHouseSinkConfig {
         // Compression: the string parser bounds the level, and a config built
         // in code can hold `Zstd(level)` directly. The same bound here makes a
         // config built in code accept the levels YAML accepts.
-        if let Compression::Zstd(level) = self.compression
+        if let ClickHouseCompression::Zstd(level) = self.compression
             && !ZSTD_LEVELS.contains(&level)
         {
             return Err(at.invalid(
@@ -408,13 +411,13 @@ impl ClickHouseSinkConfig {
 
 /// One shard's replica endpoints.
 ///
-/// Construct with [`ShardConfig::new`] and set the optional fields. The
+/// Construct with [`ClickHouseShardSection::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub struct ShardConfig {
+pub struct ClickHouseShardSection {
     /// HTTP(S) URLs of this shard's replicas. A URL with credentials is
     /// rejected; set them in `user` and `password`.
     pub replicas: Vec<String>,
@@ -427,10 +430,10 @@ pub struct ShardConfig {
 
 // Hand-written: replica URLs can carry credentials. The destructure lists every
 // field so a new one cannot reach `Debug` unredacted.
-impl std::fmt::Debug for ShardConfig {
+impl std::fmt::Debug for ClickHouseShardSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ShardConfig { replicas, weight } = self;
-        f.debug_struct("ShardConfig")
+        let ClickHouseShardSection { replicas, weight } = self;
+        f.debug_struct("ClickHouseShardSection")
             .field(
                 "replicas",
                 &replicas.iter().map(|r| redact::url(r)).collect::<Vec<_>>(),
@@ -444,12 +447,12 @@ fn default_weight() -> u32 {
     1
 }
 
-impl ShardConfig {
+impl ClickHouseShardSection {
     /// A shard served by `replicas`. The weight starts at its YAML
     /// default.
     #[must_use]
-    pub fn new(replicas: Vec<String>) -> ShardConfig {
-        ShardConfig {
+    pub fn new(replicas: Vec<String>) -> ClickHouseShardSection {
+        ClickHouseShardSection {
             replicas,
             weight: default_weight(),
         }
@@ -471,13 +474,13 @@ impl ShardConfig {
 ///       # endpoint: "http://ch-front:8123"     # default: shard 0, replica 0
 /// ```
 ///
-/// Construct with [`DistributedCheckSection::new`] and set the optional
+/// Construct with [`ClickHouseDistributedCheckSection::new`] and set the optional
 /// fields. The struct is `#[non_exhaustive]` so new knobs can be added
 /// without breaking callers.
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub struct DistributedCheckSection {
+pub struct ClickHouseDistributedCheckSection {
     /// The cluster the `Distributed` table is defined over.
     pub cluster: String,
     /// The `Distributed` table to check, optionally `db.table`-qualified
@@ -502,16 +505,16 @@ pub struct DistributedCheckSection {
 
 // Hand-written: the endpoint URL can carry credentials. The destructure lists
 // every field so a new one cannot reach `Debug` unredacted.
-impl std::fmt::Debug for DistributedCheckSection {
+impl std::fmt::Debug for ClickHouseDistributedCheckSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let DistributedCheckSection {
+        let ClickHouseDistributedCheckSection {
             cluster,
             table,
             sharding_key,
             sharding_expr,
             endpoint,
         } = self;
-        f.debug_struct("DistributedCheckSection")
+        f.debug_struct("ClickHouseDistributedCheckSection")
             .field("cluster", cluster)
             .field("table", table)
             .field("sharding_key", sharding_key)
@@ -521,7 +524,7 @@ impl std::fmt::Debug for DistributedCheckSection {
     }
 }
 
-impl DistributedCheckSection {
+impl ClickHouseDistributedCheckSection {
     /// A check of `table` on `cluster`, sharded by `sharding_key`. Every
     /// other field starts at its YAML default.
     ///
@@ -533,8 +536,8 @@ impl DistributedCheckSection {
         cluster: impl Into<String>,
         table: impl Into<String>,
         sharding_key: impl Into<String>,
-    ) -> DistributedCheckSection {
-        DistributedCheckSection {
+    ) -> ClickHouseDistributedCheckSection {
+        ClickHouseDistributedCheckSection {
             cluster: cluster.into(),
             table: table.into(),
             sharding_key: Some(sharding_key.into()),
@@ -604,10 +607,10 @@ impl ClickHouseSinkBuilder {
     /// # Examples
     ///
     /// ```no_run
-    /// use spate_clickhouse::{ClickHouseSinkBuilder, ClickHouseSinkConfig, config::ShardConfig};
+    /// use spate_clickhouse::{ClickHouseSinkBuilder, ClickHouseSinkConfig, config::ClickHouseShardSection};
     ///
     /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let shards = vec![ShardConfig::new(vec!["http://ch-0-0:8123".into()])];
+    /// let shards = vec![ClickHouseShardSection::new(vec!["http://ch-0-0:8123".into()])];
     /// let builder = ClickHouseSinkBuilder::new(ClickHouseSinkConfig::new("orders_local", shards))?;
     /// # Ok(()) }
     /// ```
@@ -689,8 +692,8 @@ impl ClickHouseSinkBuilder {
 
         let check = schema::SchemaCheck {
             wire: match self.cfg.format {
-                Format::RowBinary => schema::Wire::RowBinary,
-                Format::Native => schema::Wire::Native,
+                ClickHouseFormat::RowBinary => schema::Wire::RowBinary,
+                ClickHouseFormat::Native => schema::Wire::Native,
             },
             database: self.cfg.database.clone(),
             table: self.cfg.table.clone(),
@@ -698,8 +701,8 @@ impl ClickHouseSinkBuilder {
         };
         let schema = schema::validate(&check, &self.endpoints, &self.startup).await?;
         let encoding = match self.cfg.format {
-            Format::RowBinary => Encoding::RowBinary(Arc::clone(&schema)),
-            Format::Native => Encoding::Native(
+            ClickHouseFormat::RowBinary => Encoding::RowBinary(Arc::clone(&schema)),
+            ClickHouseFormat::Native => Encoding::Native(
                 NativeSchema::from_row_schema(&schema)
                     .expect("schema validation refuses a column Native cannot lay out"),
             ),
@@ -710,9 +713,9 @@ impl ClickHouseSinkBuilder {
         // A Native block names its own columns and types; a RowBinary body
         // carries them once, ahead of the rows, in the same blocks as the rows.
         let header = match (self.cfg.format, &frame_codec) {
-            (Format::Native, _) => None,
-            (Format::RowBinary, None) => Some(schema.header()),
-            (Format::RowBinary, Some(codec)) => {
+            (ClickHouseFormat::Native, _) => None,
+            (ClickHouseFormat::RowBinary, None) => Some(schema.header()),
+            (ClickHouseFormat::RowBinary, Some(codec)) => {
                 let block = codec
                     .make()
                     .encode_frame(&schema.header())
@@ -800,10 +803,10 @@ enum Encoding {
 impl ClickHouseSink {
     /// The configured insert wire format.
     #[must_use]
-    pub fn format(&self) -> Format {
+    pub fn format(&self) -> ClickHouseFormat {
         match self.encoding {
-            Encoding::RowBinary(_) => Format::RowBinary,
-            Encoding::Native(_) => Format::Native,
+            Encoding::RowBinary(_) => ClickHouseFormat::RowBinary,
+            Encoding::Native(_) => ClickHouseFormat::Native,
         }
     }
 
@@ -1106,7 +1109,7 @@ fn validate_columns(columns: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn insert_statement(table: &str, columns: &[&str], format: Format) -> String {
+fn insert_statement(table: &str, columns: &[&str], format: ClickHouseFormat) -> String {
     let table = table
         .split('.')
         .map(|p| format!("`{p}`"))
@@ -1300,7 +1303,7 @@ shards:
     fn minimal_config_builds_with_framework_defaults() {
         let builder = ClickHouseSinkBuilder::from_component_config(&component(MINIMAL)).unwrap();
         assert_eq!(
-            insert_statement("orders", IdName::COLUMNS, Format::RowBinary),
+            insert_statement("orders", IdName::COLUMNS, ClickHouseFormat::RowBinary),
             "INSERT INTO `orders` (`id`, `name`) FORMAT RowBinaryWithNamesAndTypes"
         );
         assert_eq!(builder.endpoints.len(), 1);
@@ -1321,7 +1324,11 @@ settings: { insert_quorum: "auto" }
         ))
         .unwrap();
         assert_eq!(
-            insert_statement("analytics.orders", IdOnly::COLUMNS, Format::RowBinary),
+            insert_statement(
+                "analytics.orders",
+                IdOnly::COLUMNS,
+                ClickHouseFormat::RowBinary
+            ),
             "INSERT INTO `analytics`.`orders` (`id`) FORMAT RowBinaryWithNamesAndTypes"
         );
         assert_eq!(sink.endpoints.len(), 2);
@@ -1418,7 +1425,7 @@ settings: { insert_quorum: "auto" }
     fn a_flattened_nested_column_is_accepted_and_quoted_as_one_identifier() {
         validate_columns(NestedTags::COLUMNS).expect("dotted column names are valid");
         assert_eq!(
-            insert_statement("events", NestedTags::COLUMNS, Format::RowBinary),
+            insert_statement("events", NestedTags::COLUMNS, ClickHouseFormat::RowBinary),
             "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) \
              FORMAT RowBinaryWithNamesAndTypes"
         );
@@ -1677,14 +1684,20 @@ settings: { insert_quorum: "auto" }
     fn compression_parses_and_defaults_to_lz4() {
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
-            ("", Compression::Lz4),
-            ("compression: off\n", Compression::None),
-            ("compression: none\n", Compression::None),
-            ("compression: lz4\n", Compression::Lz4),
-            ("compression: zstd\n", Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
-            ("compression: \"zstd:9\"\n", Compression::Zstd(9)),
-            ("compression: \"zstd:1\"\n", Compression::Zstd(1)),
-            ("compression: \"zstd:22\"\n", Compression::Zstd(22)),
+            ("", ClickHouseCompression::Lz4),
+            ("compression: off\n", ClickHouseCompression::None),
+            ("compression: none\n", ClickHouseCompression::None),
+            ("compression: lz4\n", ClickHouseCompression::Lz4),
+            (
+                "compression: zstd\n",
+                ClickHouseCompression::Zstd(ZSTD_DEFAULT_LEVEL),
+            ),
+            ("compression: \"zstd:9\"\n", ClickHouseCompression::Zstd(9)),
+            ("compression: \"zstd:1\"\n", ClickHouseCompression::Zstd(1)),
+            (
+                "compression: \"zstd:22\"\n",
+                ClickHouseCompression::Zstd(22),
+            ),
         ] {
             let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
             assert_eq!(cfg.compression, expected, "for `{yaml}`");
@@ -1721,9 +1734,9 @@ settings: { insert_quorum: "auto" }
     fn format_parses_and_defaults_to_rowbinary() {
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
-            ("", Format::RowBinary),
-            ("format: rowbinary\n", Format::RowBinary),
-            ("format: native\n", Format::Native),
+            ("", ClickHouseFormat::RowBinary),
+            ("format: rowbinary\n", ClickHouseFormat::RowBinary),
+            ("format: native\n", ClickHouseFormat::Native),
         ] {
             let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
             assert_eq!(cfg.format, expected, "for `{yaml}`");
@@ -1735,20 +1748,22 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn each_format_names_itself_in_the_insert_statement() {
         assert_eq!(
-            insert_statement("t", IdName::COLUMNS, Format::Native),
+            insert_statement("t", IdName::COLUMNS, ClickHouseFormat::Native),
             "INSERT INTO `t` (`id`, `name`) FORMAT Native"
         );
         assert_eq!(
-            insert_statement("t", IdName::COLUMNS, Format::RowBinary),
+            insert_statement("t", IdName::COLUMNS, ClickHouseFormat::RowBinary),
             "INSERT INTO `t` (`id`, `name`) FORMAT RowBinaryWithNamesAndTypes"
         );
     }
 
     #[test]
     fn validation_rejects_out_of_range_programmatic_zstd_level() {
-        let mut cfg =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
-        cfg.compression = Compression::Zstd(99);
+        let mut cfg = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["http://a".into()])],
+        );
+        cfg.compression = ClickHouseCompression::Zstd(99);
         let err = ClickHouseSinkBuilder::new(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
     }
@@ -1758,9 +1773,11 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn new_accepts_zstd_levels_one_through_twenty_two_only() {
         let zstd = |level| {
-            let mut cfg =
-                ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
-            cfg.compression = Compression::Zstd(level);
+            let mut cfg = ClickHouseSinkConfig::new(
+                "t",
+                vec![ClickHouseShardSection::new(vec!["http://a".into()])],
+            );
+            cfg.compression = ClickHouseCompression::Zstd(level);
             cfg
         };
         for level in [1, 22] {
@@ -1785,7 +1802,7 @@ settings: { insert_quorum: "auto" }
         assert_eq!(
             ClickHouseSinkConfig::new(
                 "orders",
-                vec![ShardConfig::new(vec!["http://a:8123".into()])],
+                vec![ClickHouseShardSection::new(vec!["http://a:8123".into()])],
             ),
             from_yaml
         );
@@ -1796,16 +1813,22 @@ settings: { insert_quorum: "auto" }
     /// rejects.
     #[test]
     fn distributed_check_new_matches_the_yaml_defaults_and_builds() {
-        let from_yaml: DistributedCheckSection =
+        let from_yaml: ClickHouseDistributedCheckSection =
             serde_yaml::from_str("cluster: prod\ntable: db.t_dist\nsharding_key: id\n").unwrap();
         assert_eq!(
-            DistributedCheckSection::new("prod", "db.t_dist", "id"),
+            ClickHouseDistributedCheckSection::new("prod", "db.t_dist", "id"),
             from_yaml
         );
 
-        let mut cfg =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a:8123".into()])]);
-        cfg.distributed_check = Some(DistributedCheckSection::new("prod", "db.t_dist", "id"));
+        let mut cfg = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["http://a:8123".into()])],
+        );
+        cfg.distributed_check = Some(ClickHouseDistributedCheckSection::new(
+            "prod",
+            "db.t_dist",
+            "id",
+        ));
         let _ = ClickHouseSinkBuilder::new(cfg)
             .expect("a config built entirely from `new` passes validation");
     }
@@ -1819,7 +1842,7 @@ settings: { insert_quorum: "auto" }
         if let Ok(url) = std::env::var(URL) {
             let builder = ClickHouseSinkBuilder::new(ClickHouseSinkConfig::new(
                 "t",
-                vec![ShardConfig::new(vec![url])],
+                vec![ClickHouseShardSection::new(vec![url])],
             ))
             .unwrap();
             builder.endpoints[0][0]
@@ -1848,18 +1871,23 @@ settings: { insert_quorum: "auto" }
     /// endpoint is `https://`, and only then.
     #[test]
     fn the_trust_store_is_read_only_for_https() {
-        let http = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
+        let http = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["http://a".into()])],
+        );
         let _ = build_with(http.clone(), &SectionPath::sink(TAG), || {
             panic!("the trust store was read")
         })
         .unwrap();
 
         let mut front = http;
-        let mut check = DistributedCheckSection::new("prod", "db.t_dist", "id");
+        let mut check = ClickHouseDistributedCheckSection::new("prod", "db.t_dist", "id");
         check.endpoint = Some("https://front:8443".into());
         front.distributed_check = Some(check);
-        let https =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        let https = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["https://a".into()])],
+        );
         let system = crate::test_tls::TestCa::new("system");
         for cfg in [front, https] {
             let mut read = false;
@@ -1876,8 +1904,10 @@ settings: { insert_quorum: "auto" }
     /// with no `tls.root_ca`, fails at that key with the fixes named.
     #[test]
     fn an_https_sink_with_no_trust_root_fails_at_root_ca() {
-        let https =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        let https = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["https://a".into()])],
+        );
         let err = refusal(build_with(https, &SectionPath::sink(TAG), || {
             SystemRoots::from_certs(Vec::new())
         }));
@@ -1911,13 +1941,15 @@ settings: { insert_quorum: "auto" }
     fn shards(urls: &[&[&str]]) -> ClickHouseSinkConfig {
         let shards = urls
             .iter()
-            .map(|replicas| ShardConfig::new(replicas.iter().map(|&u| u.into()).collect()))
+            .map(|replicas| {
+                ClickHouseShardSection::new(replicas.iter().map(|&u| u.into()).collect())
+            })
             .collect();
         ClickHouseSinkConfig::new("t", shards)
     }
 
     fn with_check_endpoint(mut cfg: ClickHouseSinkConfig, url: &str) -> ClickHouseSinkConfig {
-        let mut check = DistributedCheckSection::new("prod", "db.t_dist", "id");
+        let mut check = ClickHouseDistributedCheckSection::new("prod", "db.t_dist", "id");
         check.endpoint = Some(url.into());
         cfg.distributed_check = Some(check);
         cfg
@@ -2213,8 +2245,8 @@ settings: { insert_quorum: "auto" }
                 .unwrap();
             String::from_utf8(head).unwrap().to_ascii_lowercase()
         });
-        let mut cfg = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec![url])]);
-        cfg.compression = Compression::Zstd(3);
+        let mut cfg = ClickHouseSinkConfig::new("t", vec![ClickHouseShardSection::new(vec![url])]);
+        cfg.compression = ClickHouseCompression::Zstd(3);
         let builder = ClickHouseSinkBuilder::new(cfg).unwrap();
         builder.endpoints[0][0]
             .client()
@@ -2303,8 +2335,10 @@ settings: { insert_quorum: "auto" }
             "sink.clickhouse.shards: at least one shard is required"
         );
 
-        let mut missing_ca =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        let mut missing_ca = ClickHouseSinkConfig::new(
+            "t",
+            vec![ClickHouseShardSection::new(vec!["https://a".into()])],
+        );
         missing_ca.tls.root_ca = Some("/nonexistent/ca.pem".into());
         missing_ca
             .validate()

@@ -260,8 +260,8 @@ mod types;
 mod writer;
 
 pub use config::{
-    ClickHouseSink, ClickHouseSinkBuilder, ClickHouseSinkConfig, Compression,
-    DistributedCheckSection, Format,
+    ClickHouseCompression, ClickHouseDistributedCheckSection, ClickHouseFormat, ClickHouseSink,
+    ClickHouseSinkBuilder, ClickHouseSinkConfig,
 };
 pub use distributed::DistributedCheckError;
 pub use encoder::ClickHouseFormatEncoder;

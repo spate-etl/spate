@@ -37,7 +37,7 @@
 
 use bytes::Bytes;
 use spate_bench::{Suite, bench_main};
-use spate_clickhouse::{ClickHouseEndpoint, ClickHouseWriter, Compression};
+use spate_clickhouse::{ClickHouseCompression, ClickHouseEndpoint, ClickHouseWriter};
 use spate_core::sink::{FrameCodec, SealedBatch, ShardWriter};
 use std::cell::RefCell;
 use tokio::runtime::Runtime;
@@ -118,7 +118,7 @@ fn rig(compression: &str, frames: &[frames::Frame], coding: Coding) -> Rig {
     let (batch, codec) = match coding {
         Coding::Precoded => (frames::coded(frames, compression, "bench-write"), None),
         Coding::Timed => {
-            let parsed: Compression = compression.parse().expect("a compression value");
+            let parsed: ClickHouseCompression = compression.parse().expect("a compression value");
             let codec = spate_clickhouse::testing::frame_codec(parsed).map(|f| {
                 let mut codec = f.make();
                 // Warm the scratch, as a chain's codec is after its first seal.

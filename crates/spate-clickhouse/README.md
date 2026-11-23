@@ -24,8 +24,6 @@ rejected.
 
 ```yaml
 sink:
-  # batch, inflight, retry and breaker are the framework's sink-pool sections,
-  # set here beside `clickhouse:`
   clickhouse:
     table: orders_local            # or analytics.orders_local
     database: analytics            # for an unqualified table
@@ -41,11 +39,11 @@ sink:
     settings: { insert_quorum: "auto" }   # extra per-insert settings
 ```
 
-`weight`, `compression`, `format` and `timeouts` show their defaults. Leaving
-out `batch`, `inflight`, `retry` or `breaker` gives the framework's defaults,
-which the
-[sink-pool reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-pool)
-lists.
+`weight`, `compression`, `format` and `timeouts` show their defaults. The
+framework's sink keys, such as `batch` and `queue`, sit beside `clickhouse:` in
+the sink section, and the
+[sink section reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-section)
+lists them.
 
 Loading fails when a shard has no replicas, a replica or
 `distributed_check.endpoint` URL does not parse, has a scheme other than `http`

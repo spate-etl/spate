@@ -57,7 +57,7 @@ use spate_core::error::DeserError;
 use spate_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use spate_core::ops::{ChunkConfig, Emitter, PushOutcome, chain};
 use spate_core::record::{PartitionId, RawPayload, Record};
-use spate_core::sink::{DrainReport, SinkFailures, SinkPool, shard_queues};
+use spate_core::sink::{DrainReport, SinkFailures, SinkPool, SinkPoolConfig, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::memory_source;
 use std::sync::Arc;
@@ -438,7 +438,6 @@ async fn parity_sink(
          shards:\n{shard_lines}\
          user: default\n\
          password: {pw}\n\
-         batch:\n  max_rows: 100000\n  max_bytes: 64MiB\n  linger: 100ms\n\
          {check}",
         check = check.unwrap_or_default(),
     ))
@@ -461,7 +460,10 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let num_shards = sink.endpoints.len();
     // Read everything that borrows `sink` before the endpoints move out.
     let router = sink.router::<Owned<LineRow>>(sku_key);
-    let pool_cfg = sink.pool;
+    let mut pool_cfg = SinkPoolConfig::default();
+    pool_cfg.batch.max_rows = 100_000;
+    pool_cfg.batch.max_bytes = 64 * 1024 * 1024;
+    pool_cfg.batch.linger = Duration::from_millis(100);
     let writer = Arc::new(sink.writer.clone());
     let encoder = sink.encoder::<Owned<LineRow>>();
     let codec = sink.frame_codec();

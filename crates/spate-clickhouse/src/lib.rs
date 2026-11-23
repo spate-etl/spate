@@ -106,8 +106,7 @@
 //!
 //! [`ClickHouseSinkBuilder::from_component_config`] turns that section into a
 //! [`ClickHouseSinkBuilder`], holding per-shard
-//! [`ClickHouseEndpoint`]s and the sink-pool configuration but no row type
-//! yet; [`ClickHouseSinkBuilder::connect`] supplies it, reads the
+//! [`ClickHouseEndpoint`]s but no row type yet; [`ClickHouseSinkBuilder::connect`] supplies it, reads the
 //! table's columns from every replica, and generates the
 //! [`ClickHouseWriter`] (the framework's `ShardWriter`) from both.
 //! [`ClickHouseSink::encoder`] hands out the matching `RowEncoder`, a

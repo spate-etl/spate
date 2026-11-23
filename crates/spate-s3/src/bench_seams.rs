@@ -25,7 +25,7 @@
 //!   run) rather than one internal call. Attribution below that level
 //!   comes from the callgrind profile the bench already writes.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use crate::framer::{Codec, ObjectFramer};
 use crate::split::SplitRange;
 use crate::trim::RangeTrim;
@@ -60,7 +60,7 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 /// Whatever the decompressor or the framer reports: a truncated stream, a
 /// corrupt frame, or a record over the framer's cap.
 pub fn frame_objects(
-    compression: Compression,
+    compression: S3Compression,
     make_framer: MakeFramer,
     objects: &[(String, Vec<Bytes>)],
 ) -> io::Result<usize> {
@@ -175,7 +175,7 @@ pub fn frame_range(
 pub fn pack_members(objects: &[(&str, u64)], target_bytes: u64) -> Vec<usize> {
     let mut packer = crate::unit::Packer::new(crate::split::Packing {
         target_bytes,
-        compression: Compression::Auto,
+        compression: S3Compression::Auto,
         delimiter: Some(b'\n'),
     });
     let mut members = Vec::new();

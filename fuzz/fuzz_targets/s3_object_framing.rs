@@ -26,7 +26,7 @@ use flate2::write::GzEncoder;
 use libfuzzer_sys::fuzz_target;
 use spate_core::framing::RecordFramer;
 use spate_json::JsonLinesFramer;
-use spate_s3::Compression;
+use spate_s3::S3Compression;
 use spate_s3::fuzz_seams::frame_object;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Arbitrary, Debug)]
 struct Input {
-    /// The object's key. Under `Compression::Auto` its extension picks the
+    /// The object's key. Under `S3Compression::Auto` its extension picks the
     /// codec.
     key: String,
     /// Index into the four compression policies.
@@ -103,7 +103,7 @@ struct Run {
 }
 
 /// Frame `chunks` as one object under a `cap`-byte record cap.
-fn frame(policy: Compression, key: &str, cap: usize, chunks: &[&[u8]]) -> Run {
+fn frame(policy: S3Compression, key: &str, cap: usize, chunks: &[&[u8]]) -> Run {
     let hash = Arc::new(AtomicU64::new(0xcbf2_9ce4_8422_2325));
     let bytes = Arc::new(AtomicU64::new(0));
     let (hash_out, bytes_out) = (Arc::clone(&hash), Arc::clone(&bytes));
@@ -130,10 +130,10 @@ fn gzip(bytes: &[u8]) -> Vec<u8> {
 
 fuzz_target!(|input: Input| {
     let policy = match input.policy % 4 {
-        0 => Compression::None,
-        1 => Compression::Gzip,
-        2 => Compression::Zstd,
-        _ => Compression::Auto,
+        0 => S3Compression::None,
+        1 => S3Compression::Gzip,
+        2 => S3Compression::Zstd,
+        _ => S3Compression::Auto,
     };
     let encoded = match input.encoding % 3 {
         1 => gzip(&input.object),

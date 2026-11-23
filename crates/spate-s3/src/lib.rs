@@ -114,7 +114,7 @@ mod trim;
 mod unit;
 mod unit_reader;
 
-pub use config::{Compression, S3SourceConfig};
+pub use config::{S3Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
 pub use split::{

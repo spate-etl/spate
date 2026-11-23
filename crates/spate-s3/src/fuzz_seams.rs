@@ -9,7 +9,7 @@
 //! target that predicts with such a predicate checks that the source applies
 //! it, and the predicate's own tests pin its rule.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use crate::framer::{Codec, ObjectFramer};
 use crate::offset::{self, Position};
 use crate::split::SplitRange;
@@ -58,7 +58,7 @@ pub fn decode_position(offset: i64) -> (u32, u64) {
 /// stream that decompresses to far more than the framer holds is framed in
 /// constant memory.
 pub fn frame_object<M>(
-    compression: Compression,
+    compression: S3Compression,
     key: &str,
     chunks: &[&[u8]],
     make_framer: M,
@@ -162,7 +162,7 @@ pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
     };
     let packing = crate::split::Packing {
         target_bytes: u64::MAX,
-        compression: Compression::None,
+        compression: S3Compression::None,
         delimiter: None,
     };
     match crate::unit::decode(body, &scope, packing) {

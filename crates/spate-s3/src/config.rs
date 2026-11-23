@@ -61,7 +61,7 @@ const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum Compression {
+pub enum S3Compression {
     /// Decide per object by key extension: `.gz`/`.gzip` → gzip,
     /// `.zst`/`.zstd` → zstd, anything else → uncompressed.
     #[default]
@@ -91,7 +91,7 @@ pub struct S3SourceConfig {
     pub url: String,
     /// Compression codec of the objects.
     #[serde(default)]
-    pub compression: Compression,
+    pub compression: S3Compression,
     /// Size above which an uncompressed object with an ETag, at most 50,000
     /// GiB, is cut into byte ranges of at most this size, one unit each, when
     /// the framer declares a resync delimiter. The lister packs objects read
@@ -164,7 +164,7 @@ impl S3SourceConfig {
     pub fn new(url: impl Into<String>) -> S3SourceConfig {
         S3SourceConfig {
             url: url.into(),
-            compression: Compression::default(),
+            compression: S3Compression::default(),
             split_target_bytes: default_split_target_bytes(),
             prefetch_bytes: default_prefetch_bytes(),
             chunk_bytes: default_chunk_bytes(),
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn minimal_config_gets_documented_defaults() {
         let cfg = S3SourceConfig::from_component_config(&section(&minimal())).unwrap();
-        assert_eq!(cfg.compression, Compression::Auto);
+        assert_eq!(cfg.compression, S3Compression::Auto);
         assert_eq!(cfg.prefetch_bytes, ByteSize::mib(8));
         assert_eq!(cfg.chunk_bytes, ByteSize::kib(512));
         assert_eq!(cfg.split_target_bytes, ByteSize::mib(64));

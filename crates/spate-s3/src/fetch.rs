@@ -3289,7 +3289,7 @@ mod tests {
             rt.handle().clone(),
             Arc::new(SystemClock),
             spate_core::checkpoint::Checkpointer::new().handle(),
-            crate::config::Compression::None,
+            crate::config::S3Compression::None,
             Arc::new(crate::testutil::ndjson_framer),
             Some(Position {
                 ordinal: 0,
@@ -3789,7 +3789,7 @@ mod tests {
         };
         let packing = crate::split::Packing {
             target_bytes: 1 << 20,
-            compression: crate::config::Compression::None,
+            compression: crate::config::S3Compression::None,
             delimiter: Some(b'\n'),
         };
         let mut origins = vec![Origin::Lister];

@@ -24,7 +24,7 @@
 //!   step queues a record or [`PUMP_DECODED_BYTES`] reach the framer, so the
 //!   lane drains the records one compressed chunk expands to between steps.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use bytes::{Buf, Bytes};
 use flate2::write::MultiGzDecoder;
 use spate_core::framing::{FramerWriter, RecordFramer};
@@ -67,12 +67,12 @@ pub(crate) enum Codec {
 
 impl Codec {
     /// Resolve the codec for an object key under the configured policy.
-    pub(crate) fn resolve(config: Compression, key: &str) -> Codec {
+    pub(crate) fn resolve(config: S3Compression, key: &str) -> Codec {
         match config {
-            Compression::None => Codec::Plain,
-            Compression::Gzip => Codec::Gzip,
-            Compression::Zstd => Codec::Zstd,
-            Compression::Auto => {
+            S3Compression::None => Codec::Plain,
+            S3Compression::Gzip => Codec::Gzip,
+            S3Compression::Zstd => Codec::Zstd,
+            S3Compression::Auto => {
                 if key.ends_with(".gz") || key.ends_with(".gzip") {
                     Codec::Gzip
                 } else if key.ends_with(".zst") || key.ends_with(".zstd") {
@@ -453,16 +453,16 @@ mod tests {
     #[test]
     fn codec_resolution_by_extension_and_override() {
         assert_eq!(
-            Codec::resolve(Compression::Auto, "a/b.ndjson.gz"),
+            Codec::resolve(S3Compression::Auto, "a/b.ndjson.gz"),
             Codec::Gzip
         );
-        assert_eq!(Codec::resolve(Compression::Auto, "a/b.zst"), Codec::Zstd);
+        assert_eq!(Codec::resolve(S3Compression::Auto, "a/b.zst"), Codec::Zstd);
         assert_eq!(
-            Codec::resolve(Compression::Auto, "a/b.ndjson"),
+            Codec::resolve(S3Compression::Auto, "a/b.ndjson"),
             Codec::Plain
         );
-        assert_eq!(Codec::resolve(Compression::Gzip, "a/b.zst"), Codec::Gzip);
-        assert_eq!(Codec::resolve(Compression::None, "a/b.gz"), Codec::Plain);
+        assert_eq!(Codec::resolve(S3Compression::Gzip, "a/b.zst"), Codec::Gzip);
+        assert_eq!(Codec::resolve(S3Compression::None, "a/b.gz"), Codec::Plain);
     }
 
     #[test]

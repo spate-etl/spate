@@ -9,7 +9,7 @@
 //! [`read_end`] is a worker's read of the end marker, which its end check
 //! compares at the start and the end of a settling window.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -222,7 +222,7 @@ fn object_name(object: &Path) -> &str {
 /// resync delimiter. Byte-equal across every correctly configured instance.
 pub(crate) fn feed_fingerprint(
     url: &str,
-    compression: Compression,
+    compression: S3Compression,
     split_target_bytes: u64,
     delimiter: Option<u8>,
 ) -> String {
@@ -511,7 +511,7 @@ mod tests {
     /// stay out of it.
     #[test]
     fn the_feed_fingerprint_changes_with_each_field() {
-        let base = feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, Some(b'\n'));
+        let base = feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, Some(b'\n'));
         assert_eq!(
             base,
             "spate-s3:feed1:d2:url=s3://data-bucket/events/:compression=Auto:\
@@ -520,23 +520,23 @@ mod tests {
         for other in [
             feed_fingerprint(
                 "s3://data-bucket/other/",
-                Compression::Auto,
+                S3Compression::Auto,
                 64 << 20,
                 Some(b'\n'),
             ),
-            feed_fingerprint(SOURCE, Compression::Zstd, 64 << 20, Some(b'\n')),
-            feed_fingerprint(SOURCE, Compression::Auto, 32 << 20, Some(b'\n')),
-            feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, Some(b'\t')),
-            feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, None),
+            feed_fingerprint(SOURCE, S3Compression::Zstd, 64 << 20, Some(b'\n')),
+            feed_fingerprint(SOURCE, S3Compression::Auto, 32 << 20, Some(b'\n')),
+            feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, Some(b'\t')),
+            feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, None),
         ] {
             assert_ne!(other, base);
         }
         assert!(
-            feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, None).ends_with(":delim=none")
+            feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, None).ends_with(":delim=none")
         );
         let redacted = feed_fingerprint(
             "s3://user:hunter2@data-bucket/events/?token=x",
-            Compression::Auto,
+            S3Compression::Auto,
             64 << 20,
             Some(b'\n'),
         );
@@ -1091,7 +1091,7 @@ mod tests {
     #[test]
     fn a_mismatch_prints_the_stored_fingerprint_escaped() {
         let location = accepted("s3://ops/jobs/a/");
-        let mine = feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, Some(b'\n'));
+        let mine = feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, Some(b'\n'));
         let stored = "spate-s3:feed1:d2:url=s3://elsewhere/\nINJECTED";
         let err = compare(&location, &mine, stored.as_bytes())
             .unwrap_err()
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn an_unrecognised_fingerprint_body_is_refused_apart_from_a_mismatch() {
         let location = accepted("s3://ops/jobs/a/");
-        let mine = feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, Some(b'\n'));
+        let mine = feed_fingerprint(SOURCE, S3Compression::Auto, 64 << 20, Some(b'\n'));
         let err = compare(&location, &mine, b"{\"owner\":\"another tool\"}")
             .unwrap_err()
             .to_string();

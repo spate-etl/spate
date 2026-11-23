@@ -311,9 +311,11 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 /// decode, such as a materialized view reading a damaged part, so
 /// [`classify_insert`] keeps 271 `Fatal` only for an insert whose body is coded.
 ///
-/// An insert answers 50 or 62 when a type name in the body names no type or
-/// does not parse. The server reads the whole name before it parses it, so a
-/// body cut short answers 32 or 33 instead.
+/// An insert answers 50 or 62 when a type name it reads names no type or does
+/// not parse. The server reads the whole name before it parses it, so a body
+/// cut short never answers either. A stored `Dynamic` or `JSON` part that a
+/// materialized view reads during the insert can answer them too, and that
+/// insert fails as well.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE

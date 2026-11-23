@@ -75,15 +75,14 @@ Name the type a component is built from `*Config`, and a block nested inside a Y
 
 ### Export every type a role's user names from the crate root
 
-Export from the crate root every public type a user of a role names: the role type, its config, every nested config type, and any type a constructor returns.
-The spate-s3 crate exports `S3Source`, `S3SourceConfig`, `S3Lane` and `S3Batch` from its root.
-
-Give each public item one path.
-A connector exports from its root the types it declares, and the items of a crate that exists only to serve it, as spate-clickhouse exports the `ClickHouseRow` derive from spate-clickhouse-derive.
+Export from the crate root every public type the connector declares that a user of a role names: the role type, its config, every nested config type, and any type a constructor returns.
 A type the connector takes from another Spate crate keeps that crate's path, and the connector does not re-export it.
-The S3 source's `tls` field is a `spate::tls::TlsSection`, and spate-s3 exports no `TlsSection`.
+The spate-s3 crate exports `S3Source`, `S3SourceConfig`, `S3Lane` and `S3Batch` from its root.
+Its `tls` field is a `spate::tls::TlsSection`, and spate-s3 exports no `TlsSection`.
 
-**Why:** a user then reaches every type a connector declares through one path, such as `spate::s3::`.
+The connector also exports the items of a crate that exists only to serve it, as spate-clickhouse exports the `ClickHouseRow` derive from spate-clickhouse-derive.
+
+**Why:** a user then reaches every type a connector declares through the connector's root, such as `spate::s3::`.
 The connector's name on each nested type keeps two roots from colliding.
 Two connectors that re-export one shared type make an application that imports it from both fail to compile.
 The type's own crate already reaches it from every connector.

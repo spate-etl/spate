@@ -69,7 +69,6 @@ sink:
 | `max_message_bytes` | bytes | `1MB` | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. `1MB` decodes to 1,000,000 bytes. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `spate_kafka_sink_*` families; `0s` disables statistics and those families with it. A non-zero value under `1ms` or above `24h` is refused. |
 | `compression` | `none\|gzip\|snappy\|lz4\|zstd` | `none` | Producer compression (`compression.codec`). |
-| `batch` / `inflight` / `retry` / `breaker` | sections | `none` | The connector's base for the sink pool. Unset means the framework's defaults apply. The same blocks beside `kafka:` in the sink section overlay this base field by field, so set them there. Keys, defaults and validation rules are in the [reference](../../../07-reference/configuration.mdx#sink-pool). |
 | `rdkafka` | string map | `{}` | Raw librdkafka producer properties, applied verbatim after validation — see below. |
 
 ## The `rdkafka` passthrough and the denylist

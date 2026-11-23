@@ -300,7 +300,7 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 }
 
 /// Server exception codes that cannot succeed on retry: schema, parse,
-/// settings, authentication and block-decoding classes. Everything else is retried:
+/// settings, authentication, size-limit and block-decoding classes. Everything else is retried:
 /// with deduplication tokens a spurious retry is idempotent, and the circuit
 /// breaker plus the stalled-watermark alert surface persistent failures.
 ///
@@ -316,6 +316,13 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 /// cut short never answers either. A stored `Dynamic` or `JSON` part that a
 /// materialized view reads during the insert can answer them too, and that
 /// insert fails as well.
+///
+/// An insert answers 128 or 131 when its body is over a size limit: a block
+/// header's column, row or name bounds, or a RowBinary value over
+/// `format_binary_max_array_size` or `format_binary_max_string_size`. A
+/// function a materialized view runs on the rows, a damaged stored part, or a
+/// replica whose profile sets a lower cap can answer them too, and that insert
+/// fails as well.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
@@ -329,6 +336,8 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
     81,  // UNKNOWN_DATABASE
     115, // UNKNOWN_SETTING
     117, // INCORRECT_DATA
+    128, // TOO_LARGE_ARRAY_SIZE
+    131, // TOO_LARGE_STRING_SIZE
     192, // UNKNOWN_USER
     CANNOT_DECOMPRESS,
     497, // ACCESS_DENIED
@@ -365,7 +374,7 @@ fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema, parse,
-///   settings, auth and block-decoding codes above, `Retryable` otherwise (e.g.
+///   settings, auth, size-limit and block-decoding codes above, `Retryable` otherwise (e.g.
 ///   `TOO_MANY_PARTS`, memory pressure, shutdown races);
 /// - client-side params and both codec directions (`InvalidParams`,
 ///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
@@ -481,6 +490,23 @@ mod tests {
 
         let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
         assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
+    }
+
+    /// A body over a server size limit answers 128 or 131, which classify
+    /// `Fatal` whether or not the body is coded: a retry resends the same body.
+    #[test]
+    fn too_large_answers_are_fatal() {
+        let reasons = [
+            "Code: 128. DB::Exception: Suspiciously many columns in Native format: 2147483648: While executing WaitForAsyncInsert. (TOO_LARGE_ARRAY_SIZE) (version 26.8.36.3 (official build))",
+            "Code: 131. DB::Exception: Too large string size: While executing WaitForAsyncInsert. (TOO_LARGE_STRING_SIZE) (version 26.8.36.3 (official build))",
+        ];
+        for reason in reasons {
+            for coded in [false, true] {
+                let err =
+                    classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+                assert_eq!(err.class(), ErrorClass::Fatal, "coded {coded}: {err:?}");
+            }
+        }
     }
 
     /// A setting the server does not know classifies `Fatal`: every retry

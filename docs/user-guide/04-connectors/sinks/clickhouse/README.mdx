@@ -136,6 +136,13 @@ The batch is not retried on another replica, and the pipeline fails once
 [seeded S3 run](../../sources/s3/README.mdx#a-run-on-a-seeded-feed) fails each
 unit in the batch back to its feed instead.
 
+Under `format: rowbinary`, the server caps each String value in an insert at
+`format_binary_max_string_size` and each Array or Map value at
+`format_binary_max_array_size`. Both settings can be set through `settings`. An
+insert with a value over either cap is a fatal error in the same way, because
+every retry sends the same value. Under `format: native` the server does not
+apply `format_binary_max_string_size`.
+
 ## Security (TLS)
 
 No feature flag is needed for TLS. Point a replica at an `https://` URL and the

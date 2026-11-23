@@ -35,7 +35,7 @@ mod controller;
 pub(crate) mod driver;
 mod runtime;
 
-pub use builder::{BuildError, ChainCtx, Pipeline, PipelineError, SinkOptions};
+pub use builder::{BuildError, ChainCtx, Pipeline, PipelineError, ResolvedSink, SinkOptions};
 pub use runtime::{PipelineRuntime, RuntimeOptions, ShutdownHandle, StartError, metrics_settings};
 
 use crate::error::FatalError;

@@ -174,8 +174,10 @@ workers, their queues and their metric labels from the topology it carries.
   anything spawns. `SinkPoolConfig` carries the batching, in-flight, retry,
   and breaker tuning ([Tuning](../05-deployment/tuning.mdx)). It is
   `#[non_exhaustive]`, so build it from `new` or `default()`, as the example
-  above does. The builder runs `SinkPoolConfig::validate` on it before
-  anything spawns and rejects a pool that fails, naming the key
+  above does. It is the sink's base pool: the pool blocks in the sink's YAML
+  section overlay it field by field, and a block set with `SinkOptions`
+  replaces it. The builder runs `SinkPoolConfig::validate` on the result
+  before anything spawns and rejects a pool that fails, naming the key
   ([Sink pool](../07-reference/configuration.mdx#sink-pool)).
 - `.with_component_type("...")` — sets the `component_type` metric label
   (default `"custom"`) on every sink series
@@ -201,10 +203,11 @@ workers, their queues and their metric labels from the topology it carries.
   count the bytes before the codec, so sizing does not depend on the codec.
 
 Construct the struct via `new` plus the `with_*` methods. It is
-`#[non_exhaustive]`, so fields can grow without breaking you. Queue depth
-between pipeline threads and shard workers is the builder's knob, not the
-bundle's:
-`Pipeline::sink_with(bundle, SinkOptions::default().with_queue_capacity(n))`.
+`#[non_exhaustive]`, so fields can grow without breaking you. Queue size
+between pipeline threads and shard workers is set per sink by the
+[`queue:` key](../07-reference/configuration.mdx#queue) or
+`Pipeline::sink_with(bundle, SinkOptions::default().with_queue(..))`, and the
+bundle carries none.
 
 ## The connector pattern: implementing `SinkBundle`
 
@@ -230,11 +233,12 @@ flows the framework cannot name, such as a pre-flight schema check that produces
 the encoder's row schema, stay concrete pre-steps in your factory, before
 `into_parts`.
 
-If your connector deserializes a YAML body, don't name a field `chunk`: that
-key is **framework-reserved** inside every component body (it carries the
-chain terminal's chunking) and is peeled out before your config ever sees it,
-so a `chunk` field of your own would never receive a value. See
-[the configuration reference](../07-reference/configuration.mdx#chunk).
+If your connector deserializes a YAML body, don't name a field `chunk`: a
+`chunk` key inside any component body is refused at load, because the chain
+terminal's chunking sits beside the component key. Leave `batch`, `inflight`,
+`retry` and `breaker` out of your config as well. They sit beside the
+component key too, and overlay the base pool your `SinkParts` carries. See
+[the sink section reference](../07-reference/configuration.mdx#sink-section).
 
 ## Testing
 

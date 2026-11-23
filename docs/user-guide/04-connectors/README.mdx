@@ -9,7 +9,7 @@ feeds it, a **format** (deserializer) decodes payloads into records, and a
 **sink** writes them out. Everything between (batching, routing, retries,
 acknowledgments, backpressure) is framework-owned, so each connector is a
 thin implementation of a small trait. Configuration reaches every connector
-the same way: an opaque single-key section in the pipeline YAML, handed to
+the same way: an opaque body under one key in the pipeline YAML, handed to
 the connector's factory (see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx)).
 

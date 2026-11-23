@@ -191,33 +191,36 @@ impl<'de> Deserialize<'de> for FeedSection {
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error as _;
-        let mut keys = serde_yaml::Mapping::deserialize(deserializer)?;
-        let units_held = keys
-            .remove("units_held")
+        let keys = serde_yaml::Mapping::deserialize(deserializer)?;
+        let ([units_held, attempt_cap, location, settling_window], mut backend) =
+            super::component::split_backend::<D::Error, 4>(
+                keys,
+                "`feed:`",
+                ["units_held", "attempt_cap", "location", "settling_window"],
+                "`memory: {}`",
+            )?;
+        let units_held = units_held
             .map(|v| {
                 Option::<NonZeroUsize>::deserialize(v)
                     .map_err(|e| D::Error::custom(format!("units_held: {e}")))
             })
             .transpose()?
             .flatten();
-        let attempt_cap = keys
-            .remove("attempt_cap")
+        let attempt_cap = attempt_cap
             .map(|v| {
                 Option::<NonZeroU32>::deserialize(v)
                     .map_err(|e| D::Error::custom(format!("attempt_cap: {e}")))
             })
             .transpose()?
             .flatten();
-        let location = keys
-            .remove("location")
+        let location = location
             .map(|v| {
                 Option::<String>::deserialize(v)
                     .map_err(|e| D::Error::custom(format!("location: {e}")))
             })
             .transpose()?
             .flatten();
-        let settling_window = keys
-            .remove("settling_window")
+        let settling_window = settling_window
             .map(|v| {
                 humantime_serde::Serde::<Option<Duration>>::deserialize(v)
                     .map(humantime_serde::Serde::into_inner)
@@ -225,36 +228,6 @@ impl<'de> Deserialize<'de> for FeedSection {
             })
             .transpose()?
             .flatten();
-        // Every key left names a backend, so a misspelled common key shows up
-        // here as a second backend.
-        if keys.len() != 1 {
-            let found: Vec<String> = keys
-                .keys()
-                .map(|k| match k.as_str() {
-                    Some(name) => format!("`{name}`"),
-                    None => "a non-string key".to_owned(),
-                })
-                .collect();
-            return Err(D::Error::custom(if found.is_empty() {
-                "`feed:` names no backend; add one, e.g. `memory: {}`".to_owned()
-            } else {
-                format!(
-                    "`feed:` must name exactly one backend beside `units_held`, \
-                     `attempt_cap`, `location` and `settling_window`; found {}",
-                    found.join(", ")
-                )
-            }));
-        }
-        let mut backend = ComponentConfig::deserialize(serde_yaml::Value::Mapping(keys))
-            .map_err(D::Error::custom)?;
-        // The backend has no chain terminal, so a `chunk:` peeled from its body
-        // would otherwise vanish without an error.
-        if backend.has_chunk() {
-            return Err(D::Error::custom(format!(
-                "{}: `chunk:` is only valid on a sink section",
-                backend.type_tag()
-            )));
-        }
         backend.set_section("feed");
         Ok(FeedSection {
             backend,
@@ -530,13 +503,11 @@ mod tests {
         assert!(err.starts_with("units_held: "), "{err}");
     }
 
-    /// Pins that a `chunk:` under the backend is refused.
+    /// Pins that loading a file refuses a `chunk:` under the backend.
     #[test]
     fn chunk_under_the_backend_is_refused() {
-        let err = parse("memory: { chunk: { target_bytes: 1MiB } }\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("chunk"), "{err}");
+        let err = load("{ memory: { chunk: { target_bytes: 1MiB } } }").unwrap_err();
+        assert!(err.starts_with("feed.memory.chunk: "), "{err}");
     }
 
     /// Pins that a `chunk:` in a body built in code is refused, as on the YAML path.
@@ -547,7 +518,7 @@ mod tests {
         let body = serde_yaml::from_str("chunk: { target_bytes: 1MiB }").unwrap();
         cfg.feed = Some(FeedSection::new(ComponentConfig::new("memory", body)));
         let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("not `feed`"), "{err}");
+        assert!(err.starts_with("feed.memory.chunk: "), "{err}");
     }
 
     /// Pins that an error in the backend's body carries its path from the

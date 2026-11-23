@@ -111,7 +111,8 @@ Tuning lives in YAML next to the binary; the operator graph never does.
 Every `${VAR:-default}` interpolates from the environment (in Kubernetes:
 ConfigMap/Secret env). Framework sections (`pipeline`, `admin`, `checkpoint`,
 `backpressure`, `metrics`) are typed and validated; the `source`,
-`deserializer`, and `sink` bodies belong to their connectors:
+`deserializer`, and `sink` bodies belong to their connectors. The `batch` and
+`inflight` blocks beside `clickhouse:` tune the framework's sink pool:
 
 ```yaml
 pipeline:
@@ -154,18 +155,18 @@ deserializer:
     prewarm_subjects: ["${KAFKA_TOPIC:-orders}-value"]
 
 sink:
+  batch:
+    max_rows: 500000
+    max_bytes: 128MiB
+    linger: 1s
+  inflight:
+    max_per_shard: 2
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-orders}
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    batch:
-      max_rows: 500000
-      max_bytes: 128MiB
-      linger: 1s
-    inflight:
-      max_per_shard: 2
 ```
 
 With a saturated source, an undersized budget collapses throughput. The

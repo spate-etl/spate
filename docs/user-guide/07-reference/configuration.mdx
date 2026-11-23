@@ -12,10 +12,12 @@ how connector sections reach their factories, see
 One YAML file configures one process. The framework owns the typed sections
 `pipeline`, `admin`, `checkpoint`, `backpressure` and `metrics`, validated
 strictly (`deny_unknown_fields` at every level, so typos fail at startup with
-the offending YAML path). The `source`, `deserializer`, and `sink` sections are
-single-key mappings selecting a component type; their bodies are opaque to the
-framework and deserialized by the component's own factory. The optional
-[`feed`](#feed) section names the work feed a feed-reading source reads.
+the offending YAML path). The `source` and `deserializer` sections are
+single-key mappings selecting a component type. A `sink` section holds one key
+selecting the component and the framework's [sink keys](#sink-section) beside
+it. Each component body is opaque to the framework and deserialized by the
+component's own factory. The optional [`feed`](#feed) section names the work
+feed a feed-reading source reads.
 
 ```yaml
 pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -28,6 +30,7 @@ source:
 deserializer:
   avro: { ... }           # body owned by spate-avro (or json: { ... } — optional section)
 sink:
+  batch: { linger: 2s }   # framework sink keys beside the component key
   clickhouse: { ... }     # body owned by spate-clickhouse
 ```
 
@@ -38,7 +41,7 @@ syntax (`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`,
 `1GiB`) or a plain integer for bytes. Framework-section defaults are the exact
 values from
 [`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs); the
-sink-pool and code-level defaults come from
+sink-key defaults come from
 [`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs) and
 [`spate-core/src/pipeline/builder.rs`](repo:crates/spate-core/src/pipeline/builder.rs).
 
@@ -118,15 +121,57 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 | `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `spate_source_lag_records`, which is always per partition. |
 | `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `spate_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
 
+## Sink section {#sink-section}
+
+A sink section, under `sink:` or a `sinks:` entry, holds exactly one key naming
+the sink component. The framework's sink keys sit beside that key and apply to
+every sink, whatever the component:
+
+| Key | Configures | Reference |
+|---|---|---|
+| `queue` | The chunk queue in front of each shard worker | [Shard queue](#queue) |
+| `chunk` | How the chain terminal seals chunks for the workers | [Chunk handoff](#chunk) |
+| `batch`, `inflight`, `retry`, `breaker` | The sink's worker pool | [Sink pool](#sink-pool) |
+
+```yaml
+sinks:
+  orders:
+    queue: { max_bytes: 8MiB }
+    chunk: { target_bytes: 512KiB }
+    batch: { max_rows: 1000000, linger: 2s }
+    inflight: { max_per_shard: 4 }
+    clickhouse:
+      table: orders
+      shards: [{ replicas: ["http://clickhouse-0:8123"] }]
+```
+
+Any other key beside the component key is refused at load as a second
+component, and the message lists the framework keys, so a misspelled `batc:`
+fails startup. The framework keys are checked when the file loads, each under
+its own path such as `sinks.orders.queue.max_bytes`. The pool bounds run when
+the pipeline installs the sink, because they apply to the pool after the
+connector's base is overlaid.
+
+Each key can instead be set in code, per sink, through `SinkOptions`
+(`with_queue`, `with_chunk`, `with_batch`, `with_inflight`, `with_retry`,
+`with_breaker`) passed to `Pipeline::sink_with`. A key set both in the file
+and in code on one sink is a startup error, since each is declared in exactly
+one place. A key declared on a sink the program never installs is logged as a
+warning at startup, since nothing reads it.
+
 ## Sink pool (`batch` / `inflight` / `retry` / `breaker`) {#sink-pool}
 
-Every sink connector maps its `batch`, `inflight`, `retry`, and `breaker`
-sub-sections onto the framework's `SinkPoolConfig`
+The four pool blocks configure the framework's `SinkPoolConfig`
 ([`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs)).
 The keys and defaults are **framework-owned and identical across sinks**, and
 this table is their single source of truth; each connector page shows only the
 keys it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size
 them.
+
+A connector supplies the base pool, which is these defaults unless its page
+says otherwise. A block in the file overlays that base field by field, so
+`batch: { linger: 2s }` changes the linger and keeps the base's row and byte
+limits. A block set in code with `SinkOptions` replaces the base block whole.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -145,10 +190,11 @@ them.
 
 These bounds are enforced by `SinkPoolConfig::validate`, which checks the
 `batch` and `inflight` keys and runs `RetryConfig::validate` and
-`BreakerConfig::validate`. A sink connector checks them when its configuration
-loads, and the pipeline builder checks them again when it installs any sink, so
-a bad value fails startup before the write loop runs. A sink built in code
-fails `Pipeline::sink` with the sink's name and the key.
+`BreakerConfig::validate`. The pipeline builder runs it on the resolved pool
+when it installs any sink, so a bad value fails startup before the write loop
+runs, naming the sink and the key. A bound that compares two fields, such as
+`retry.initial` against `retry.max`, can only be checked there, because a
+file block alone does not hold the base's other fields.
 They rule out the nonsensical, not the aggressive; `initial: 1ns` passes.
 
 A pool spawned directly with `SinkPool::spawn` skips the check. On that path
@@ -186,22 +232,20 @@ respective connector pages, indexed [below](#source-deserializer-sink).
 
 ## Chunk handoff (`chunk`) {#chunk}
 
-`chunk:` tunes the chain terminal's per-shard chunking, the granularity at
-which encoded rows are sealed and handed to the shard workers. Like the sink
-pool above it is **framework-owned and identical across sinks**, and it sits
-inside the sink body (`sink.<type>.chunk`, or per branch as
-`sinks.<name>.chunk`), but it configures the *chain terminal*, not the sink
-worker, so the framework reads it directly and connectors neither declare nor
-see it. It is purely performance-shaping and never affects delivery correctness:
-a below-target chunk is sealed on every `checkpoint.interval` tick regardless,
-so the most a larger target can do is defer a commit by roughly one tick. It
-can never hold offsets back indefinitely. See
-[Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
+`chunk:` tunes the chain terminal's per-shard chunking, the granularity at which
+encoded rows are sealed and handed to the shard workers. It sits in the
+[sink section](#sink-section) beside the component key (`sink.chunk`, or per
+branch as `sinks.<name>.chunk`). It configures the *chain terminal*, not the
+sink worker, so connectors never see it. It is purely performance-shaping and
+never affects delivery correctness: a below-target chunk is sealed on every
+`checkpoint.interval` tick regardless, so the most a larger target can do is
+defer a commit by roughly one tick. It can never hold offsets back indefinitely.
+See [Chunk sizing](../05-deployment/tuning.mdx#chunk-sizing) for how to size it.
 
 ```yaml
 sink:
-  clickhouse:
-    chunk: { target_bytes: 512KiB, encode_policy: skip }
+  chunk: { target_bytes: 512KiB, encode_policy: skip }
+  clickhouse: { ... }
 ```
 
 | Key | Type | Default | Description |
@@ -210,30 +254,54 @@ sink:
 | `encode_policy` | `skip` \| `fail` | `skip` | Policy for record-level encoder failures ([Error handling](../02-concepts/04-error-handling.mdx)). `skip` drops the record (metrics-counted); `fail` stops the pipeline. A fatal encoder error stops the pipeline regardless. |
 
 Each `sinks.<name>.chunk` is independent, so a split tunes every destination
-separately. The knob can instead be set in code via `SinkOptions::with_chunk`
-(the install-time counterpart to the
-[code-level knobs](#code-level-knobs-not-yaml) below); setting **both** the YAML
-`chunk:` block and `with_chunk` on one sink is a load error, since it is
-declared in exactly one place.
+separately.
 
-:::note
-`chunk` is a **framework-reserved key** inside any sink body: the framework
-strips it before the connector sees the body. A custom connector must not define
-its own `chunk` field (it would be shadowed on a sink section, and the reserved
-key is rejected on a `source`/`deserializer` section).
-:::
+A `chunk` key inside any component body, a source, deserializer, feed or sink
+body, is refused at load. For a sink body the message names the place beside
+the component key. A custom connector must not define its own `chunk` field.
+
+## Shard queue (`queue`) {#queue}
+
+`queue:` sizes the bounded queue between the pipeline threads and each shard
+worker. It sits in the [sink section](#sink-section) beside the component key.
+Each shard of the sink gets its own queue of this size.
+
+```yaml
+sink:
+  queue: { max_bytes: 8MiB }
+  clickhouse: { ... }
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_bytes` | bytes | `none` | The size of each shard's queue. The pipeline converts it to a number of chunk slots once, at startup: `max_bytes` divided by the sink's [`chunk.target_bytes`](#chunk), rounded up. Unset, each queue holds 8 chunks whatever the chunk size. Must be greater than zero, and refused when it makes more slots than tokio's `Semaphore::MAX_PERMITS` (`usize::MAX >> 3`). |
+
+The queue holds a number of chunks, so the bytes it holds can differ from
+`max_bytes`. A partial chunk sealed on the commit tick takes a whole slot, so a
+queue of small chunks holds less. A chunk seals once its frame reaches
+`target_bytes` or passes it, so a queue of full chunks can hold slightly more.
+
+A `max_bytes` smaller than one chunk gives one slot. The backpressure
+controller resumes the source once every queue is below a fraction of its
+slots, and a one-slot queue is below that fraction only when it is empty.
+
+Queued chunks are charged to the in-flight byte budget. A deeper queue raises
+throughput only while the budget has room for it, so size the two together.
+[Queues](../05-deployment/tuning.mdx#queues) has the trade-off and measured
+figures.
 
 ## `source:`, `deserializer:`, `sink:`
 
-Each is a single-key mapping in which the key selects the component and the body
-belongs to it. The framework requires exactly one `source`, exactly one of
+Each holds one key that selects the component, and the body belongs to it. A
+sink section also holds the framework's [sink keys](#sink-section) beside that
+key. The framework requires exactly one `source`, exactly one of
 `sink` **or** `sinks`, and treats `deserializer` as optional.
 
 | Section | Required | Body documented in |
 |---|---|---|
 | `source` | yes | [Kafka](../04-connectors/sources/kafka/README.mdx), [S3](../04-connectors/sources/s3/README.mdx), [Datagen](../04-connectors/sources/datagen/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sources](../06-extending/custom-source.mdx)) |
 | `deserializer` | no — sources that emit ready-made records need none | [Avro](../04-connectors/formats/avro/README.mdx), [JSON](../04-connectors/formats/json/README.mdx) |
-| `sink` **or** `sinks` | yes (exactly one) | [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx), [Kafka](../04-connectors/sinks/kafka/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sinks](../06-extending/custom-sink.mdx)) |
+| `sink` **or** `sinks` | yes (exactly one), a [sink section](#sink-section) | [ClickHouse](../04-connectors/sinks/clickhouse/README.mdx), [Kafka](../04-connectors/sinks/kafka/README.mdx), [Memory](../04-connectors/memory.mdx), or your own ([Custom sinks](../06-extending/custom-sink.mdx)) |
 
 **Security is per connector, and some of it is a build feature rather than a
 key.** Each connector's page carries its own auth and TLS section; the matrix
@@ -244,7 +312,7 @@ of which is which is in
 
 A pipeline that writes to more than one destination declares `sinks:`, a
 `name -> component` map, **instead of** `sink:` (setting both, or neither, is a
-load error). Each entry is an ordinary single-key component with its own full
+load error). Each entry is a [sink section](#sink-section) with its own full
 configuration.
 
 | Rule | Behavior |
@@ -300,17 +368,3 @@ only when a feed is built from the section, so a feed passed to
 with. `units_held`, `location`
 and `settling_window` apply to every feed, since the source reads them, and so
 does `attempt_cap` as the re-enqueue cap of a source that re-enqueues units.
-
-## Code-level knobs (not YAML) {#code-level-knobs-not-yaml}
-
-These knobs live in the assembly code rather than the file, because they
-are properties of the program you write, not the deployment.
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `SinkOptions::queue_capacity` | integer | `8` | Bounded chunk-queue depth between pipeline threads and each shard worker (`Pipeline::sink_with`). Must be non-zero. |
-
-The chain-terminal chunking (`target_bytes`, `encode_policy`) moved to the
-per-sink YAML [`chunk:` block](#chunk); `SinkOptions::with_chunk` is its
-install-time equivalent for pipelines assembled in code (mutually exclusive with
-the YAML block on the same sink).

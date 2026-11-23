@@ -6,7 +6,7 @@
 use crate::checkpoint::AckIssuer;
 use crate::config::{
     AdminSection, BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter,
-    MetricsSection, PinningMode, PipelineConfig, PipelineSection,
+    MetricsSection, PinningMode, PipelineConfig, PipelineSection, SinkSection,
 };
 use crate::error::{FatalError, SourceError};
 use crate::feed::memory::MemoryFeed;
@@ -777,7 +777,10 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         },
         source: ComponentConfig::new("fake", serde_yaml::Value::Null),
         deserializer: None,
-        sink: Some(ComponentConfig::new("fake", serde_yaml::Value::Null)),
+        sink: Some(SinkSection::new(ComponentConfig::new(
+            "fake",
+            serde_yaml::Value::Null,
+        ))),
         sinks: None,
         feed: None,
     }

@@ -32,15 +32,19 @@ pub trait SinkBundle {
 ///
 /// `shard_endpoints` is indexed `[shard][replica]` and must be non-empty
 /// with every shard holding at least one replica. The builder rejects
-/// ragged or empty topologies, and a `pool` that fails
-/// [`SinkPoolConfig::validate`], before anything spawns.
+/// ragged or empty topologies before anything spawns. `pool` is the base
+/// the sink section's pool blocks overlay, and the builder rejects a
+/// resolved pool that fails [`SinkPoolConfig::validate`].
 #[non_exhaustive]
 pub struct SinkParts<W: ShardWriter> {
     /// The connector's writer, shared by every shard worker.
     pub writer: W,
     /// Per-shard replica endpoints, `[shard][replica]`.
     pub shard_endpoints: Vec<Vec<W::Endpoint>>,
-    /// Pool tuning (batching, inflight, retry, breaker).
+    /// The connector's base pool tuning (batching, inflight, retry,
+    /// breaker). A YAML pool block beside the backend key overlays it field
+    /// by field, and one set with
+    /// [`SinkOptions`](crate::pipeline::SinkOptions) replaces it.
     pub pool: SinkPoolConfig,
     /// The `component_type` metric label (e.g. `"clickhouse"`).
     pub component_type: String,

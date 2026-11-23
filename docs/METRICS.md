@@ -230,7 +230,7 @@ Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_queue_depth` | gauge | `queue` | Chunks currently queued, sampled by the senders on each send and by the shard worker after each intake pass. Two writers set it, so a reading can trail the channel by one write until the next send or intake pass. While a sealed batch waits for an `inflight.max_per_shard` slot the worker reads nothing, and the gauge holds the senders' sample, typically `capacity`. A closed queue keeps its last reading through the shutdown drain. The live resume decision uses the channel directly, not this gauge. |
-| `spate_queue_capacity` | gauge | `queue` | Configured bound. |
+| `spate_queue_capacity` | gauge | `queue` | The queue's bound in chunks: the sink's `queue.max_bytes` divided by its `chunk.target_bytes`, rounded up, or 8 when `queue.max_bytes` is unset. |
 | `spate_queue_full_events_total` | counter | `queue` | `try_send` rejections (each is a backpressure signal, never a block). A rejected chunk is parked and retried once per poll cycle while blocked, and every retry that still finds the queue full counts again — so during a sustained stall this tracks retry cadence, not distinct fill episodes. |
 
 ## Backpressure (`spate_backpressure_*`)

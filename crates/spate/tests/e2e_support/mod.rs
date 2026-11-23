@@ -39,7 +39,7 @@ use spate::ops::{ChunkConfig, chain_owned};
 use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
-use spate::sink::KeyHashRouter;
+use spate::sink::{KeyHashRouter, QueueSection};
 use spate_test::HANG;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
@@ -473,24 +473,28 @@ impl Harness {
         let sink = sink.expect("schema fetch");
         let encoder = sink.encoder::<spate::deser::Owned<Event>>();
 
-        let chunk_bytes = params.chunk_bytes;
+        let chunk = ChunkConfig {
+            target_bytes: params.chunk_bytes,
+            ..ChunkConfig::default()
+        };
+        // Whole chunks, so the queue holds exactly `queue_capacity` of them.
+        let queue = QueueSection::new((params.queue_capacity * params.chunk_bytes) as u64);
         let runtime = pipeline
             .sink_with(
                 sink,
-                SinkOptions::default().with_queue_capacity(params.queue_capacity),
+                SinkOptions::default().with_chunk(chunk).with_queue(queue),
             )
             .expect("sink assembly")
             .chains(move |ctx| {
+                // Bound before `with_metrics` moves `ctx.pipeline`.
+                let chunk = ctx.chunk();
                 chain_owned::<Event, _>(deserializer.clone())
                     .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
                         encoder.clone(),
                         KeyHashRouter,
-                        ChunkConfig {
-                            target_bytes: chunk_bytes,
-                            ..ChunkConfig::default()
-                        },
+                        chunk,
                         ctx.queues,
                         ctx.budget,
                     )
@@ -548,6 +552,7 @@ pub struct PipelineParams {
     pub admin_port: u16,
     pub threads: usize,
     pub shards: usize,
+    /// Chunks each shard queue holds.
     pub queue_capacity: usize,
     pub chunk_bytes: usize,
     pub batch_max_rows: u64,

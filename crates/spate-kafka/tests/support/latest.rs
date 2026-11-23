@@ -58,7 +58,7 @@ fn pipeline() -> (Pipeline, CaptureSink, SinkScript) {
          checkpoint: {{ drain_timeout: 200ms }}\n\
          metrics: {{ exporter: none }}\n\
          source: {{ memory: {{}} }}\n\
-         sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+         sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n"
     );
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 4;

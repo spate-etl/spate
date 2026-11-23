@@ -42,11 +42,11 @@ the ClickHouse settings.
 
 ```yaml
 sink:
-  clickhouse:
-    batch:
-      max_rows: 500000      # seal a batch at this many rows
-      max_bytes: 128MiB     # …or this many encoded bytes, whichever first
-      linger: 1s            # …or this long after the first row, at low volume
+  batch:
+    max_rows: 500000      # seal a batch at this many rows
+    max_bytes: 128MiB     # …or this many encoded bytes, whichever first
+    linger: 1s            # …or this long after the first row, at low volume
+  clickhouse: { ... }
 ```
 
 One sealed batch is one `INSERT`, and on a `MergeTree` table
@@ -70,12 +70,12 @@ bounds staleness on a quiet stream; set it to the freshness your consumers need.
 
 ```yaml
 sink:
+  inflight:
+    max_per_shard: 2
   clickhouse:
     shards:
       - replicas: ["http://ch-1:8123"]
       - replicas: ["http://ch-2:8123"]
-    inflight:
-      max_per_shard: 2
 ```
 
 Each shard is one **writer** with its own insert stream;
@@ -304,11 +304,11 @@ pipeline:
 backpressure:
   max_inflight_bytes: 3GiB   # sized to the rule — see the note below
 sink:
+  batch: { max_rows: 1000000, max_bytes: 256MiB, linger: 1s }
+  inflight: { max_per_shard: 2 }
   clickhouse:
     format: rowbinary          # native if the server is CPU-bound or egress is metered
     compression: lz4
-    batch: { max_rows: 1000000, max_bytes: 256MiB, linger: 1s }
-    inflight: { max_per_shard: 2 }
     shards:
       - replicas: ["http://clickhouse:8123"]
     settings:

@@ -1,32 +1,101 @@
 //! Sink worker-pool tuning knobs.
 //!
 //! These are framework-level structs, and they are also the wire format: the
-//! `batch`, `inflight`, `retry` and `breaker` sub-sections of every sink's
-//! YAML deserialize straight into them. The keys and defaults are meant to be
-//! identical across connectors, so they are literally one type rather than a
-//! per-connector mirror that has to be kept in step by hand.
+//! `queue`, `batch`, `inflight`, `retry` and `breaker` blocks beside a sink's
+//! backend key deserialize straight into them. The keys are identical across
+//! connectors, so they are one type rather than a per-connector mirror that
+//! has to be kept in step by hand. A connector supplies the base each pool
+//! block overlays, as [`SinkParts::pool`](super::SinkParts::pool).
 //!
 //! Every struct here is `#[non_exhaustive]`. Construct one with `default()`
 //! (or [`SinkPoolConfig::new`]) and assign the fields you are tuning; a knob
 //! added later arrives as a new default and existing code keeps compiling.
 
 use crate::clock::LONGEST_DEADLINE;
-use crate::config::{DurationBounds, DurationBoundsError, check_duration};
+use crate::config::{
+    ConfigError, DurationBounds, DurationBoundsError, SectionPath, check_duration, de_byte_size,
+};
 use bytesize::ByteSize;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-/// Accept `128MiB`-style sizes on the wire while keeping the field a plain
-/// `u64`. `ByteSize` is a parsing convenience, not part of the batching API.
-fn de_byte_size<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    ByteSize::deserialize(d).map(|b| b.as_u64())
+/// How much encoded data each shard's chunk queue holds, the `queue:` block
+/// beside a sink's backend key.
+///
+/// The queue counts chunks, so `max_bytes` sets a slot count:
+/// `max_bytes / chunk.target_bytes`, rounded up. Queued bytes can sit below
+/// `max_bytes`, because a partial chunk seals on every commit tick, or above
+/// it, because a chunk seals once its frame reaches the target. Without the
+/// block each queue holds 8 chunks.
+///
+/// Queued chunks are charged to the in-flight byte budget, so every shard's
+/// queue has to fit under the budget's low watermark beside the pending
+/// writes. [The backpressure page][bp] carries the sizing rule.
+///
+/// [bp]: https://spate.kainth.dev/docs/user-guide/concepts/backpressure
+///
+/// ```
+/// use spate_core::sink::QueueSection;
+///
+/// let queue = QueueSection::new(8 * 1024 * 1024);
+/// assert_eq!(queue.max_bytes.as_u64(), 8 * 1024 * 1024);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct QueueSection {
+    /// Encoded bytes per shard queue, as `8MiB`-style sizes or a plain byte
+    /// count. Above zero, and at most [`Semaphore::MAX_PERMITS`] chunks.
+    pub max_bytes: ByteSize,
+}
+
+impl QueueSection {
+    /// A queue holding `max_bytes` bytes per shard.
+    #[must_use]
+    pub fn new(max_bytes: u64) -> QueueSection {
+        QueueSection {
+            max_bytes: ByteSize::b(max_bytes),
+        }
+    }
+
+    /// The slot count for chunks of `chunk_bytes`, which must be above zero.
+    /// `at` is the path of the sink section, such as `sinks.eu`.
+    pub(crate) fn capacity(
+        &self,
+        chunk_bytes: usize,
+        at: &SectionPath,
+    ) -> Result<usize, ConfigError> {
+        let max_bytes = self.max_bytes.as_u64();
+        if max_bytes == 0 {
+            return Err(at.invalid("queue.max_bytes", "must be greater than zero"));
+        }
+        // `usize` on a 32-bit target is narrower than the `u64` wire value.
+        let max_bytes = usize::try_from(max_bytes).map_err(|_| {
+            at.invalid(
+                "queue.max_bytes",
+                format!("({max_bytes}) exceeds the addressable range on this platform"),
+            )
+        })?;
+        let slots = max_bytes.div_ceil(chunk_bytes);
+        // tokio's channel panics above this many slots.
+        if slots > Semaphore::MAX_PERMITS {
+            return Err(at.invalid(
+                "queue.max_bytes",
+                format!(
+                    "makes {slots} chunks of {chunk_bytes} bytes, above the {} a queue holds",
+                    Semaphore::MAX_PERMITS
+                ),
+            ));
+        }
+        Ok(slots)
+    }
 }
 
 /// Batch sealing thresholds for one shard worker. A batch seals as soon as
 /// **any** threshold trips; since chunks arrive whole, a sealed batch may
 /// overshoot `max_rows`/`max_bytes` by at most one chunk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct BatchConfig {
@@ -59,7 +128,7 @@ impl Default for BatchConfig {
 }
 
 /// In-flight write limits for one shard worker.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct InflightConfig {
@@ -81,7 +150,7 @@ impl Default for InflightConfig {
 
 /// Retry policy for batch writes. Retries rotate across healthy replicas;
 /// the sealed batch and its deduplication token are reused unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct RetryConfig {
@@ -223,7 +292,7 @@ impl RetryConfig {
 }
 
 /// Per-replica circuit breaker thresholds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct BreakerConfig {
@@ -472,6 +541,32 @@ mod tests {
 
     fn retry(mutate: impl FnOnce(&mut RetryConfig)) -> RetryConfig {
         tuned(mutate)
+    }
+
+    fn slots(max_bytes: u64, chunk_bytes: usize) -> Result<usize, String> {
+        QueueSection::new(max_bytes)
+            .capacity(chunk_bytes, &SectionPath::sink("fake"))
+            .map_err(|e| e.to_string())
+    }
+
+    /// A queue's bytes become whole chunks, rounded up, with tokio's channel
+    /// bound the largest count accepted.
+    #[test]
+    fn a_queue_size_becomes_a_slot_count() {
+        assert_eq!(slots(1024 * 1024, 64 * 1024), Ok(16));
+        assert_eq!(slots(1024 * 1024 + 1, 64 * 1024), Ok(17));
+        assert_eq!(slots(1, 64 * 1024), Ok(1));
+        let most = Semaphore::MAX_PERMITS as u64;
+        assert_eq!(slots(most, 1), Ok(Semaphore::MAX_PERMITS));
+        let err = slots(most + 1, 1).unwrap_err();
+        assert!(
+            err.starts_with("sink.fake.queue.max_bytes: makes "),
+            "{err}"
+        );
+        assert_eq!(
+            slots(0, 64 * 1024),
+            Err("sink.fake.queue.max_bytes: must be greater than zero".to_owned())
+        );
     }
 
     #[test]

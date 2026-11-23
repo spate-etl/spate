@@ -90,7 +90,7 @@ hand-recorded during the tuning investigation, no committed record):
 
 ```text
 max_inflight_bytes x low_ratio >= 2 x ( shards x inflight.max_per_shard x batch.max_bytes
-                                      + shards x queue_capacity x chunk.target_bytes )
+                                      + shards x queue.max_bytes )
 ```
 
 Raise the budget or cap `batch.max_bytes` accordingly; the full rule and a

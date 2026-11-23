@@ -403,7 +403,7 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
         "pipeline: {{ name: {name}, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms, max_pending_batches: 2 }}\n\
          metrics: {{ exporter: prometheus }}\n\
-         source: {{ memory: {{}} }}\nsink: {{ capture: {{ chunk: {{ target_bytes: 1 }} }} }}\n"
+         source: {{ memory: {{}} }}\nsink: {{ capture: {{}}, chunk: {{ target_bytes: 1 }} }}\n"
     );
     let pipeline_config = spate_core::config::PipelineConfig::from_str(&yaml).expect("config");
     let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {

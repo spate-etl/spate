@@ -38,6 +38,11 @@ source:
     count: ${SPATE_LOAD_COUNT:-10000000}
 
 sink:
+  inflight:
+    max_per_shard: 4
+  batch:
+    linger: 2000ms
+    max_rows: 1048576
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-order_lines}
     format: native
@@ -84,8 +89,3 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    inflight:
-      max_per_shard: 4
-    batch:
-      linger: 2000ms
-      max_rows: 1048576

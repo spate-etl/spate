@@ -269,8 +269,8 @@ Read-ahead buffering and how to cap it:
 
 ## Chunk sizing: `chunk.target_bytes` {#chunk-sizing}
 
-Set per sink in YAML as `sink.<type>.chunk.target_bytes`, or per branch as
-`sinks.<name>.chunk.target_bytes`
+Set per sink in YAML as `sink.chunk.target_bytes`, or per branch as
+`sinks.<name>.chunk.target_bytes`, beside the sink's component key
 ([configuration reference](../07-reference/configuration.mdx#chunk)). It never
 affects delivery correctness, because a partial chunk is sealed on every commit
 tick and at most defers a commit by ~one interval, so it is a deploy-time knob
@@ -300,18 +300,25 @@ would take minutes to fill holds the acknowledgments (and therefore the
 source watermark) of every batch that contributed a row to it, so the commit
 tick bounds that hold to the checkpoint period.
 
-## Queues: `SinkOptions::queue_capacity`
+## Queues: `queue.max_bytes` {#queues}
 
 The bounded chunk queue between pipeline threads and each shard worker, default
 **8** chunks (chunks target 64 KiB, see [`chunk.target_bytes`](#chunk-sizing)).
-This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
-[Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)) and not a YAML
-key; unlike `chunk`, it stays in code, with deploy-time exposure a possible
-follow-up. It exists to signal, not to buffer: a full queue is the per-shard
-backpressure trigger (`spate_queue_full_events_total`). Keep it small; the
-global byte budget, not the queue, is the intended smoothing buffer.
+Set it per sink in YAML as `sink.queue.max_bytes`, or per branch as
+`sinks.<name>.queue.max_bytes`
+([configuration reference](../07-reference/configuration.mdx#queue)).
+`SinkOptions::with_queue` is the code-level equivalent. The pipeline divides
+`max_bytes` by the sink's `chunk.target_bytes` once at startup, rounding up, so
+the queue holds a number of chunks: `max_bytes: 8MiB` at 64 KiB chunks is 128
+chunks. The queue exists to signal, not to buffer: a full queue is the
+per-shard backpressure trigger (`spate_queue_full_events_total`). Keep it
+small; the global byte budget, not the queue, is the intended smoothing
+buffer.
 
-That "keep it small" comes from a queue-depth sweep. It is a trade, not
+That "keep it small" comes from a queue-depth sweep. Its results are recorded
+as chunk counts with no chunk size, so the figures below are capacities in
+chunks. Multiply a capacity by your `chunk.target_bytes` for the
+`max_bytes` that gives it. It is a trade, not
 a free default, and **its price depends on whether your sink is the
 constraint.** Depth raised throughput in every regime measured, by 46% to 92%;
 what differs is the cost:
@@ -350,7 +357,7 @@ sends this diagnosis the wrong way (see [What a flush
 contains](../../METRICS.md#what-a-flush-contains)).
 
 - **Pauses high, write p99 flat and low** → the queue is throttling a sink that
-  has headroom. Raise `queue_capacity` and watch the pauses reach zero.
+  has headroom. Raise `queue.max_bytes` and watch the pauses reach zero.
   `spate_sink_permit_wait_duration_seconds` confirms it: if the flush p99 you
   are worried about is mostly permit wait, no amount of server tuning will move
   it.
@@ -364,7 +371,7 @@ Earlier revisions of this page described the trigger as *rate-driven as well as
 capacity-driven*, and told you to reach for chunk size when pauses were high
 while the sink was idle. Both were wrong. An iso-buffer re-run, holding queued
 bytes constant while varying seal size, put the pause count at zero for the
-small-chunk arm, so the trigger tracks **queued bytes**, and `queue_capacity`
+small-chunk arm, so the trigger tracks **queued bytes**, and `queue.max_bytes`
 is the lever, not `chunk.target_bytes`.
 :::
 

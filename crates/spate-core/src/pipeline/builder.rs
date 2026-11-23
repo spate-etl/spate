@@ -39,7 +39,7 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`SinkPoolConfig::validate`](crate::sink::SinkPoolConfig::validate) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`SinkOptions::resolve`] (the sink's chunk, queue capacity and pool, validated) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.feed(feed)` | [`PipelineRuntime::with_feed`] |
 //! | `.seeded_feed(feed)` | [`PipelineRuntime::with_seeded_feed`] |
@@ -61,7 +61,7 @@ use super::runtime::{
     PipelineRuntime, RuntimeOptions, StartError, install_or_reuse, metrics_settings,
 };
 use crate::backpressure::InflightBudget;
-use crate::config::{ConfigError, PipelineConfig};
+use crate::config::{ConfigError, PipelineConfig, SectionPath, SinkSection};
 use crate::feed::{Feed, FeedOrigin};
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
@@ -69,8 +69,9 @@ use crate::metrics::{
 use crate::ops::{ChunkConfig, RunnableChain, SplitTarget};
 use crate::pipeline::ExitReport;
 use crate::sink::{
-    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkMetricsCtx,
-    SinkPool, SinkProbeFn, shard_queues,
+    BatchConfig, BreakerConfig, DrainReport, InflightConfig, QueueSection, RetryConfig,
+    ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkMetricsCtx, SinkPool,
+    SinkPoolConfig, SinkProbeFn, shard_queues,
 };
 use crate::source::Source;
 use crate::telemetry::{self, LogFormat};
@@ -267,57 +268,225 @@ impl ChainCtx {
     }
 }
 
-/// Sink wiring knobs that live outside connector config.
-#[derive(Clone, Debug)]
+/// Each shard queue's slot count when neither the YAML `queue:` block nor
+/// [`SinkOptions::with_queue`] sets one.
+const DEFAULT_QUEUE_CAPACITY: usize = 8;
+
+/// The framework's sink keys, set in code. Each one is the code form of the
+/// YAML block of the same name beside the sink's backend key, and a sink
+/// takes each key from one place: setting it here **and** in that sink's
+/// YAML section is a [`ConfigError`] at install. `None` (the default) defers
+/// to the YAML block, or to the default when that is absent too.
+///
+/// Construct with `default()` and the `with_*` methods (the struct is
+/// `#[non_exhaustive]`).
+///
+/// ```
+/// use spate_core::pipeline::SinkOptions;
+/// use spate_core::sink::{BatchConfig, QueueSection};
+///
+/// let mut batch = BatchConfig::default();
+/// batch.max_rows = 1_000_000;
+/// let options = SinkOptions::default()
+///     .with_queue(QueueSection::new(8 * 1024 * 1024))
+///     .with_batch(batch);
+/// assert_eq!(options.batch.map(|b| b.max_rows), Some(1_000_000));
+/// ```
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct SinkOptions {
-    /// Per-shard chunk queue capacity, in chunks. The default suits most
-    /// pipelines. Queued chunks are charged to the in-flight byte budget, so
-    /// `shards × queue_capacity × chunk.target_bytes` has to fit under the
-    /// budget's low watermark *alongside* pending writes. When it does not, a
-    /// saturated pipeline sits permanently above the high watermark and the
-    /// pause controller duty-cycles at its minimum pause, collapsing
-    /// throughput with nothing otherwise wrong. [The backpressure page][bp]
-    /// carries the full sizing rule and a worked example.
-    ///
-    /// [bp]: https://spate.kainth.dev/docs/user-guide/concepts/backpressure
-    pub queue_capacity: usize,
-    /// Programmatic override for this sink's terminal-stage chunking. `None`
-    /// (the default) defers to the per-sink YAML `chunk:` block, or to
-    /// [`ChunkConfig::default`] if that is absent too. Setting it **and** a
-    /// YAML `chunk:` block on the same sink is a decl-once
-    /// [`ConfigError`](crate::config::ConfigError) at install; the knob is
-    /// declared in exactly one place. The resolved value reaches the chain
+    /// Each shard queue's size, which sets its slot count from the resolved
+    /// chunk size. Without it from here or YAML, each queue holds 8 chunks.
+    pub queue: Option<QueueSection>,
+    /// This sink's terminal-stage chunking. Without it from here or YAML,
+    /// [`ChunkConfig::default`]. The resolved value reaches the chain
     /// terminal via [`ChainCtx::chunk`] / [`ChainCtx::sink`].
     pub chunk: Option<ChunkConfig>,
+    /// Batch sealing thresholds, replacing the connector's base whole.
+    pub batch: Option<BatchConfig>,
+    /// In-flight write limits, replacing the connector's base whole.
+    pub inflight: Option<InflightConfig>,
+    /// Write retry policy, replacing the connector's base whole.
+    pub retry: Option<RetryConfig>,
+    /// Replica circuit breaker, replacing the connector's base whole.
+    pub breaker: Option<BreakerConfig>,
 }
 
 impl SinkOptions {
-    /// Override the per-shard queue capacity. (`SinkOptions` is
-    /// `#[non_exhaustive]`, so construct via `default()` + `with_*`.)
+    /// Set this sink's queue size (see [`queue`](Self::queue)).
     #[must_use]
-    pub fn with_queue_capacity(mut self, capacity: usize) -> Self {
-        self.queue_capacity = capacity;
+    pub fn with_queue(mut self, queue: QueueSection) -> Self {
+        self.queue = Some(queue);
         self
     }
 
-    /// Set this sink's chunking programmatically, instead of via the YAML
-    /// `chunk:` block. Providing both on the same sink is a load error (see
-    /// [`chunk`](Self::chunk)).
+    /// Set this sink's chunking (see [`chunk`](Self::chunk)).
     #[must_use]
     pub fn with_chunk(mut self, chunk: ChunkConfig) -> Self {
         self.chunk = Some(chunk);
         self
     }
+
+    /// Set this sink's batch thresholds (see [`batch`](Self::batch)).
+    #[must_use]
+    pub fn with_batch(mut self, batch: BatchConfig) -> Self {
+        self.batch = Some(batch);
+        self
+    }
+
+    /// Set this sink's in-flight limits (see [`inflight`](Self::inflight)).
+    #[must_use]
+    pub fn with_inflight(mut self, inflight: InflightConfig) -> Self {
+        self.inflight = Some(inflight);
+        self
+    }
+
+    /// Set this sink's retry policy (see [`retry`](Self::retry)).
+    #[must_use]
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+
+    /// Set this sink's circuit breaker (see [`breaker`](Self::breaker)).
+    #[must_use]
+    pub fn with_breaker(mut self, breaker: BreakerConfig) -> Self {
+        self.breaker = Some(breaker);
+        self
+    }
+
+    /// The values [`Pipeline::add_sink_with`] installs for the sink `name`,
+    /// from its YAML section in `config`, these options and the connector's
+    /// pool `base` ([`SinkParts::pool`](crate::sink::SinkParts::pool)). A
+    /// manual assembly calls it to size its queues and spawn its pool as
+    /// the builder would.
+    ///
+    /// A YAML pool block overlays `base` field by field; a pool block set
+    /// here replaces it whole. The result passes
+    /// [`SinkPoolConfig::validate`]. A framework block declared on a sink
+    /// that nothing installs is warned about by
+    /// [`Pipeline::into_runtime`], which knows every installed name.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] naming the sink when a key is set both here and in
+    /// YAML, a block does not decode, `chunk.target_bytes` is zero,
+    /// `queue.max_bytes` is zero, does not fit `usize` on this platform or
+    /// makes more chunks than a queue holds, or the pool fails
+    /// [`SinkPoolConfig::validate`].
+    ///
+    /// ```
+    /// use spate_core::config::PipelineConfig;
+    /// use spate_core::pipeline::SinkOptions;
+    /// use spate_core::sink::SinkPoolConfig;
+    ///
+    /// let config = PipelineConfig::from_str(
+    ///     r#"
+    /// pipeline: { name: demo }
+    /// source: { memory: {} }
+    /// sink:
+    ///   queue: { max_bytes: 2MiB }
+    ///   chunk: { target_bytes: 128KiB }
+    ///   memory: {}
+    /// "#,
+    /// )?;
+    /// let resolved = SinkOptions::default().resolve(&config, "default", SinkPoolConfig::default())?;
+    /// assert_eq!(resolved.queue_capacity, 16);
+    /// assert_eq!(resolved.chunk.target_bytes, 128 * 1024);
+    /// # Ok::<(), spate_core::config::ConfigError>(())
+    /// ```
+    pub fn resolve(
+        &self,
+        config: &PipelineConfig,
+        name: &str,
+        base: SinkPoolConfig,
+    ) -> Result<ResolvedSink, ConfigError> {
+        let address = config.sink_address(name);
+        // No YAML section under this name: the sink is configured in code
+        // (capture sinks in tests, named sinks beside a placeholder `sink:`).
+        let section = config.sink_section(name).ok();
+        let at = &*address;
+
+        let chunk = one_place(
+            from_yaml(section, |s| s.chunk(at))?,
+            self.chunk,
+            "chunk",
+            at,
+        )?
+        .unwrap_or_default();
+        // The YAML path already checked `> 0`; `with_chunk` skips that. It
+        // also comes before the queue's slot count divides by it.
+        if chunk.target_bytes == 0 {
+            return Err(ConfigError::Validation(format!(
+                "{address}: chunk.target_bytes must be greater than zero"
+            )));
+        }
+        let queue = one_place(
+            from_yaml(section, |s| s.queue(at))?,
+            self.queue,
+            "queue",
+            at,
+        )?;
+        let queue_capacity = match queue {
+            Some(queue) => queue.capacity(chunk.target_bytes, &SectionPath::at(at))?,
+            None => DEFAULT_QUEUE_CAPACITY,
+        };
+        let batch = from_yaml(section, |s| s.batch(at, &base.batch))?;
+        let inflight = from_yaml(section, |s| s.inflight(at, &base.inflight))?;
+        let retry = from_yaml(section, |s| s.retry(at, &base.retry))?;
+        let breaker = from_yaml(section, |s| s.breaker(at, &base.breaker))?;
+        let pool = SinkPoolConfig::new(
+            one_place(batch, self.batch, "batch", at)?.unwrap_or(base.batch),
+            one_place(inflight, self.inflight, "inflight", at)?.unwrap_or(base.inflight),
+            one_place(retry, self.retry, "retry", at)?.unwrap_or(base.retry),
+            one_place(breaker, self.breaker, "breaker", at)?.unwrap_or(base.breaker),
+        );
+        pool.validate()
+            .map_err(|e| ConfigError::Validation(format!("{address}: {e}")))?;
+        Ok(ResolvedSink {
+            chunk,
+            queue_capacity,
+            pool,
+        })
+    }
 }
 
-impl Default for SinkOptions {
-    fn default() -> Self {
-        SinkOptions {
-            queue_capacity: 8,
-            chunk: None,
-        }
+/// A YAML block's value, when the sink has a YAML section.
+fn from_yaml<T>(
+    section: Option<&SinkSection>,
+    block: impl FnOnce(&SinkSection) -> Result<Option<T>, ConfigError>,
+) -> Result<Option<T>, ConfigError> {
+    section.map(block).transpose().map(Option::flatten)
+}
+
+/// The one of `yaml` and `code` that is set, refusing both for the sink at
+/// `address`.
+fn one_place<T>(
+    yaml: Option<T>,
+    code: Option<T>,
+    key: &str,
+    address: &str,
+) -> Result<Option<T>, ConfigError> {
+    match (yaml, code) {
+        (Some(_), Some(_)) => Err(ConfigError::Validation(format!(
+            "{address}: set `{key}` in exactly one place, the YAML `{key}:` block or \
+             `SinkOptions::with_{key}`, not both"
+        ))),
+        (yaml, code) => Ok(yaml.or(code)),
     }
+}
+
+/// What [`SinkOptions::resolve`] gives for one sink: the values
+/// [`Pipeline::add_sink_with`] installs.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct ResolvedSink {
+    /// The chain terminal's chunking.
+    pub chunk: ChunkConfig,
+    /// Each shard queue's slot count, for [`shard_queues`].
+    pub queue_capacity: usize,
+    /// The worker pool's configuration, for [`SinkPool::spawn`].
+    pub pool: SinkPoolConfig,
 }
 
 struct SinkAssembly {
@@ -398,11 +567,9 @@ impl Pipeline {
         }
         // The YAML loaders run the full `PipelineConfig::validate`; a
         // programmatically built config skips it by design (minimal test
-        // fixtures). But `ComponentConfig::new` peels the reserved `chunk` key
-        // before the connector's `deny_unknown_fields` could reject it, so
-        // without this check a stray `chunk:` on a source/deserializer body
-        // would be silently swallowed here.
-        config.reject_stray_chunk().map_err(BuildError::Config)?;
+        // fixtures). A sink that decodes no body would ignore a `chunk:`
+        // inside it, so this check runs here too.
+        config.reject_body_chunk().map_err(BuildError::Config)?;
         telemetry::init(LogFormat::Json, "info");
         let metrics = install_or_reuse(&metrics_settings(&config)).map_err(|e| match e {
             StartError::Metrics(m) => BuildError::Metrics(m),
@@ -505,11 +672,9 @@ impl Pipeline {
     ///
     /// [`BuildError::DuplicateSinkName`] when `name` is already installed;
     /// [`BuildError::Sink`] for an empty or reserved name (`"sink"` is the
-    /// default sink's metric label), an empty or ragged topology, label
-    /// shapes that do not match it, or a zero queue capacity;
-    /// [`BuildError::Config`] naming the sink when its chunk config does not
-    /// resolve, `chunk.target_bytes` is zero, or the bundle's pool fails
-    /// [`SinkPoolConfig::validate`](crate::sink::SinkPoolConfig::validate);
+    /// default sink's metric label), an empty or ragged topology, or label
+    /// shapes that do not match it;
+    /// [`BuildError::Config`] when [`SinkOptions::resolve`] fails;
     /// [`BuildError::DuplicateSeries`] when its metric series are already
     /// claimed.
     pub fn add_sink_with<B: SinkBundle>(
@@ -535,46 +700,14 @@ impl Pipeline {
                     .into(),
             ));
         }
-        if options.queue_capacity == 0 {
-            return Err(BuildError::Sink("queue_capacity must be non-zero".into()));
-        }
-        // Resolve the terminal-stage chunking BEFORE any I/O worker spawns, so
-        // a config error can't leak a running SinkPool. Decl-once: the per-sink
-        // YAML `chunk:` block and `SinkOptions::with_chunk` are mutually
-        // exclusive.
-        let address = self.config.sink_address(&sink_name);
-        let yaml_chunk = match self.config.sink_config(&sink_name) {
-            Ok(cc) => cc.resolved_sink_chunk(&address)?,
-            // No YAML section under this name. The sink is configured purely
-            // in code (capture sinks in tests, named programmatic sinks beside
-            // a placeholder `sink:`). A declared `chunk:` block that nothing
-            // ever installs is warned about at `into_runtime`, where the
-            // installed-name set is complete.
-            Err(_) => None,
-        };
-        let chunk = match (yaml_chunk, options.chunk) {
-            (Some(_), Some(_)) => {
-                return Err(BuildError::Config(ConfigError::Validation(format!(
-                    "{address}: set the chunk config in exactly one place — the \
-                     YAML `chunk:` block or `SinkOptions::with_chunk`, not both"
-                ))));
-            }
-            (Some(c), None) | (None, Some(c)) => c,
-            (None, None) => ChunkConfig::default(),
-        };
-        // The YAML path already checked `> 0` in `ChunkSection::resolve`; the
-        // programmatic `with_chunk` path skips that, so enforce parity here
-        // (naming the sink). There is no upper bound. The in-flight budget can
-        // be smaller than one chunk on a throttled config; that is heavy
-        // backpressure rather than a misconfiguration. `target_bytes` is a
-        // per-shard pre-allocation; sizing it is the operator's call (see the
-        // tuning docs).
-        if chunk.target_bytes == 0 {
-            return Err(BuildError::Config(ConfigError::Validation(format!(
-                "{address}: chunk.target_bytes must be greater than zero"
-            ))));
-        }
         let parts = bundle.into_parts();
+        // Before any I/O worker spawns or metric series is claimed, so a
+        // config error leaks neither.
+        let ResolvedSink {
+            chunk,
+            queue_capacity,
+            pool: pool_config,
+        } = options.resolve(&self.config, &sink_name, parts.pool)?;
         let num_shards = parts.shard_endpoints.len();
         if num_shards == 0 {
             return Err(BuildError::Sink("sink topology has no shards".into()));
@@ -591,13 +724,6 @@ impl Pipeline {
                  endpoint topology {endpoint_shape:?}"
             )));
         }
-        // A bundle built in code has not been through a loader. Checking here,
-        // before `shard_queues`, returns before any metric series is claimed.
-        if let Err(e) = parts.pool.validate() {
-            return Err(BuildError::Config(ConfigError::Validation(format!(
-                "{address}: {e}"
-            ))));
-        }
 
         let pipeline_name = self.config.pipeline.name.clone();
         // The single-sink default keeps the historical `component="sink"`
@@ -607,7 +733,7 @@ impl Pipeline {
         } else {
             sink_name.clone()
         };
-        let (mut queues, receivers) = shard_queues(num_shards, options.queue_capacity);
+        let (mut queues, receivers) = shard_queues(num_shards, queue_capacity);
         // The sink's custom-metrics scope (`spate_<component_type>_sink_*`),
         // handed to the writer before it is shared across shard workers.
         let sink_meter = Meter::for_component(
@@ -656,7 +782,7 @@ impl Pipeline {
             Arc::new(writer),
             parts.shard_endpoints,
             receivers,
-            parts.pool,
+            pool_config,
             Arc::clone(&self.budget),
             shard_metrics,
             &pipeline_name,
@@ -776,22 +902,26 @@ impl Pipeline {
                 probes.push(probe);
             }
         }
-        // A declared sink section whose name nothing installed can carry a
-        // `chunk:` block that no install-time resolution will ever read, the
+        // A declared sink section whose name nothing installed can carry
+        // framework blocks that no install-time resolution will ever read, the
         // one mismatch invisible to `add_sink_with`. (A *malformed* block is
         // already rejected by `PipelineConfig::validate` on the YAML loaders.)
         for config_name in self.config.sink_names() {
-            if !named.iter().any(|(n, _, _)| *n == config_name)
-                && self
-                    .config
-                    .sink_config(&config_name)
-                    .is_ok_and(crate::config::ComponentConfig::has_chunk)
-            {
+            if named.iter().any(|(n, _, _)| *n == config_name) {
+                continue;
+            }
+            let declared = self
+                .config
+                .sink_section(&config_name)
+                .map(SinkSection::declared)
+                .unwrap_or_default();
+            if !declared.is_empty() {
                 tracing::warn!(
                     sink = %config_name,
-                    "config declares a `chunk:` block for this sink, but no sink was \
-                     installed under that name — the block is ignored (name mismatch \
-                     between the config and add_sink)"
+                    "config declares `{}` for this sink, but no sink was installed under \
+                     that name, so nothing reads them (name mismatch between the config \
+                     and add_sink)",
+                    declared.join("`, `")
                 );
             }
         }
@@ -1152,13 +1282,6 @@ mod tests {
             p.sink(bad_labels).err(),
             Some(BuildError::Sink(_))
         ));
-
-        let p = Pipeline::from_config(test_config(1)).expect("builder");
-        assert!(matches!(
-            p.sink_with(null_sink(1), SinkOptions::default().with_queue_capacity(0))
-                .err(),
-            Some(BuildError::Sink(_))
-        ));
     }
 
     #[tokio::test]
@@ -1257,10 +1380,12 @@ mod tests {
         }
     }
 
-    /// A `chunk:` body peeled onto a `ComponentConfig`, the shape the framework
-    /// resolves at install without the connector ever seeing the key.
-    fn chunk_body(yaml: &str) -> ComponentConfig {
-        ComponentConfig::new("fake", serde_yaml::from_str(yaml).expect("chunk yaml"))
+    /// A sink section for the `fake` backend with the framework `blocks`
+    /// beside it, as a YAML file would give it.
+    fn fake_section(blocks: &str) -> SinkSection {
+        let mut keys: serde_yaml::Mapping = serde_yaml::from_str(blocks).expect("blocks yaml");
+        keys.insert("fake".into(), serde_yaml::Value::Null);
+        serde_yaml::from_value(serde_yaml::Value::Mapping(keys)).expect("a sink section")
     }
 
     /// A sink section assigned to the config in code carries no label, and
@@ -1270,7 +1395,7 @@ mod tests {
     fn a_chunk_mistake_names_a_sink_assigned_in_code() {
         use crate::config::{PipelineConfig, PipelineSection, YamlValue};
         let memory = || ComponentConfig::new("memory", YamlValue::Mapping(Default::default()));
-        let zero = || chunk_body("chunk: { target_bytes: 0 }");
+        let zero = || fake_section("chunk: { target_bytes: 0 }");
         let base = || PipelineConfig::new(PipelineSection::new("demo"), memory(), memory());
         let mut multi = base();
         multi.sink = None;
@@ -1281,8 +1406,8 @@ mod tests {
         let mut single = base();
         single.sink = Some(zero());
         for (config, name, want) in [
-            (multi, "eu", "sinks.eu.fake.chunk.target_bytes"),
-            (single, "default", "sink.fake.chunk.target_bytes"),
+            (multi, "eu", "sinks.eu.chunk.target_bytes"),
+            (single, "default", "sink.chunk.target_bytes"),
         ] {
             let want = format!("{want}: must be greater than zero");
             assert_eq!(config.validate().expect_err("refused").to_string(), want);
@@ -1312,8 +1437,13 @@ mod tests {
             let cfg = PipelineConfig::new_multi_sink(
                 PipelineSection::new("demo"),
                 ComponentConfig::new("memory", YamlValue::Mapping(Default::default())),
-                BTreeMap::from([("eu".to_owned(), chunk_body(body))]),
+                BTreeMap::from([(
+                    "eu".to_owned(),
+                    ComponentConfig::new("fake", YamlValue::Null),
+                )]),
             );
+            let mut cfg = cfg;
+            cfg.sinks = Some(BTreeMap::from([("eu".to_owned(), fake_section(body))]));
             Pipeline::from_config(cfg)
                 .expect("builder")
                 .add_sink_with("eu", null_sink(1), SinkOptions::default())
@@ -1324,23 +1454,23 @@ mod tests {
         for (body, want) in [
             (
                 "chunk: { target_bytes: 0 }",
-                "sinks.eu.fake.chunk.target_bytes: must be greater than zero",
+                "sinks.eu.chunk.target_bytes: must be greater than zero",
             ),
             (
                 "chunk: { bogus: 1 }",
-                "sinks.eu.fake.chunk.bogus: unknown field `bogus`, expected `target_bytes` or \
+                "sinks.eu.chunk.bogus: unknown field `bogus`, expected `target_bytes` or \
                  `encode_policy`",
             ),
         ] {
             assert_eq!(
-                load(&format!("sinks:\n  eu: {{ fake: {{ {body} }} }}\n")),
+                load(&format!("sinks:\n  eu: {{ fake: {{}}, {body} }}\n")),
                 want
             );
             assert_eq!(install(body), want);
         }
         assert_eq!(
-            load("sink: { fake: { chunk: { target_bytes: 0 } } }\n"),
-            "sink.fake.chunk.target_bytes: must be greater than zero"
+            load("sink: { fake: {}, chunk: { target_bytes: 0 } }\n"),
+            "sink.chunk.target_bytes: must be greater than zero"
         );
     }
 
@@ -1349,7 +1479,7 @@ mod tests {
         // Decl-once: setting the YAML `chunk:` block AND `SinkOptions::with_chunk`
         // on the same sink is a config error, not a silent override.
         let mut config = test_config(1);
-        config.sink = Some(chunk_body("chunk: { target_bytes: 128KiB }"));
+        config.sink = Some(fake_section("chunk: { target_bytes: 128KiB }"));
         let err = Pipeline::from_config(config)
             .expect("builder")
             .sink_with(
@@ -1486,11 +1616,11 @@ mod tests {
         let mut sinks = std::collections::BTreeMap::new();
         sinks.insert(
             "a".to_string(),
-            chunk_body("chunk: { target_bytes: 128KiB }"),
+            fake_section("chunk: { target_bytes: 128KiB }"),
         );
         sinks.insert(
             "b".to_string(),
-            chunk_body("chunk: { target_bytes: 512KiB }"),
+            fake_section("chunk: { target_bytes: 512KiB }"),
         );
         config.sinks = Some(sinks);
 
@@ -1656,10 +1786,10 @@ mod tests {
 
     #[test]
     fn default_sink_yaml_chunk_reaches_ctx_chunk() {
-        // The headline single-sink path: `sink.<type>.chunk` must arrive at
+        // The headline single-sink path: `sink.chunk` must arrive at
         // the chain factory via `ctx.chunk()`, not silently stay the default.
         let mut config = test_config(1);
-        config.sink = Some(chunk_body("chunk: { target_bytes: 128KiB }"));
+        config.sink = Some(fake_section("chunk: { target_bytes: 128KiB }"));
         let bytes = captured_default_chunk(|p| p.sink(null_sink(1)), config);
         assert_eq!(bytes, 128 * 1024, "YAML chunk block reaches ctx.chunk()");
     }
@@ -1681,22 +1811,287 @@ mod tests {
         assert_eq!(bytes, 96 * 1024, "with_chunk reaches ctx.chunk()");
     }
 
+    /// The slot count of the queues installed for the sink `name`.
+    fn installed_capacity(p: &Pipeline, name: &str) -> usize {
+        let (_, assembly) = p.sinks.iter().find(|(n, _)| n == name).expect("installed");
+        assembly.queues.capacity()
+    }
+
+    /// The message of a config error from installing `options` on the default
+    /// sink of `config`.
+    fn install_error(config: PipelineConfig, options: SinkOptions) -> String {
+        match Pipeline::from_config(config)
+            .expect("builder")
+            .sink_with(null_sink(1), options)
+        {
+            Err(BuildError::Config(e)) => e.to_string(),
+            Err(other) => panic!("not a config error: {other:?}"),
+            Ok(_) => panic!("installed"),
+        }
+    }
+
+    fn chunk_of(target_bytes: usize) -> ChunkConfig {
+        ChunkConfig {
+            target_bytes,
+            encode_policy: crate::error::ErrorPolicy::Skip,
+        }
+    }
+
+    /// The YAML `queue:` block reaches the installed queues, sized from the
+    /// sink's own chunk: 2 MiB of 128 KiB chunks is 16 slots, which neither
+    /// the default (8) nor the default chunk (32) gives.
     #[test]
-    fn stray_chunk_on_a_source_body_is_rejected_by_from_config() {
-        // `ComponentConfig::new` peels the reserved key before the connector's
-        // `deny_unknown_fields` could reject it, so `from_config` must reject
-        // it itself. A stray `chunk:` on a source is an error, not a silent
-        // no-op, even on the programmatic path that skips `validate`.
+    fn the_yaml_queue_sizes_the_installed_queues_from_the_sink_chunk() {
         let mut config = test_config(1);
-        config.source = ComponentConfig::new(
-            "fake",
-            serde_yaml::from_str("chunk: { target_bytes: 64KiB }").expect("yaml"),
+        config.sink = Some(fake_section(
+            "queue: { max_bytes: 2MiB }\nchunk: { target_bytes: 128KiB }",
+        ));
+        let p = Pipeline::from_config(config)
+            .expect("builder")
+            .sink(null_sink(2))
+            .expect("installed");
+        assert_eq!(installed_capacity(&p, "default"), 16);
+    }
+
+    /// Pins that a sink with no `queue:` keeps 8 slots whatever its chunk size.
+    #[test]
+    fn an_unset_queue_keeps_eight_slots() {
+        let mut config = test_config(1);
+        config.sink = Some(fake_section("chunk: { target_bytes: 1MiB }"));
+        let p = Pipeline::from_config(config)
+            .expect("builder")
+            .sink(null_sink(1))
+            .expect("installed");
+        assert_eq!(installed_capacity(&p, "default"), 8);
+    }
+
+    /// A queue set in code meets the same bounds as one in YAML.
+    #[test]
+    fn a_queue_set_in_code_is_bounded_at_install() {
+        let too_many = (tokio::sync::Semaphore::MAX_PERMITS as u64) + 1;
+        for (bytes, want) in [
+            (0, "sink.queue.max_bytes: must be greater than zero"),
+            (too_many, "sink.queue.max_bytes: makes "),
+        ] {
+            let options = SinkOptions::default()
+                .with_chunk(chunk_of(1))
+                .with_queue(QueueSection::new(bytes));
+            let err = install_error(test_config(1), options);
+            assert!(err.starts_with(want), "{bytes}: {err}");
+        }
+    }
+
+    /// A zero chunk set in code is refused before the queue divides by it.
+    #[test]
+    fn a_zero_chunk_with_a_queue_is_refused_not_a_panic() {
+        let options = SinkOptions::default()
+            .with_chunk(chunk_of(0))
+            .with_queue(QueueSection::new(1024 * 1024));
+        assert_eq!(
+            install_error(test_config(1), options),
+            "invalid configuration: sink: chunk.target_bytes must be greater than zero"
         );
-        let err = Pipeline::from_config(config).err();
+    }
+
+    /// Each framework key is taken from one place: YAML and `SinkOptions`
+    /// together on one sink are refused, naming the sink and the key.
+    #[test]
+    fn each_key_set_in_yaml_and_in_code_collides() {
+        let cases: [(&str, SinkOptions); 5] = [
+            (
+                "queue: { max_bytes: 1MiB }",
+                SinkOptions::default().with_queue(QueueSection::new(1024 * 1024)),
+            ),
+            (
+                "batch: {}",
+                SinkOptions::default().with_batch(BatchConfig::default()),
+            ),
+            (
+                "inflight: {}",
+                SinkOptions::default().with_inflight(InflightConfig::default()),
+            ),
+            (
+                "retry: {}",
+                SinkOptions::default().with_retry(RetryConfig::default()),
+            ),
+            (
+                "breaker: {}",
+                SinkOptions::default().with_breaker(BreakerConfig::default()),
+            ),
+        ];
+        for (block, options) in cases {
+            let key = block.split(':').next().expect("key");
+            let mut config = test_config(1);
+            config.sink = Some(fake_section(block));
+            assert_eq!(
+                install_error(config, options),
+                format!(
+                    "invalid configuration: sink: set `{key}` in exactly one place, the YAML `{key}:` block or \
+                     `SinkOptions::with_{key}`, not both"
+                )
+            );
+        }
+    }
+
+    /// A pool resolved for the default sink of a config whose section holds
+    /// `blocks`, over `base`.
+    fn resolve_pool(
+        blocks: &str,
+        options: &SinkOptions,
+        base: SinkPoolConfig,
+    ) -> Result<SinkPoolConfig, String> {
+        let mut config = test_config(1);
+        config.sink = Some(fake_section(blocks));
+        options
+            .resolve(&config, "default", base)
+            .map(|r| r.pool)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A YAML pool block overlays the connector's base field by field, and a
+    /// block set in code replaces it whole.
+    #[test]
+    fn a_yaml_pool_block_overlays_the_base_and_code_replaces_it() {
+        let mut base = SinkPoolConfig::default();
+        base.batch.max_bytes = 1_000_001;
+        base.retry.max_attempts = 5;
+        base.breaker.failure_threshold = 9;
+        base.inflight.max_per_shard = 6;
+        let none = SinkOptions::default();
+
+        let pool = resolve_pool(
+            "batch: { max_rows: 7 }\nretry: { initial: 1ms }\nbreaker: { open_for: 2s }",
+            &none,
+            base,
+        )
+        .expect("resolves");
+        assert_eq!((pool.batch.max_rows, pool.batch.max_bytes), (7, 1_000_001));
+        assert_eq!(
+            (pool.retry.initial, pool.retry.max_attempts),
+            (Duration::from_millis(1), 5)
+        );
+        assert_eq!(
+            (pool.breaker.open_for, pool.breaker.failure_threshold),
+            (Duration::from_secs(2), 9)
+        );
+        assert_eq!(pool.inflight.max_per_shard, 6);
+
+        let code = SinkOptions::default().with_batch(BatchConfig::default());
+        let pool = resolve_pool("{}", &code, base).expect("resolves");
+        assert_eq!(pool.batch, BatchConfig::default());
+    }
+
+    /// An overlay block is decoded with its path, and the merged pool is held
+    /// to `SinkPoolConfig::validate`.
+    #[test]
+    fn a_bad_yaml_pool_block_is_refused_at_install() {
+        let none = SinkOptions::default();
+        let base = SinkPoolConfig::default();
+        let err = resolve_pool("batch: { max_rowz: 1 }", &none, base).unwrap_err();
         assert!(
-            matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if m.contains("source")),
-            "{err:?}"
+            err.starts_with("sink.batch.max_rowz: unknown field"),
+            "{err}"
         );
+        let err = resolve_pool("inflight: { max_per_shard: 0 }", &none, base).unwrap_err();
+        assert!(
+            err.starts_with("invalid configuration: sink: inflight.max_per_shard"),
+            "{err}"
+        );
+        let err = resolve_pool("retry: { max: 50ms }", &none, base).unwrap_err();
+        assert!(
+            err.starts_with("invalid configuration: sink: retry.initial"),
+            "{err}"
+        );
+    }
+
+    /// A framework block on a sink section that nothing installs is warned
+    /// about, one block at a time.
+    #[test]
+    fn each_block_on_a_sink_nothing_installs_is_warned_about() {
+        for block in [
+            "queue: { max_bytes: 1MiB }",
+            "chunk: {}",
+            "batch: {}",
+            "inflight: {}",
+            "retry: {}",
+            "breaker: {}",
+        ] {
+            let key = block.split(':').next().expect("key");
+            let mut config = test_config(1);
+            config.sink = None;
+            config.sinks = Some(std::collections::BTreeMap::from([
+                ("hot".to_owned(), fake_section("{}")),
+                ("cold".to_owned(), fake_section(block)),
+            ]));
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                let (source, shared, _script) = FakeSource::new();
+                let chain_shared = Arc::new(ChainShared::default());
+                let runtime = Pipeline::from_config(config)
+                    .expect("builder")
+                    .add_sink("hot", null_sink(1))
+                    .expect("installed")
+                    .chains(move |_| fake_chain(&chain_shared, &shared))
+                    .runtime_options(test_options())
+                    .into_runtime(source)
+                    .expect("into_runtime");
+                drop(runtime);
+            });
+            let warned: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("no sink was installed"))
+                .collect();
+            assert_eq!(warned.len(), 1, "{key}: {lines:?}");
+            assert!(warned[0].contains(&format!("`{key}`")), "{key}: {lines:?}");
+            assert!(warned[0].contains("cold"), "{key}: {lines:?}");
+        }
+    }
+
+    /// A manual assembly that calls `SinkOptions::resolve` gets the chunk and
+    /// slot count `add_sink_with` installs.
+    #[test]
+    fn resolve_gives_what_add_sink_with_installs() {
+        let mut config = test_config(1);
+        config.sink = Some(fake_section(
+            "queue: { max_bytes: 3MiB }\nchunk: { target_bytes: 256KiB }",
+        ));
+        let resolved = SinkOptions::default()
+            .resolve(&config, "default", SinkPoolConfig::default())
+            .expect("resolves");
+        assert_eq!(resolved.queue_capacity, 12);
+        let p = Pipeline::from_config(config)
+            .expect("builder")
+            .sink(null_sink(1))
+            .expect("installed");
+        assert_eq!(installed_capacity(&p, "default"), resolved.queue_capacity);
+        let (_, assembly) = &p.sinks[0];
+        assert_eq!(assembly.chunk.target_bytes, resolved.chunk.target_bytes);
+    }
+
+    #[test]
+    fn a_body_chunk_is_rejected_by_from_config() {
+        // A config built in code skips `validate`, and a sink that decodes no
+        // body would ignore a `chunk:` in it, so `from_config` refuses one in
+        // any body itself.
+        let chunk = || serde_yaml::from_str("chunk: { target_bytes: 64KiB }").expect("yaml");
+        let mut on_source = test_config(1);
+        on_source.source = ComponentConfig::new("fake", chunk());
+        let mut on_sink = test_config(1);
+        on_sink.sink = Some(SinkSection::new(ComponentConfig::new("capture", chunk())));
+        for (config, want) in [
+            (
+                on_source,
+                "fake.chunk: `chunk:` is only valid on a sink section",
+            ),
+            (
+                on_sink,
+                "capture.chunk: `chunk:` sits beside `capture:` in the sink section, not inside it",
+            ),
+        ] {
+            let Err(err) = Pipeline::from_config(config) else {
+                panic!("built")
+            };
+            assert_eq!(err.to_string(), want);
+        }
     }
 
     /// Regression: the runtime must hand the source the framework's

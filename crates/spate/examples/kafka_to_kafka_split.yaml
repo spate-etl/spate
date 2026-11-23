@@ -33,29 +33,29 @@ source:
 # framework-owned ones are rejected at startup with an explanation.
 sinks:
   eu:
+    batch:
+      max_rows: 100000
+      max_bytes: 16MiB
+      linger: 250ms
     kafka:
       brokers: ${KAFKA_BROKERS:-localhost:9092}
       topic: ${KAFKA_EU_TOPIC:-orders-eu}
       delivery_timeout: 30s
       max_message_bytes: 1MB
       compression: lz4
-      batch:
-        max_rows: 100000
-        max_bytes: 16MiB
-        linger: 250ms
       rdkafka:
         linger.ms: "20"
 
   us:
+    batch:
+      max_rows: 100000
+      max_bytes: 16MiB
+      linger: 250ms
     kafka:
       brokers: ${KAFKA_BROKERS:-localhost:9092}
       topic: ${KAFKA_US_TOPIC:-orders-us}
       delivery_timeout: 30s
       max_message_bytes: 1MB
       compression: lz4
-      batch:
-        max_rows: 100000
-        max_bytes: 16MiB
-        linger: 250ms
       rdkafka:
         linger.ms: "20"

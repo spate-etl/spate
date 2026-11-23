@@ -6,14 +6,14 @@
 
 use apache_avro::types::Value;
 use apache_avro::{BigDecimal, Days, Decimal, Duration, Millis, Months, Schema, to_avro_datum};
-use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection};
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::error::DeserError;
 use spate_test::{EmitCollector, raw_payload, test_ack};
 
 fn builder(schema: &str, reader: Option<&str>) -> AvroDeserializerBuilder {
-    let mut settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
-    settings.reader_schema = reader.map(SchemaSource::inline);
+    let mut settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(schema));
+    settings.reader_schema = reader.map(AvroSchemaSection::inline);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

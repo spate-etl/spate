@@ -2,7 +2,7 @@
 
 The `deserializer: { avro: ... }` section deserializes into `AvroDeserializerConfig`, which `AvroDeserializerConfig::from_component_config` builds and `validate` checks. In previous versions the type was `AvroSettings`. `AvroDeserializerBuilder::from_component_config(section, runtime)` and `AvroDeserializerBuilder::new(config, runtime)` replace `from_component` and `from_settings`, and `new` takes the config by value. The YAML keys and their defaults are unchanged.
 
-`AvroDeserializerConfig`, `AvroMode` and `SchemaSource` are `#[non_exhaustive]`. Code outside the crate can no longer build the config with a struct literal. Start from `AvroDeserializerConfig::confluent(registry)`, `raw(schema)` or `single_object(schema)` and set the optional fields instead. A `match` on `AvroMode` needs a wildcard arm.
+`AvroDeserializerConfig`, `AvroMode` and `AvroSchemaSection` are `#[non_exhaustive]`. Code outside the crate can no longer build the config with a struct literal. Start from `AvroDeserializerConfig::confluent(registry)`, `raw(schema)` or `single_object(schema)` and set the optional fields instead. A `match` on `AvroMode` needs a wildcard arm.
 
 `validate` runs every check that reads no file, parses no schema and makes no network call, and `AvroDeserializerBuilder::new` runs it before it loads and parses a schema or builds the registry client. Three refusals now come earlier than they did:
 

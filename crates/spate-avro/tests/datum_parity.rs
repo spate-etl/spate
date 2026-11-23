@@ -15,7 +15,7 @@
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use proptest::prelude::*;
-use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection};
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::Deserializer;
 use spate_test::{EmitCollector, raw_payload};
@@ -24,7 +24,7 @@ use std::f32::consts::PI;
 use std::fmt::Debug;
 
 fn builder(schema_json: &str) -> AvroDeserializerBuilder {
-    let settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema_json));
+    let settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(schema_json));
     let rt = Box::leak(Box::new(
         tokio::runtime::Builder::new_current_thread()
             .build()

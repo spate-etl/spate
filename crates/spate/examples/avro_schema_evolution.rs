@@ -70,7 +70,7 @@ use apache_avro::reader::datum::GenericDatumReader;
 use apache_avro::writer::datum::GenericDatumWriter;
 use apache_avro::{Schema, types::Value as AvroRecordValue};
 use serde::Deserialize;
-use spate::avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, SchemaSource};
+use spate::avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection, AvroValue};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{PipelineRun, TestEncoder, capture_sink, memory_source};
@@ -219,8 +219,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the single-pass `build_serde_datum` rejects a reader schema at build
     // time, because it decodes in the writer's shape.
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
-    let mut settings = AvroDeserializerConfig::raw(SchemaSource::inline(WRITER_V1));
-    settings.reader_schema = Some(SchemaSource::inline(READER_V2));
+    let mut settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(WRITER_V1));
+    settings.reader_schema = Some(AvroSchemaSection::inline(READER_V2));
     let deserializer =
         AvroDeserializerBuilder::new(settings, &pipeline.io_handle())?.build_serde::<Order>();
 

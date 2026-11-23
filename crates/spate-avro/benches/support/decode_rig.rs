@@ -31,8 +31,8 @@
 #![allow(dead_code, reason = "each bench target uses a different subset")]
 
 use spate_avro::{
-    AvroDatumDeserializer, AvroDeserializerBuilder, AvroDeserializerConfig, AvroSerdeDeserializer,
-    AvroValueDeserializer, RegistrySection, SchemaSource,
+    AvroDatumDeserializer, AvroDeserializerBuilder, AvroDeserializerConfig, AvroRegistrySection,
+    AvroSchemaSection, AvroSerdeDeserializer, AvroValueDeserializer,
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
@@ -172,7 +172,7 @@ pub(crate) fn rig<D>(
     payload: Vec<u8>,
     build: impl FnOnce(&AvroDeserializerBuilder) -> D,
 ) -> Rig<D> {
-    let settings = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
+    let settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(schema));
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -218,8 +218,8 @@ pub(crate) fn batch_rig<D>(
 /// Raw-mode settings over one inline schema, optionally resolved into a
 /// reader schema.
 pub(crate) fn raw_settings(schema: &str, reader: Option<&str>) -> AvroDeserializerConfig {
-    let mut config = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
-    config.reader_schema = reader.map(SchemaSource::inline);
+    let mut config = AvroDeserializerConfig::raw(AvroSchemaSection::inline(schema));
+    config.reader_schema = reader.map(AvroSchemaSection::inline);
     config
 }
 
@@ -448,7 +448,7 @@ pub(crate) fn typed_flatten_rig()
 // ---------------------------------------------------------------------------
 
 pub(crate) fn confluent_settings(url: String) -> AvroDeserializerConfig {
-    let mut config = AvroDeserializerConfig::confluent(RegistrySection::new(url));
+    let mut config = AvroDeserializerConfig::confluent(AvroRegistrySection::new(url));
     config.negative_cache_ttl = NEGATIVE_TTL;
     config
 }
@@ -545,7 +545,7 @@ pub(crate) fn confluent_unknown_rig() -> BatchRig<AvroValueDeserializer> {
 /// Single-object framing whose fingerprint matches the configured schema, so
 /// every payload resolves and decodes.
 pub(crate) fn single_object_rig() -> BatchRig<AvroValueDeserializer> {
-    let settings = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
+    let settings = AvroDeserializerConfig::single_object(AvroSchemaSection::inline(orders::SCHEMA));
     batch_rig(&settings, corpora::matching_single_object(), true, |b| {
         b.build_value()
     })
@@ -627,7 +627,7 @@ pub(crate) fn truncated_serde_rig() -> BatchRig<AvroSerdeDeserializer<orders::Or
 }
 
 pub(crate) fn stale_fingerprint_rig() -> BatchRig<AvroValueDeserializer> {
-    let settings = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
+    let settings = AvroDeserializerConfig::single_object(AvroSchemaSection::inline(orders::SCHEMA));
     batch_rig(&settings, corpora::stale_single_object(), false, |b| {
         b.build_value()
     })

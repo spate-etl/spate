@@ -43,7 +43,7 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `Format`, ClickHouse's `Compression` enum, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** ClickHouse's `TimeoutSection` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 
@@ -70,7 +70,7 @@ Name the type a component is built from `*Config`, and a block nested inside a Y
 
 **Follow:** `CheckpointSection` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs).
 
-**Departs:** nested blocks named `*Config`, such as ClickHouse's `ShardConfig` ([#2330](https://github.com/spate-etl/spate/issues/2330), [#1604](https://github.com/spate-etl/spate/issues/1604)).
+**Departs:** core's sink pool blocks `BatchConfig`, `InflightConfig`, `RetryConfig` and `BreakerConfig` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 
@@ -90,7 +90,7 @@ The type's own crate already reaches it from every connector.
 
 **Follow:** [`crates/spate-s3/src/lib.rs`](repo:crates/spate-s3/src/lib.rs).
 
-**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, `KafkaCompression`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, `KafkaCompression`, `ClickHouseShardSection`, and ClickHouse's `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 

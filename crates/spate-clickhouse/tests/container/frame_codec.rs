@@ -13,7 +13,7 @@ use hyper::{Request, Response};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use spate_clickhouse::Compression;
+use spate_clickhouse::ClickHouseCompression;
 use spate_core::error::ErrorClass;
 use spate_core::rng::SplitMix64;
 use std::sync::{Arc, Mutex};
@@ -55,7 +55,7 @@ where
     support::coded_batch(parse(compression), raw, rows, token)
 }
 
-fn parse(compression: &str) -> Compression {
+fn parse(compression: &str) -> ClickHouseCompression {
     compression.parse().expect("a compression value")
 }
 
@@ -165,7 +165,7 @@ async fn a_block_header_the_server_cannot_read_fails_fatally() {
     ];
     for (case, block, expected) in cases {
         let batch = support::coded_batch(
-            Compression::None,
+            ClickHouseCompression::None,
             vec![Bytes::from_static(block)],
             1,
             &format!("header-{expected}"),

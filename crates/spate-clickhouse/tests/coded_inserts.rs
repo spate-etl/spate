@@ -23,13 +23,13 @@ mod http_server;
 use bytes::{BufMut, Bytes, BytesMut};
 use http_server::{BenchServer, Recorded};
 use spate_clickhouse::testing::insert_settings;
-use spate_clickhouse::{ClickHouseSink, Compression};
+use spate_clickhouse::{ClickHouseCompression, ClickHouseSink};
 use spate_core::error::ErrorClass;
 use spate_core::sink::{SealedBatch, ShardWriter, SinkBundle};
 
 const TOKEN: &str = "coded-1";
 
-fn compression(s: &str) -> Compression {
+fn compression(s: &str) -> ClickHouseCompression {
     s.parse().expect("a compression value")
 }
 
@@ -81,16 +81,16 @@ fn rowbinary_header() -> Bytes {
 /// and the client compressing each frame inside `send`.
 async fn stock_insert(
     url: &str,
-    compression: Compression,
+    compression: ClickHouseCompression,
     insert_sql: &str,
     header: Option<Bytes>,
     raw: &[Bytes],
 ) {
     let client = clickhouse::Client::default().with_url(url);
     let method = match compression {
-        Compression::None => clickhouse::Compression::None,
-        Compression::Lz4 => clickhouse::Compression::Lz4,
-        Compression::Zstd(level) => clickhouse::Compression::Zstd(level),
+        ClickHouseCompression::None => clickhouse::Compression::None,
+        ClickHouseCompression::Lz4 => clickhouse::Compression::Lz4,
+        ClickHouseCompression::Zstd(level) => clickhouse::Compression::Zstd(level),
         other => panic!("no client compression for {other:?}"),
     };
     let mut insert = client

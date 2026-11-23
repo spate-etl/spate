@@ -4,7 +4,7 @@
 
 use bytes::{Bytes, BytesMut};
 use serde::Serialize;
-use spate_clickhouse::Compression;
+use spate_clickhouse::ClickHouseCompression;
 use spate_clickhouse::testing::serialize_row;
 use spate_core::sink::SealedBatch;
 
@@ -15,7 +15,7 @@ use spate_core::sink::SealedBatch;
 ///
 /// Panics if `rows` is empty or a row does not encode.
 pub(crate) fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
-    sealed_for(Compression::None, rows, token, frames)
+    sealed_for(ClickHouseCompression::None, rows, token, frames)
 }
 
 /// [`sealed`], with each frame coded by the sink's frame codec for
@@ -26,7 +26,7 @@ pub(crate) fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> Se
 ///
 /// Panics if `rows` is empty or a row does not encode.
 pub(crate) fn sealed_for<T: Serialize>(
-    compression: Compression,
+    compression: ClickHouseCompression,
     rows: &[T],
     token: &str,
     frames: usize,
@@ -53,7 +53,7 @@ pub(crate) fn sealed_for<T: Serialize>(
 ///
 /// Panics if a frame does not code.
 pub(crate) fn coded_batch(
-    compression: Compression,
+    compression: ClickHouseCompression,
     raw: Vec<Bytes>,
     rows: u64,
     token: &str,

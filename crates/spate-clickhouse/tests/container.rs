@@ -8,7 +8,7 @@ mod support;
 use bytes::BytesMut;
 use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
-use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily, Compression};
+use spate_clickhouse::{ClickHouseCompression, ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
 use spate_test::record;
@@ -158,7 +158,7 @@ async fn server() -> Server {
 /// [`support::sealed_for`] under the sinks' default compression, which every
 /// sink in this binary uses unless a test sets another.
 fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
-    support::sealed_for(Compression::default(), rows, token, frames)
+    support::sealed_for(ClickHouseCompression::default(), rows, token, frames)
 }
 
 async fn sink_for(url: &str) -> config::ClickHouseSink {
@@ -248,7 +248,7 @@ where
         encoder.encode(&record(row), &mut buf)?;
     }
     Ok(support::coded_batch(
-        Compression::default(),
+        ClickHouseCompression::default(),
         vec![buf.freeze()],
         n,
         token,
@@ -274,7 +274,7 @@ where
     }
     encoder.finish_chunk(&mut buf)?;
     Ok(support::coded_batch(
-        Compression::default(),
+        ClickHouseCompression::default(),
         vec![buf.freeze()],
         n,
         token,

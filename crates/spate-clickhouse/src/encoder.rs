@@ -1,6 +1,6 @@
 //! The CPU half of the sink: encoding records on pipeline threads.
 
-use crate::Format;
+use crate::ClickHouseFormat;
 use crate::native::{ClickHouseNativeEncoder, NativeSchema};
 use crate::rowbinary;
 use crate::schema::{self, RowSchema};
@@ -62,10 +62,10 @@ impl<F> ClickHouseFormatEncoder<F> {
     }
 
     /// The wire format this encoder writes.
-    pub(crate) fn format(&self) -> Format {
+    pub(crate) fn format(&self) -> ClickHouseFormat {
         match self.inner {
-            Inner::RowBinary(_) => Format::RowBinary,
-            Inner::Native(_) => Format::Native,
+            Inner::RowBinary(_) => ClickHouseFormat::RowBinary,
+            Inner::Native(_) => ClickHouseFormat::Native,
         }
     }
 }

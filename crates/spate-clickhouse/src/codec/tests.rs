@@ -35,7 +35,7 @@ fn oracle_inputs() -> Vec<Vec<u8>> {
     inputs
 }
 
-fn codec(compression: Compression) -> Box<dyn FrameCodec> {
+fn codec(compression: ClickHouseCompression) -> Box<dyn FrameCodec> {
     BlockCodec::factory(compression)
         .expect("a compressing codec")
         .make()
@@ -45,7 +45,7 @@ fn codec(compression: Compression) -> Box<dyn FrameCodec> {
 /// every input in one sequence through one instance.
 #[test]
 fn lz4_block_matches_the_client_crates_block() {
-    let mut codec = codec(Compression::Lz4);
+    let mut codec = codec(ClickHouseCompression::Lz4);
     for (i, raw) in oracle_inputs().iter().enumerate() {
         let ours = codec.encode_frame(raw).expect("lz4 codes").to_vec();
         let theirs = clickhouse::_priv::lz4_compress(raw).expect("the client compresses");
@@ -60,7 +60,7 @@ fn a_short_lz4_chunk_after_a_long_one_matches_the_client_crates_block() {
     let short = bytes(42 * 1024, 3, 16);
     let boundary = usize::from(u16::MAX);
     for long in [boundary - 1, boundary, boundary + 1] {
-        let mut codec = codec(Compression::Lz4);
+        let mut codec = codec(ClickHouseCompression::Lz4);
         for (i, raw) in [&short, &bytes(long, 5, 16), &short]
             .into_iter()
             .enumerate()
@@ -78,7 +78,7 @@ fn a_short_lz4_chunk_after_a_long_one_matches_the_client_crates_block() {
 fn zstd3_block_matches_the_client_crates_block() {
     // `_priv::zstd_compress` uses zstd's default level.
     assert_eq!(zstd::DEFAULT_COMPRESSION_LEVEL, 3, "zstd's default level");
-    let mut codec = codec(Compression::Zstd(3));
+    let mut codec = codec(ClickHouseCompression::Zstd(3));
     for (i, raw) in oracle_inputs().iter().enumerate() {
         let ours = codec.encode_frame(raw).expect("zstd codes").to_vec();
         let theirs = clickhouse::_priv::zstd_compress(raw).expect("the client compresses");
@@ -88,7 +88,11 @@ fn zstd3_block_matches_the_client_crates_block() {
 
 /// Checks `block`'s framing against `raw` and decompresses its payload on
 /// its own, as a server reads one block of an insert body.
-fn decode(block: &[u8], raw: &[u8], compression: Compression) -> Result<(), TestCaseError> {
+fn decode(
+    block: &[u8],
+    raw: &[u8],
+    compression: ClickHouseCompression,
+) -> Result<(), TestCaseError> {
     prop_assert!(block.len() >= META_LEN, "a block holds its header");
     let checksum = u128::from_le_bytes(block[..CHECKSUM_LEN].try_into().expect("16 bytes"));
     prop_assert_eq!(
@@ -96,7 +100,7 @@ fn decode(block: &[u8], raw: &[u8], compression: Compression) -> Result<(), Test
         cityhash_rs::cityhash_102_128(&block[CHECKSUM_LEN..]).rotate_right(64),
         "checksum"
     );
-    let magic = if compression == Compression::Lz4 {
+    let magic = if compression == ClickHouseCompression::Lz4 {
         LZ4_MAGIC
     } else {
         ZSTD_MAGIC
@@ -114,7 +118,7 @@ fn decode(block: &[u8], raw: &[u8], compression: Compression) -> Result<(), Test
         "uncompressed size"
     );
     let payload = &block[META_LEN..];
-    let decoded = if compression == Compression::Lz4 {
+    let decoded = if compression == ClickHouseCompression::Lz4 {
         lz4_flex::block::decompress(payload, raw.len()).expect("the lz4 block decodes alone")
     } else {
         zstd::bulk::decompress(payload, raw.len()).expect("the zstd frame decodes alone")
@@ -139,11 +143,11 @@ proptest! {
     #[test]
     fn blocks_decode_back_byte_identical(chunks in prop::collection::vec(chunk(), 1..4)) {
         for compression in [
-            Compression::Lz4,
-            Compression::Zstd(1),
-            Compression::Zstd(3),
-            Compression::Zstd(9),
-            Compression::Zstd(22),
+            ClickHouseCompression::Lz4,
+            ClickHouseCompression::Zstd(1),
+            ClickHouseCompression::Zstd(3),
+            ClickHouseCompression::Zstd(9),
+            ClickHouseCompression::Zstd(22),
         ] {
             let mut codec = codec(compression);
             for raw in &chunks {
@@ -171,7 +175,7 @@ fn a_reused_zstd_context_matches_a_fresh_one() {
     .map(|(&(len, alphabet), seed)| bytes(len, seed, alphabet))
     .collect();
     for level in [1, 3, 9, 19, 22] {
-        let mut codec = codec(Compression::Zstd(level));
+        let mut codec = codec(ClickHouseCompression::Zstd(level));
         for (i, raw) in inputs.iter().enumerate() {
             let block = codec.encode_frame(raw).expect("zstd codes").to_vec();
             let mut fresh = Vec::with_capacity(zstd_safe::compress_bound(raw.len()));

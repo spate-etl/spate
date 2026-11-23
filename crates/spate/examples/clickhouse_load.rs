@@ -66,7 +66,7 @@
 use serde::{Deserialize, Serialize};
 use spate::avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection};
 use spate::clickhouse::{
-    self, ClickHouseRow, ClickHouseSinkConfig, Compression, DateTime64Millis, ShardKey,
+    self, ClickHouseCompression, ClickHouseRow, ClickHouseSinkConfig, DateTime64Millis, ShardKey,
 };
 use spate::datagen::{DatagenSource, EVENT_SCHEMA_JSON};
 use spate::prelude::*;
@@ -117,11 +117,11 @@ fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
 }
 
 /// The `compression` value as the YAML spells it.
-fn compression_name(compression: Compression) -> String {
+fn compression_name(compression: ClickHouseCompression) -> String {
     match compression {
-        Compression::None => "off".to_owned(),
-        Compression::Lz4 => "lz4".to_owned(),
-        Compression::Zstd(level) => format!("zstd:{level}"),
+        ClickHouseCompression::None => "off".to_owned(),
+        ClickHouseCompression::Lz4 => "lz4".to_owned(),
+        ClickHouseCompression::Zstd(level) => format!("zstd:{level}"),
         other => format!("{other:?}"),
     }
 }

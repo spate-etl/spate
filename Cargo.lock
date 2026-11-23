@@ -4544,6 +4544,7 @@ dependencies = [
  "futures-util",
  "http",
  "object_store",
+ "openssl-sys",
  "rcgen",
  "rdkafka",
  "rustls",

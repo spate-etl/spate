@@ -1695,7 +1695,7 @@ mod tests {
     fn a_tls_client_leaves_openssl_running_through_process_exit() {
         use rdkafka::producer::{BaseProducer, DefaultProducerContext};
 
-        crate::testutil::assert_openssl_runs_through_exit(
+        spate_test_support::assert_openssl_runs_through_exit(
             "client::tests::a_tls_client_leaves_openssl_running_through_process_exit",
             || {
                 let mut config = new_config();

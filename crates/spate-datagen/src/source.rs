@@ -3,8 +3,9 @@
 //!
 //! There is no I/O anywhere in this crate: the constructors take no runtime
 //! handle and nothing here depends on `tokio`. [`DatagenSource::new`] takes a
-//! validated config; [`DatagenSource::from_component_config`] reads the
-//! pipeline's opaque section.
+//! config built in code and validates it;
+//! [`DatagenSource::from_component_config`] reads the pipeline's opaque
+//! section.
 
 use crate::config::DatagenSourceConfig;
 use crate::encode::Encoder;
@@ -51,16 +52,30 @@ pub struct DatagenSource {
 
 impl DatagenSource {
     /// A source over `config`.
-    #[must_use]
-    pub fn new(config: DatagenSourceConfig) -> DatagenSource {
-        DatagenSource {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_datagen::{DatagenSource, DatagenSourceConfig};
+    ///
+    /// # fn main() -> Result<(), spate_core::config::ConfigError> {
+    /// let source = DatagenSource::new(DatagenSourceConfig::default())?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`DatagenSourceConfig::validate`].
+    pub fn new(config: DatagenSourceConfig) -> Result<DatagenSource, ConfigError> {
+        config.validate()?;
+        Ok(DatagenSource {
             config,
             state: None,
             watermarks: BTreeMap::new(),
             handed_out: false,
             drained: false,
             clock: SyncClock::system(),
-        }
+        })
     }
 
     /// Test seam: time the lanes' rate gates on `clock`.
@@ -77,9 +92,7 @@ impl DatagenSource {
     ///
     /// As [`DatagenSourceConfig::from_component_config`].
     pub fn from_component_config(section: &ComponentConfig) -> Result<DatagenSource, ConfigError> {
-        Ok(DatagenSource::new(
-            DatagenSourceConfig::from_component_config(section)?,
-        ))
+        DatagenSource::new(DatagenSourceConfig::from_component_config(section)?)
     }
 
     /// The Avro schema the `avro` encoding writes against, as JSON. The same
@@ -120,12 +133,6 @@ impl Source for DatagenSource {
         if self.state.is_some() {
             return Err(SourceError::fatal("source opened twice"));
         }
-        // A hand-constructed config has not been through the deserializer,
-        // which is where a loaded one is validated.
-        self.config
-            .validate()
-            .map_err(|e| SourceError::fatal(e.to_string()))?;
-
         tracing::warn!(
             "spate-datagen keeps no durable progress; every run regenerates its stream from \
              the beginning. It is a demo and test source — do not build a production pipeline \
@@ -284,7 +291,10 @@ mod tests {
 
     /// Open a source and take its one assignment.
     fn start(config: DatagenSourceConfig) -> (DatagenSource, Checkpointer, Vec<DatagenLane>) {
-        start_with(DatagenSource::new(config), None)
+        start_with(
+            DatagenSource::new(config).expect("the config validates"),
+            None,
+        )
     }
 
     /// Open `source`, with lane counters under `meter` when one is given, and
@@ -318,7 +328,12 @@ mod tests {
             ..DatagenSourceConfig::default()
         };
         let clock: SharedClock = clock.clone();
-        start_with(DatagenSource::new(cfg).with_clock(clock), meter)
+        start_with(
+            DatagenSource::new(cfg)
+                .expect("the config validates")
+                .with_clock(clock),
+            meter,
+        )
     }
 
     /// Events one poll releases, or `None` when the gate holds it.
@@ -485,7 +500,7 @@ mod tests {
 
     #[test]
     fn the_declared_contracts_are_the_ones_the_runtime_reads() {
-        let source = DatagenSource::new(config(1, None));
+        let source = DatagenSource::new(config(1, None)).expect("the config validates");
         assert_eq!(source.component_type(), "datagen");
         assert_eq!(source.framing_contract(), FramingContract::PerRecord);
         assert_eq!(DatagenSource::avro_schema(), crate::EVENT_SCHEMA_JSON);
@@ -494,7 +509,7 @@ mod tests {
     #[test]
     fn opening_twice_is_refused() {
         let cp = Checkpointer::new();
-        let mut source = DatagenSource::new(config(1, None));
+        let mut source = DatagenSource::new(config(1, None)).expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).unwrap();
         let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
@@ -505,7 +520,7 @@ mod tests {
     /// source forever.
     #[test]
     fn polling_before_open_is_fatal() {
-        let mut source = DatagenSource::new(config(1, None));
+        let mut source = DatagenSource::new(config(1, None)).expect("the config validates");
         let Err(err) = source.poll_events(POLL) else {
             panic!("an unopened source yielded an event");
         };
@@ -514,14 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn open_validates_a_hand_built_config() {
+    fn new_refuses_what_validate_refuses() {
         let refused = config(0, None);
         let expected = refused.validate().unwrap_err().to_string();
-        let cp = Checkpointer::new();
-        let mut source = DatagenSource::new(refused);
-        let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert_eq!(err.reason(), expected);
+        let err = DatagenSource::new(refused).unwrap_err();
+        assert_eq!(err.to_string(), expected);
     }
 
     /// A throttled lane releases `events_per_tick` and then holds until the
@@ -554,7 +566,12 @@ mod tests {
             ..DatagenSourceConfig::default()
         };
         let clock: SharedClock = TestClock::frozen();
-        let (_source, _cp, mut lanes) = start_with(DatagenSource::new(cfg).with_clock(clock), None);
+        let (_source, _cp, mut lanes) = start_with(
+            DatagenSource::new(cfg)
+                .expect("the config validates")
+                .with_clock(clock),
+            None,
+        );
 
         // One cadence, polled in batches of 8. The second tick is a minute
         // out, so everything counted here belongs to the first.

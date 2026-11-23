@@ -102,7 +102,7 @@ An invalid config fails at construction, as the `ConfigError` the rest of the co
 
 **Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs).
 
-**Departs:** the sources build infallibly and validate in `open` ([#2335](https://github.com/spate-etl/spate/issues/2335)).
+**Departs:** the Kafka and S3 sources build infallibly and validate in `open` ([#2335](https://github.com/spate-etl/spate/issues/2335)).
 The feed backends have no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.

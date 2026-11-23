@@ -1076,7 +1076,7 @@ fn expected_load(count: u64) -> (u64, u64, u64, u64, u64, u64) {
     cfg.tick_interval = Duration::ZERO;
     cfg.count = Some(count);
     let checkpointer = Checkpointer::new();
-    let mut source = DatagenSource::new(cfg);
+    let mut source = DatagenSource::new(cfg).expect("the config validates");
     source
         .open(SourceCtx::new(checkpointer.handle()))
         .expect("open datagen");

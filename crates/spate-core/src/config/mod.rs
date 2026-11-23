@@ -1313,14 +1313,14 @@ deserializer:
     registry:
       url: "${SCHEMA_REGISTRY_URL:-http://sr:8081}"
 sink:
+  batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
+  inflight: { max_per_shard: 2 }
+  retry: { initial: 100ms, max: 10s, multiplier: 2.0 }
   clickhouse:
     table: orders_local
     shards:
       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
       - { replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"] }
-    batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
-    inflight: { max_per_shard: 2 }
-    retry: { initial: 100ms, max: 10s, multiplier: 2.0 }
 admin: { listen: 0.0.0.0:9090 }
 metrics: { exporter: prometheus }
 "#;

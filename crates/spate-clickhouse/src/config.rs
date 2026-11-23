@@ -1209,6 +1209,10 @@ shards:
             printed.contains("http://<redacted>@a:8123/?<redacted>"),
             "{printed}"
         );
+        assert!(
+            printed.contains(r#"endpoint: Some("http://<redacted>@a:8123")"#),
+            "{printed}"
+        );
 
         let builder = ClickHouseSinkBuilder::from_component_config(&component(
             "table: orders\nshards: [{replicas: ['http://a:8123/?password=hunter2']}]\n",

@@ -1057,7 +1057,7 @@ fn feed_error(doing: &str, e: &FeedError) -> SourceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Compression;
+    use crate::config::S3Compression;
     use crate::lane_ctx::PoisonKind;
     use crate::split::{DescriptorObject, SplitDescriptor};
     use spate_core::checkpoint::Checkpointer;
@@ -1091,7 +1091,7 @@ mod tests {
             make_framer: Arc::new(crate::testutil::ndjson_framer),
             packing: Packing {
                 target_bytes: TARGET,
-                compression: Compression::Auto,
+                compression: S3Compression::Auto,
                 delimiter: Some(b'\n'),
             },
             chunk_bytes: 1 << 16,
@@ -1606,7 +1606,7 @@ mod tests {
             make_framer: Arc::new(crate::testutil::ndjson_framer),
             packing: Packing {
                 target_bytes: TARGET,
-                compression: Compression::Auto,
+                compression: S3Compression::Auto,
                 delimiter: Some(b'\n'),
             },
             chunk_bytes: 1 << 16,
@@ -2054,8 +2054,8 @@ mod tests {
     #[test]
     fn a_whole_unit_over_a_compressed_object_opens_one_lane() {
         for (key, compression) in [
-            ("a.ndjson.gz", Compression::Auto),
-            ("a.ndjson", Compression::Gzip),
+            ("a.ndjson.gz", S3Compression::Auto),
+            ("a.ndjson", S3Compression::Gzip),
         ] {
             let (mut reader, script, _rt) = reader_holding(3);
             reader.parts.packing.compression = compression;
@@ -2350,7 +2350,7 @@ mod tests {
                     make_framer: Arc::new(crate::testutil::ndjson_framer),
                     packing: Packing {
                         target_bytes: TARGET,
-                        compression: Compression::Auto,
+                        compression: S3Compression::Auto,
                         delimiter: Some(b'\n'),
                     },
                     chunk_bytes: 1 << 16,
@@ -2466,7 +2466,7 @@ mod tests {
         assert!(reason.contains("declares no resync delimiter"), "{reason}");
 
         let (mut gzip, script, _rt) = reader();
-        gzip.parts.packing.compression = Compression::Gzip;
+        gzip.parts.packing.compression = S3Compression::Gzip;
         start(&mut gzip);
         let reason = failed_reason(&mut gzip, &script, range_unit("a.ndjson", b'\n'));
         assert!(reason.contains("decodes as gzip"), "{reason}");
@@ -3540,7 +3540,7 @@ mod tests {
             &scope(),
             crate::split::Packing {
                 target_bytes: u64::MAX,
-                compression: Compression::None,
+                compression: S3Compression::None,
                 delimiter: None,
             },
         ) else {

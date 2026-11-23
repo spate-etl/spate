@@ -7,7 +7,7 @@
 //! runner, and no bench runs under `cargo test`. This runs everywhere
 //! `cargo test` does.
 
-use spate_s3::Compression;
+use spate_s3::S3Compression;
 use spate_s3::bench_seams::frame_objects;
 
 #[path = "../benches/support/descriptors.rs"]
@@ -59,9 +59,9 @@ fn every_codec_frames_the_whole_body() {
     let expect = body.iter().filter(|&&b| b == b'\n').count();
 
     for (compression, suffix, stored) in [
-        (Compression::Auto, "", body.clone()),
-        (Compression::Auto, ".gz", ndjson::gzip(&body)),
-        (Compression::Auto, ".zst", ndjson::zstd(&body)),
+        (S3Compression::Auto, "", body.clone()),
+        (S3Compression::Auto, ".gz", ndjson::gzip(&body)),
+        (S3Compression::Auto, ".zst", ndjson::zstd(&body)),
     ] {
         let objects = vec![(
             format!("part-000000.ndjson{suffix}"),
@@ -117,7 +117,7 @@ fn a_multi_part_object_frames_every_record() {
             ndjson::chunks(&stored),
         )];
         let records =
-            frame_objects(Compression::Auto, make_framer(), &objects).expect("frames cleanly");
+            frame_objects(S3Compression::Auto, make_framer(), &objects).expect("frames cleanly");
         assert_eq!(
             records,
             ndjson::RECORDS,
@@ -155,7 +155,7 @@ fn entering_mid_record_still_counts_the_leading_partial_line() {
 
     let complete = tail.iter().filter(|&&b| b == b'\n').count();
     let records = frame_objects(
-        Compression::Auto,
+        S3Compression::Auto,
         make_framer(),
         &[("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
     )
@@ -193,7 +193,7 @@ fn a_run_of_objects_frames_every_record() {
         })
         .collect();
     let records =
-        frame_objects(Compression::Auto, make_framer(), &objects).expect("frames cleanly");
+        frame_objects(S3Compression::Auto, make_framer(), &objects).expect("frames cleanly");
     assert_eq!(records, ndjson::RUN_OBJECTS * ndjson::RUN_RECORDS_EACH);
 }
 

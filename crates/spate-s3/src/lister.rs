@@ -550,7 +550,7 @@ async fn write_end(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Compression;
+    use crate::config::S3Compression;
     use crate::split::{PACK_MEMBERS, PACKED_BODY_MAX_BYTES, SplitDescriptor};
     use crate::testutil::HookStore;
     use spate_core::error::ErrorClass;
@@ -568,7 +568,7 @@ mod tests {
     fn packing() -> Packing {
         Packing {
             target_bytes: 1 << 20,
-            compression: Compression::None,
+            compression: S3Compression::None,
             delimiter: Some(b'\n'),
         }
     }
@@ -2750,7 +2750,7 @@ mod tests {
         let (feed, script) = spate_test::scripted_feed();
         let mut lister = packing_lister(&objects, Arc::new(feed));
         lister.packing.target_bytes = 64;
-        lister.packing.compression = crate::config::Compression::Auto;
+        lister.packing.compression = crate::config::S3Compression::Auto;
         rt.block_on(lister.run()).unwrap();
         script.published()
     }

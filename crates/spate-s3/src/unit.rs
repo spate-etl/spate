@@ -905,7 +905,7 @@ fn descriptor_parts(body: &[u8], scope: &Scope, packing: Packing) -> Result<Curs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Compression;
+    use crate::config::S3Compression;
     use crate::split::MAX_SUBDIVIDABLE_BYTES;
     use proptest::prelude::*;
 
@@ -927,21 +927,21 @@ mod tests {
         }
     }
 
-    fn compression(n: u8) -> Compression {
+    fn compression(n: u8) -> S3Compression {
         match n {
-            0 => Compression::Auto,
-            1 => Compression::None,
-            2 => Compression::Gzip,
-            _ => Compression::Zstd,
+            0 => S3Compression::Auto,
+            1 => S3Compression::None,
+            2 => S3Compression::Gzip,
+            _ => S3Compression::Zstd,
         }
     }
 
     /// Whether the object is read uncompressed, decided without
     /// `Codec::resolve`.
-    fn plain(compression: Compression, key: &str) -> bool {
+    fn plain(compression: S3Compression, key: &str) -> bool {
         match compression {
-            Compression::None => true,
-            Compression::Auto => ![".gz", ".gzip", ".zst", ".zstd"]
+            S3Compression::None => true,
+            S3Compression::Auto => ![".gz", ".gzip", ".zst", ".zstd"]
                 .iter()
                 .any(|ext| key.ends_with(ext)),
             _ => false,
@@ -971,7 +971,7 @@ mod tests {
     fn the_cut_yields_one_range_at_a_time() {
         let packing = Packing {
             target_bytes: 1,
-            compression: Compression::None,
+            compression: S3Compression::None,
             delimiter: Some(b'\n'),
         };
         let entry = ObjectEntry {
@@ -998,7 +998,7 @@ mod tests {
     fn the_cut_marks_each_range_with_the_framers_delimiter() {
         let packing = Packing {
             target_bytes: MIB,
-            compression: Compression::None,
+            compression: S3Compression::None,
             delimiter: Some(b'\r'),
         };
         let entry = ObjectEntry {
@@ -1033,7 +1033,7 @@ mod tests {
     fn packing() -> Packing {
         Packing {
             target_bytes: 100,
-            compression: Compression::Auto,
+            compression: S3Compression::Auto,
             delimiter: Some(b'\n'),
         }
     }

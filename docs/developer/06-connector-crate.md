@@ -43,7 +43,7 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `Format`, the ClickHouse and S3 `Compression` enums, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** `Format`, ClickHouse's `Compression` enum, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
 
 **Checked by:** review.
 
@@ -204,7 +204,7 @@ Under `snake_case` it would read `row_binary`, so give that variant an explicit 
 
 **Why:** a key and its value then read in one case, and a user turns any feature off with the same word.
 
-**Follow:** `PinningMode` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) for the case, and spate-s3's `Compression` in [`crates/spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs) for `none`.
+**Follow:** `PinningMode` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) for the case, and `S3Compression` in [`crates/spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs) for `none`.
 
 **Departs:** enums renamed `lowercase` or `kebab-case` in spate-clickhouse, spate-datagen, spate-kafka, spate-s3 and core's chunk config, and the off values `pinning: off` and the ClickHouse `compression` key's `off` alias ([#2324](https://github.com/spate-etl/spate/issues/2324)).
 

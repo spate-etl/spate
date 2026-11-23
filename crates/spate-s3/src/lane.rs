@@ -28,7 +28,7 @@
 //!   records it framed before the failure, then decides end-of-input, so
 //!   the terminal watermark is one past the last record emitted.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use crate::fetch::{ChunkMsg, SplitFailure};
 use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
@@ -99,7 +99,7 @@ pub struct S3Lane {
     /// Times each poll's receive deadline.
     clock: Arc<dyn Clock>,
     issuer: AckIssuer,
-    compression: Compression,
+    compression: S3Compression,
     framer: ObjectFramer,
     /// Committed resume position; consumed at the first `ObjectStart`.
     resume: Option<Position>,
@@ -160,7 +160,7 @@ impl S3Lane {
         handle: tokio::runtime::Handle,
         clock: Arc<dyn Clock>,
         issuer: AckIssuer,
-        compression: Compression,
+        compression: S3Compression,
         make_framer: FramerFactory,
         resume: Option<Position>,
         tracker: Arc<SplitTracker>,
@@ -711,7 +711,7 @@ mod tests {
             rt.handle().clone(),
             clock,
             checkpointer.handle(),
-            Compression::Auto,
+            S3Compression::Auto,
             Arc::new(crate::testutil::ndjson_framer),
             resume,
             Arc::clone(&tracker),

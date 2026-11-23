@@ -12,7 +12,7 @@
 
 use flate2::write::MultiGzDecoder;
 use spate_json::JsonLinesFramer;
-use spate_s3::Compression;
+use spate_s3::S3Compression;
 use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
 use std::hint::black_box;
 use std::io::{self, Write as _};
@@ -24,7 +24,7 @@ use crate::ndjson;
 /// One framing job: the codec the objects are stored under, and the objects
 /// themselves as `(key, chunks)`.
 pub(crate) struct Rig {
-    pub(crate) compression: Compression,
+    pub(crate) compression: S3Compression,
     pub(crate) objects: Vec<(String, Vec<bytes::Bytes>)>,
     /// What the framer must emit. Asserted rather than returned so a fixture
     /// that silently stops producing records cannot pass as a fast one.
@@ -40,12 +40,12 @@ pub(crate) fn make_framer() -> MakeFramer {
 /// One object whose body is transformed by `store` (identity for plain, a
 /// compressor otherwise) under a key whose extension matches.
 ///
-/// Every case runs `Compression::Auto`, which is the shipped default and the
+/// Every case runs `S3Compression::Auto`, which is the shipped default and the
 /// only setting that consults the key at all: under an explicit `Gzip` or
 /// `Zstd` the resolver returns immediately and the extension is dead weight.
 /// Passing `Auto` is what makes the per-object codec resolution these cases
 /// claim to measure the same work production does.
-fn one_object(compression: Compression, suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
+fn one_object(compression: S3Compression, suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
     let body = ndjson::whole_body();
     let expect_records = body.iter().filter(|&&b| b == b'\n').count();
     let stored = store(&body);
@@ -61,15 +61,15 @@ fn one_object(compression: Compression, suffix: &str, store: impl Fn(&[u8]) -> V
 }
 
 pub(crate) fn plain_whole() -> Rig {
-    one_object(Compression::Auto, "", <[u8]>::to_vec)
+    one_object(S3Compression::Auto, "", <[u8]>::to_vec)
 }
 
 pub(crate) fn gzip_whole() -> Rig {
-    one_object(Compression::Auto, ".gz", ndjson::gzip)
+    one_object(S3Compression::Auto, ".gz", ndjson::gzip)
 }
 
 pub(crate) fn zstd_whole() -> Rig {
-    one_object(Compression::Auto, ".zst", ndjson::zstd)
+    one_object(S3Compression::Auto, ".zst", ndjson::zstd)
 }
 
 /// One object whose body is stored as several independent streams.
@@ -81,7 +81,7 @@ pub(crate) fn zstd_whole() -> Rig {
 fn multi_part_object(suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
     let stored = ndjson::concatenated(store);
     Rig {
-        compression: Compression::Auto,
+        compression: S3Compression::Auto,
         objects: vec![(
             format!("part-000000.ndjson{suffix}"),
             ndjson::chunks(&stored),
@@ -113,7 +113,7 @@ pub(crate) fn plain_mid_offset() -> Rig {
     let expect_records =
         tail.iter().filter(|&&b| b == b'\n').count() + usize::from(!tail.ends_with(b"\n"));
     Rig {
-        compression: Compression::Auto,
+        compression: S3Compression::Auto,
         objects: vec![("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
         expect_records,
         expect_bytes: tail.len(),
@@ -153,7 +153,7 @@ pub(crate) fn plain_many_small() -> Rig {
         })
         .collect();
     Rig {
-        compression: Compression::Auto,
+        compression: S3Compression::Auto,
         objects,
         expect_records: objects_n * records_each,
         expect_bytes,

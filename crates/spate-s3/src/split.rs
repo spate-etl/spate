@@ -28,7 +28,7 @@
 //! other object is read whole, and the lister packs it into a unit with the
 //! objects listed beside it while their bytes stay within the target.
 
-use crate::config::Compression;
+use crate::config::S3Compression;
 use crate::fetch::{ObjectEntry, event_time_ms};
 use crate::framer::Codec;
 use base64::Engine as _;
@@ -494,7 +494,7 @@ pub(crate) struct Packing {
     /// The split target, in bytes. Never zero.
     pub(crate) target_bytes: u64,
     /// The configured compression, which decides each object's codec.
-    pub(crate) compression: Compression,
+    pub(crate) compression: S3Compression,
     /// The framer's resync delimiter, or `None` to read every object whole.
     pub(crate) delimiter: Option<u8>,
 }
@@ -544,7 +544,7 @@ mod tests {
     fn whole(target: u64) -> Packing {
         Packing {
             target_bytes: target,
-            compression: Compression::Auto,
+            compression: S3Compression::Auto,
             delimiter: None,
         }
     }
@@ -830,7 +830,7 @@ mod tests {
         let target = 64 * MB;
         let plain = entry("plain.ndjson", 3 * target);
         let gzip_config = Packing {
-            compression: Compression::Gzip,
+            compression: S3Compression::Gzip,
             ..cut(target)
         };
         let no_etag = ObjectEntry {

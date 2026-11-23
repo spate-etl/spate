@@ -310,13 +310,19 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 /// the server reads a stored block that passes its checksum and fails to
 /// decode, such as a materialized view reading a damaged part, so
 /// [`classify_insert`] keeps 271 `Fatal` only for an insert whose body is coded.
+///
+/// An insert answers 50 or 62 when a type name in the body names no type or
+/// does not parse. The server reads the whole name before it parses it, so a
+/// body cut short answers 32 or 33 instead.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
     20,  // NUMBER_OF_COLUMNS_DOESNT_MATCH
     27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
+    50,  // UNKNOWN_TYPE
     53,  // TYPE_MISMATCH
     60,  // UNKNOWN_TABLE
+    62,  // SYNTAX_ERROR
     73,  // UNKNOWN_FORMAT
     81,  // UNKNOWN_DATABASE
     115, // UNKNOWN_SETTING
@@ -390,7 +396,7 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
 /// `"Code: NNN. DB::Exception: ..."` bodies; the client's standardized
 /// fallback (empty/unreadable body) is the bare code from the
 /// `X-ClickHouse-Exception-Code` header, e.g. `"60"`.
-fn exception_code(reason: &str) -> Option<u32> {
+pub(crate) fn exception_code(reason: &str) -> Option<u32> {
     let digits_at = |s: &str| -> Option<u32> {
         let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
         digits.parse().ok()
@@ -510,6 +516,23 @@ mod tests {
         ] {
             let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
             assert_eq!(err.class(), ErrorClass::Fatal, "{reason}: {err:?}");
+        }
+    }
+
+    /// A type name in the body that does not parse answers 62, and one that
+    /// names no type answers 50. Both classify `Fatal`: a retry resends the
+    /// same name.
+    #[test]
+    fn a_type_name_the_server_cannot_use_is_fatal() {
+        for reason in [
+            "Code: 62. DB::Exception: Empty query: While executing WaitForAsyncInsert. (SYNTAX_ERROR) (version 26.8.36.3 (official build))",
+            "Code: 50. DB::Exception: Unknown data type family: ZZ: While executing WaitForAsyncInsert. (UNKNOWN_TYPE) (version 26.8.36.3 (official build))",
+        ] {
+            for coded in [false, true] {
+                let err =
+                    classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+                assert_eq!(err.class(), ErrorClass::Fatal, "coded={coded}: {reason}");
+            }
         }
     }
 

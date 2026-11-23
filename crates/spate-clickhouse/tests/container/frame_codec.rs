@@ -126,12 +126,7 @@ async fn a_block_the_server_rejects_is_fatal() {
             .await
             .expect_err("the server rejects the block");
         let reason = err.reason();
-        let code = reason.find("Code: ").and_then(|at| {
-            reason[at + 6..]
-                .split(|c: char| !c.is_ascii_digit())
-                .next()
-                .and_then(|d| d.parse::<u32>().ok())
-        });
+        let code = spate_clickhouse::testing::exception_code(reason);
         eprintln!("lane {lane}, {compression}: the server answered code {code:?}");
         assert_eq!(
             code,
@@ -144,6 +139,45 @@ async fn a_block_the_server_rejects_is_fatal() {
             0,
             "{compression}: nothing inserted"
         );
+    }
+}
+
+/// A Native block whose one column header carries a type name the server
+/// cannot use fails the write `Fatal` and inserts nothing: an empty name
+/// answers 62 and an unknown family answers 50.
+#[tokio::test]
+#[ignore = "requires Docker"]
+#[expect(
+    clippy::print_stderr,
+    reason = "the code each lane answers is read from the test's output"
+)]
+async fn a_type_name_the_server_cannot_use_fails_fatally() {
+    let srv = server().await;
+    let lane = std::env::var("SPATE_CLICKHOUSE_LANE").unwrap_or_else(|_| "primary".into());
+    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &settings("native", "off")).await;
+    // Block header: one column, one row, the name `id`, then the type name.
+    let cases: [(&str, &'static [u8], u32); 2] = [
+        ("empty type name", b"\x01\x01\x02id\x00\x00", 62),
+        ("unknown type family", b"\x01\x01\x02id\x02ZZ\x00", 50),
+    ];
+    for (case, block, expected) in cases {
+        let batch = support::coded_batch(
+            Compression::None,
+            vec![Bytes::from_static(block)],
+            1,
+            &format!("type-name-{expected}"),
+        );
+        let err = sink
+            .writer
+            .write_batch(&sink.endpoints[0][0], &batch)
+            .await
+            .expect_err("the server cannot read the column header");
+        let reason = err.reason();
+        let code = spate_clickhouse::testing::exception_code(reason);
+        eprintln!("lane {lane}, {case}: the server answered code {code:?}");
+        assert_eq!(code, Some(expected), "{case}: {reason}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{case}: {reason}");
+        assert_eq!(count(&srv.admin).await, 0, "{case}: nothing inserted");
     }
 }
 

@@ -78,6 +78,13 @@ pub fn reserved_settings() -> Vec<&'static str> {
     crate::writer::reserved_names().collect()
 }
 
+/// The server exception code in an error's `reason`, as the sink reads it to
+/// classify the error.
+#[must_use]
+pub fn exception_code(reason: &str) -> Option<u32> {
+    crate::writer::exception_code(reason)
+}
+
 /// The settings the sink sets on an insert carrying `token`, with
 /// `decompress` when the body is `coded`.
 #[must_use]

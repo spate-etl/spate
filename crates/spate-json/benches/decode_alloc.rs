@@ -22,7 +22,7 @@
 
 use serde_json::Value;
 use spate_core::deser::Owned;
-use spate_json::{JsonFraming, OnError};
+use spate_json::{JsonFraming, JsonOnError};
 use spate_test_support::alloc::{Counting, Report, main_with};
 
 #[path = "support/decode_rig.rs"]
@@ -91,21 +91,21 @@ fn error_policy(report: &mut Report) {
         (
             "ndjson_clean",
             JsonFraming::Lines,
-            OnError::Skip,
+            JsonOnError::Skip,
             orders::lines_ndjson(RECORDS),
             RECORDS,
         ),
         (
             "ndjson_fail_clean",
             JsonFraming::Lines,
-            OnError::Fail,
+            JsonOnError::Fail,
             orders::lines_ndjson(RECORDS),
             RECORDS,
         ),
         (
             "array_clean",
             JsonFraming::Array,
-            OnError::Skip,
+            JsonOnError::Skip,
             orders::lines_array(RECORDS),
             RECORDS,
         ),
@@ -117,7 +117,7 @@ fn error_policy(report: &mut Report) {
 
     let mut r = batch_rig::<LineItem>(
         JsonFraming::Lines,
-        OnError::Fail,
+        JsonOnError::Fail,
         orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
         LABELS,

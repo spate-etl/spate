@@ -84,7 +84,7 @@ mod framing;
 mod metrics;
 
 pub use backend::BACKEND_ID;
-pub use config::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+pub use config::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 pub use deser::{JsonSerdeDeserializer, JsonValueDeserializer};
 pub use framing::JsonLinesFramer;
 

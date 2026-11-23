@@ -158,7 +158,7 @@
 use gungraun::{Dhat, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
 use serde_json::Value;
 use spate_core::deser::Owned;
-use spate_json::{JsonFraming, OnError};
+use spate_json::{JsonFraming, JsonOnError};
 
 #[path = "support/decode_rig.rs"]
 mod decode_rig;
@@ -183,7 +183,7 @@ const LABELS: (&str, &str) = ("bench", "json");
 /// rigs in one process; here there is nothing to separate.
 fn batch<P>(
     framing: JsonFraming,
-    on_error: OnError,
+    on_error: JsonOnError,
     payload: Vec<u8>,
     expect: u64,
 ) -> Rig<spate_json::JsonSerdeDeserializer<P>>
@@ -227,7 +227,7 @@ fn array_batch_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,
     )
@@ -239,7 +239,7 @@ fn ndjson_bad_rig(
 ) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::lines_ndjson_bad_every(RECORDS, bad_every, how),
         orders::good_lines(RECORDS, bad_every),
     )
@@ -248,7 +248,7 @@ fn ndjson_bad_rig(
 fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Lines,
-        OnError::Fail,
+        JsonOnError::Fail,
         orders::lines_ndjson(RECORDS),
         RECORDS,
     )
@@ -257,7 +257,7 @@ fn ndjson_fail_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Lines,
-        OnError::Fail,
+        JsonOnError::Fail,
         orders::lines_ndjson_bad_last(RECORDS, Corruption::TypeMismatch),
         0,
     )
@@ -266,7 +266,7 @@ fn ndjson_fail_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>
 fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Array,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::lines_array(RECORDS),
         RECORDS,
     )
@@ -275,7 +275,7 @@ fn array_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 fn events_rig() -> Rig<spate_json::JsonSerdeDeserializer<Event>> {
     batch(
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::events_ndjson(RECORDS),
         RECORDS,
     )
@@ -284,7 +284,7 @@ fn events_rig() -> Rig<spate_json::JsonSerdeDeserializer<Event>> {
 fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
     batch(
         JsonFraming::Array,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::lines_array_bad_last(RECORDS),
         0,
     )

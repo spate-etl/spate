@@ -36,13 +36,14 @@ The name also stays clear of the core trait it implements, such as `Source` or `
 ### Name every exported config type for the connector
 
 Start the name of every public config type a connector exports with the connector's name, nested types included, such as `JsonFraming` and `AvroMode`.
+The rule covers the types a connector declares.
 
 **Why:** two connectors can then both export a `Compression` or a `Format` and an application that imports from both needs no aliases.
 A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `OnError`, `Format`, `SchemaSource`, `Dataset`, `Encoding`, `Clock`, the three `Compression` enums, `RegistrySection`, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** `Format`, `SchemaSource`, `Dataset`, `Encoding`, `Clock`, the three `Compression` enums, `RegistrySection`, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
 
 **Checked by:** review.
 

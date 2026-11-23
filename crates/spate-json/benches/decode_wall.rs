@@ -115,7 +115,7 @@
 use serde_json::Value;
 use spate_bench::{Corpus, Suite, bench_main};
 use spate_core::deser::Owned;
-use spate_json::{JsonFraming, JsonSerdeDeserializer, JsonValueDeserializer, OnError};
+use spate_json::{JsonFraming, JsonOnError, JsonSerdeDeserializer, JsonValueDeserializer};
 use std::cell::RefCell;
 
 #[path = "support/decode_rig.rs"]
@@ -172,7 +172,7 @@ fn batch_case<P>(
     suite: Suite,
     id: &'static str,
     framing: JsonFraming,
-    on_error: OnError,
+    on_error: JsonOnError,
     expect: u64,
     payload: impl Fn() -> Vec<u8> + 'static,
 ) -> Suite
@@ -221,8 +221,13 @@ fn batch_fail_case(
         .case(
             id,
             move |corpus, _seed| {
-                let rig =
-                    batch_rig::<LineItem>(framing, OnError::Fail, payload(), 0, (id, COMPONENT));
+                let rig = batch_rig::<LineItem>(
+                    framing,
+                    JsonOnError::Fail,
+                    payload(),
+                    0,
+                    (id, COMPONENT),
+                );
                 absorb(corpus, &rig);
                 RefCell::new(rig)
             },
@@ -285,7 +290,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_typed",
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         RECORDS,
         || orders::lines_ndjson(RECORDS),
     );
@@ -293,7 +298,7 @@ fn suite() -> Suite {
         suite,
         "decode_array_typed",
         JsonFraming::Array,
-        OnError::Skip,
+        JsonOnError::Skip,
         RECORDS,
         || orders::lines_array(RECORDS),
     );
@@ -304,7 +309,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_events",
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         RECORDS,
         || orders::events_ndjson(RECORDS),
     );
@@ -317,7 +322,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_fail_clean",
         JsonFraming::Lines,
-        OnError::Fail,
+        JsonOnError::Fail,
         RECORDS,
         || orders::lines_ndjson(RECORDS),
     );
@@ -328,7 +333,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_syntax_10pct",
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::Syntax),
     );
@@ -336,7 +341,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_type_10pct",
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         orders::good_lines(RECORDS, BAD_EVERY),
         || orders::lines_ndjson_bad_every(RECORDS, BAD_EVERY, Corruption::TypeMismatch),
     );
@@ -344,7 +349,7 @@ fn suite() -> Suite {
         suite,
         "decode_ndjson_syntax_all",
         JsonFraming::Lines,
-        OnError::Skip,
+        JsonOnError::Skip,
         0,
         || orders::lines_ndjson_bad_every(RECORDS, 1, Corruption::Syntax),
     );

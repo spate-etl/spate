@@ -10,7 +10,7 @@ use spate_core::ops::{ChunkConfig, PushOutcome, chain_owned};
 use spate_core::record::PartitionId;
 use spate_core::sink::{KeyHashRouter, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
-use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 use spate_test::{TestEncoder, memory_source, metric_series, metric_value, render_metrics};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +23,7 @@ struct Event {
 
 fn builder() -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
-    config.on_error = OnError::Skip;
+    config.on_error = JsonOnError::Skip;
     config.reject_duplicate_keys = false;
     JsonDeserializerBuilder::new(config)
         .expect("the config validates")

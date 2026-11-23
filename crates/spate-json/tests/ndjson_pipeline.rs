@@ -12,7 +12,7 @@ use spate_core::ops::{ChunkConfig, PushOutcome, chain_owned};
 use spate_core::record::PartitionId;
 use spate_core::sink::{KeyHashRouter, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
-use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 use spate_test::{TestEncoder, decode_rows, memory_source};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,7 @@ fn ndjson_payload_explodes_and_skips_poison_through_the_chain() {
 
     // Build the deserializer through the public builder, NDJSON with the skip policy.
     let mut config = JsonDeserializerConfig::default();
-    config.on_error = OnError::Skip;
+    config.on_error = JsonOnError::Skip;
     let deser = JsonDeserializerBuilder::new(config)
         .expect("the config validates")
         .framing(JsonFraming::Lines)

@@ -12,7 +12,7 @@
 //! downstream is full.
 
 use crate::backend;
-use crate::config::{JsonFraming, OnError, TAG};
+use crate::config::{JsonFraming, JsonOnError, TAG};
 use crate::metrics::JsonDeserMetrics;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -63,7 +63,7 @@ fn dup_check_reason(e: &backend::DecodeError) -> Reason {
 #[derive(Clone, Debug)]
 pub(crate) struct DecoderCore {
     pub(crate) framing: JsonFraming,
-    pub(crate) on_error: OnError,
+    pub(crate) on_error: JsonOnError,
     pub(crate) reject_duplicate_keys: bool,
     pub(crate) metrics: Option<JsonDeserMetrics>,
 }
@@ -144,7 +144,7 @@ impl DecoderCore {
         match self.on_error {
             // Skip streams line by line: a malformed line is dropped on its own
             // and the good lines around it still flow.
-            OnError::Skip => {
+            JsonOnError::Skip => {
                 for line in ndjson_lines(bytes) {
                     if let Some(payload) = self.decode_item::<P>(line, &meta)? {
                         let _ = out.emit(Record {
@@ -161,7 +161,7 @@ impl DecoderCore {
             // emitted. Emitting a prefix and *then* failing would let the
             // chain's Skip deserializer policy commit the source offset past the
             // un-emitted tail, silently losing the records after the bad line.
-            OnError::Fail => {
+            JsonOnError::Fail => {
                 let mut decoded = Vec::new();
                 for line in ndjson_lines(bytes) {
                     if let Some(payload) = self.decode_item::<P>(line, &meta)? {
@@ -242,7 +242,7 @@ impl DecoderCore {
         meta: &RecordMeta,
     ) -> Result<(), DeserError> {
         match self.on_error {
-            OnError::Skip => {
+            JsonOnError::Skip => {
                 if let Some(m) = &self.metrics {
                     match reason {
                         Reason::Malformed => m.dropped_malformed(),
@@ -259,7 +259,7 @@ impl DecoderCore {
                 );
                 Ok(())
             }
-            OnError::Fail => Err(DeserError::Malformed {
+            JsonOnError::Fail => Err(DeserError::Malformed {
                 reason: format!("{}: {e}", reason.label()),
             }),
         }
@@ -419,7 +419,7 @@ mod tests {
 
     use spate_test::test_ack;
 
-    fn builder(framing: JsonFraming, on_error: OnError, dup: bool) -> JsonDeserializerBuilder {
+    fn builder(framing: JsonFraming, on_error: JsonOnError, dup: bool) -> JsonDeserializerBuilder {
         JsonDeserializerBuilder::new(JsonDeserializerConfig {
             on_error,
             reject_duplicate_keys: dup,
@@ -448,7 +448,7 @@ mod tests {
             (JsonFraming::Lines, Some("Lines")),
             (JsonFraming::Array, Some("Array")),
         ] {
-            let b = builder(framing, OnError::Skip, false);
+            let b = builder(framing, JsonOnError::Skip, false);
             let serde = b.build_serde::<Ev>();
             let value = b.build_value();
             for got in [
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn single_round_trip_and_meta() {
-        let mut d = builder(JsonFraming::Single, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Single, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         d.deserialize(&raw(br#"{"id":7,"name":"orders"}"#), &test_ack(), &mut out)
             .unwrap();
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn ndjson_emits_a_record_per_line() {
-        let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload =
             b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}\n{\"id\":3,\"name\":\"c\"}";
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn array_explodes_elements() {
-        let mut d = builder(JsonFraming::Array, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Array, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         d.deserialize(
             &raw(br#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#),
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn empty_and_blank_payloads_are_tombstones() {
-        let mut d = builder(JsonFraming::Single, OnError::Skip, false).build_value();
+        let mut d = builder(JsonFraming::Single, JsonOnError::Skip, false).build_value();
         let mut out = EmitCollector::new();
         d.deserialize(&raw(b""), &test_ack(), &mut out).unwrap();
         d.deserialize(&raw(b"  \n  "), &test_ack(), &mut out)
@@ -525,28 +525,28 @@ mod tests {
     #[test]
     fn every_record_carries_the_payload_meta() {
         let key: &[u8] = b"user-7";
-        let cases: [(JsonFraming, OnError, &[u8], usize); 4] = [
+        let cases: [(JsonFraming, JsonOnError, &[u8], usize); 4] = [
             (
                 JsonFraming::Single,
-                OnError::Skip,
+                JsonOnError::Skip,
                 br#"{"id":1,"name":"a"}"#,
                 1,
             ),
             (
                 JsonFraming::Lines,
-                OnError::Skip,
+                JsonOnError::Skip,
                 b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
                 2,
             ),
             (
                 JsonFraming::Lines,
-                OnError::Fail,
+                JsonOnError::Fail,
                 b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
                 2,
             ),
             (
                 JsonFraming::Array,
-                OnError::Skip,
+                JsonOnError::Skip,
                 br#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#,
                 2,
             ),
@@ -581,7 +581,7 @@ mod tests {
         const PIPELINE: &str = "blank-payloads";
         let rendered = render_metrics(|| {
             for framing in [JsonFraming::Single, JsonFraming::Lines, JsonFraming::Array] {
-                for on_error in [OnError::Skip, OnError::Fail] {
+                for on_error in [JsonOnError::Skip, JsonOnError::Fail] {
                     let mut d = builder(framing, on_error, false).build_value();
                     d.attach_metrics(test_metrics(PIPELINE));
                     for bytes in [&b""[..], b"  \n  "] {
@@ -612,13 +612,13 @@ mod tests {
 
     #[test]
     fn malformed_single_skips_or_fails() {
-        let mut skip = builder(JsonFraming::Single, OnError::Skip, false).build_serde::<Ev>();
+        let mut skip = builder(JsonFraming::Single, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         skip.deserialize(&raw(b"{not json"), &test_ack(), &mut out)
             .unwrap();
         assert!(out.records.is_empty(), "skip drops the bad payload");
 
-        let mut fail = builder(JsonFraming::Single, OnError::Fail, false).build_serde::<Ev>();
+        let mut fail = builder(JsonFraming::Single, JsonOnError::Fail, false).build_serde::<Ev>();
         let err = fail
             .deserialize(&raw(b"{not json"), &test_ack(), &mut out)
             .unwrap_err();
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn ndjson_skip_isolates_the_bad_line() {
-        let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         d.deserialize(&raw(payload), &test_ack(), &mut out).unwrap();
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn ndjson_fail_stops_on_the_bad_line() {
-        let mut d = builder(JsonFraming::Lines, OnError::Fail, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Lines, JsonOnError::Fail, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         let err = d
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn array_error_is_atomic() {
-        let mut d = builder(JsonFraming::Array, OnError::Skip, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Array, JsonOnError::Skip, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         // The second element does not match `Ev`; the whole array is dropped.
         d.deserialize(
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn array_fail_emits_nothing() {
-        let mut d = builder(JsonFraming::Array, OnError::Fail, false).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Array, JsonOnError::Fail, false).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let err = d
             .deserialize(
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn duplicate_keys_last_wins_by_default_reject_when_configured() {
         // Default: serde_json is last-value-wins, one record emitted.
-        let mut allow = builder(JsonFraming::Single, OnError::Skip, false).build_value();
+        let mut allow = builder(JsonFraming::Single, JsonOnError::Skip, false).build_value();
         let mut out = EmitCollector::new();
         allow
             .deserialize(&raw(br#"{"id":1,"id":2}"#), &test_ack(), &mut out)
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(out.records[0].payload["id"], serde_json::json!(2));
 
         // reject_duplicate_keys + fail: hard error, labeled duplicate_key.
-        let mut reject = builder(JsonFraming::Single, OnError::Fail, true).build_value();
+        let mut reject = builder(JsonFraming::Single, JsonOnError::Fail, true).build_value();
         let err = reject
             .deserialize(&raw(br#"{"id":1,"id":2}"#), &test_ack(), &mut out)
             .unwrap_err();
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn nested_duplicate_keys_are_rejected() {
-        let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_value();
+        let mut d = builder(JsonFraming::Single, JsonOnError::Fail, true).build_value();
         let mut out = EmitCollector::new();
         let err = d
             .deserialize(&raw(br#"{"outer":{"a":1,"a":2}}"#), &test_ack(), &mut out)
@@ -725,7 +725,7 @@ mod tests {
     fn malformed_with_dedup_is_labeled_malformed_not_duplicate_key() {
         // With reject_duplicate_keys on, the structural pass runs first; a plain
         // syntax error (no duplicate key) must still be reported as `malformed`.
-        let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_serde::<Ev>();
+        let mut d = builder(JsonFraming::Single, JsonOnError::Fail, true).build_serde::<Ev>();
         let mut out = EmitCollector::new();
         let err = d
             .deserialize(&raw(b"{not valid json"), &test_ack(), &mut out)
@@ -744,7 +744,7 @@ mod tests {
         const STD: &str =
             r#"pipeline="orders",component="main.deserializer",component_type="json""#;
         let rendered = render_metrics(|| {
-            let mut d = builder(JsonFraming::Lines, OnError::Skip, false).build_serde::<Ev>();
+            let mut d = builder(JsonFraming::Lines, JsonOnError::Skip, false).build_serde::<Ev>();
             d.attach_metrics(test_metrics("orders"));
             let mut out = EmitCollector::new();
             let payload =

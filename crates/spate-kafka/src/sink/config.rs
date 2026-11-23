@@ -147,7 +147,7 @@ fn default_statistics_interval() -> Duration {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum Compression {
+pub enum KafkaCompression {
     /// No compression.
     None,
     /// Gzip (zlib).
@@ -160,14 +160,14 @@ pub enum Compression {
     Zstd,
 }
 
-impl Compression {
+impl KafkaCompression {
     fn codec(self) -> &'static str {
         match self {
-            Compression::None => "none",
-            Compression::Gzip => "gzip",
-            Compression::Snappy => "snappy",
-            Compression::Lz4 => "lz4",
-            Compression::Zstd => "zstd",
+            KafkaCompression::None => "none",
+            KafkaCompression::Gzip => "gzip",
+            KafkaCompression::Snappy => "snappy",
+            KafkaCompression::Lz4 => "lz4",
+            KafkaCompression::Zstd => "zstd",
         }
     }
 }
@@ -219,7 +219,7 @@ pub struct KafkaSinkConfig {
     pub statistics_interval: Duration,
     /// Producer compression codec (librdkafka `compression.codec`).
     #[serde(default)]
-    pub compression: Option<Compression>,
+    pub compression: Option<KafkaCompression>,
     /// Raw librdkafka producer properties, applied verbatim after
     /// validation. Sink-owned properties (see [`KafkaSinkConfig`] docs and
     /// the connector guide) are rejected; batching knobs like `linger.ms`

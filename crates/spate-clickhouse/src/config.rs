@@ -3,8 +3,8 @@
 //! The `sink: { clickhouse: { ... } }` YAML section deserializes into
 //! [`ClickHouseSinkConfig`];
 //! [`ClickHouseSinkBuilder::from_component_config`] validates it and produces
-//! a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
-//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::connect`] supplies
+//! a [`ClickHouseSinkBuilder`] holding per-shard replica endpoints.
+//! [`ClickHouseSinkBuilder::connect`] supplies
 //! the row type and produces the runnable [`ClickHouseSink`], including its
 //! writer.
 

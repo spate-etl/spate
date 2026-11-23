@@ -31,7 +31,7 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, Owned, RecFamily};
 use spate_core::metrics::Meter;
 use spate_core::record::{Flow, RawPayload, Record};
-use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+use spate_json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 use std::hint::black_box;
 
 /// A sink that counts records and keeps the key hash of the last one.
@@ -303,7 +303,7 @@ where
 /// framing.
 pub(crate) fn full_settings(
     framing: JsonFraming,
-    on_error: OnError,
+    on_error: JsonOnError,
     reject_duplicate_keys: bool,
 ) -> JsonDeserializerBuilder {
     let mut config = JsonDeserializerConfig::default();
@@ -322,7 +322,7 @@ pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerBuilder {
     // every decoded payload before emitting any of them. Measuring the
     // default is the point; a Fail case would be a second shape, not a
     // stricter version of this one.
-    config.on_error = OnError::Skip;
+    config.on_error = JsonOnError::Skip;
     // Off: the structural check parses each document a second time, which
     // would measure the guard rather than the decode.
     config.reject_duplicate_keys = false;
@@ -359,7 +359,7 @@ pub(crate) fn rig<D>(
 /// A warmed rig decoding records of one type under one framing and policy.
 pub(crate) fn batch_rig<P>(
     framing: JsonFraming,
-    on_error: OnError,
+    on_error: JsonOnError,
     payload: Vec<u8>,
     expect: u64,
     labels: (&'static str, &'static str),
@@ -385,7 +385,7 @@ pub(crate) fn shape_rig(
     labels: (&'static str, &'static str),
 ) -> Rig<spate_json::JsonValueDeserializer> {
     warm_rig::<Owned<Value>, _>(
-        full_settings(JsonFraming::Single, OnError::Skip, guard),
+        full_settings(JsonFraming::Single, JsonOnError::Skip, guard),
         payload,
         expect,
         labels,

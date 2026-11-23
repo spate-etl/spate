@@ -31,10 +31,10 @@ pub enum JsonFraming {
     Single,
     /// Newline-delimited JSON (JSON Lines): one JSON value per `\n`-separated
     /// line → one record per line, with per-line error isolation under
-    /// [`OnError::Skip`].
+    /// [`JsonOnError::Skip`].
     Lines,
     /// A top-level JSON array → one record per element, decoded in one pass
-    /// (a malformed array is handled atomically by [`OnError`]).
+    /// (a malformed array is handled atomically by [`JsonOnError`]).
     Array,
 }
 
@@ -42,7 +42,7 @@ pub enum JsonFraming {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum OnError {
+pub enum JsonOnError {
     /// Drop the record, count it in
     /// `spate_json_deser_records_dropped_total{reason}` on a chain built with
     /// `with_metrics`, and continue. Under [`JsonFraming::Array`] one bad
@@ -67,7 +67,7 @@ pub enum OnError {
 #[non_exhaustive]
 pub struct JsonDeserializerConfig {
     /// Record-level error policy.
-    pub on_error: OnError,
+    pub on_error: JsonOnError,
     /// Reject (rather than silently last-value-wins) any JSON object with a
     /// duplicate key, at any depth. Off by default; enabling it parses each
     /// document a second time for the structural check.
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn defaults_are_skip_no_dedup_and_single_framing() {
         let c = JsonDeserializerConfig::default();
-        assert_eq!(c.on_error, OnError::Skip);
+        assert_eq!(c.on_error, JsonOnError::Skip);
         assert!(!c.reject_duplicate_keys);
         let b = JsonDeserializerBuilder::new(c).expect("the default config validates");
         assert_eq!(b.framing, JsonFraming::Single);
@@ -200,14 +200,14 @@ mod tests {
     #[test]
     fn parses_a_full_section() {
         let c = config("on_error: fail\nreject_duplicate_keys: true\n").unwrap();
-        assert_eq!(c.on_error, OnError::Fail);
+        assert_eq!(c.on_error, JsonOnError::Fail);
         assert!(c.reject_duplicate_keys);
     }
 
     #[test]
     fn the_builder_takes_the_section_it_is_given() {
         let b = builder("on_error: fail\nreject_duplicate_keys: true\n");
-        assert_eq!(b.config.on_error, OnError::Fail);
+        assert_eq!(b.config.on_error, JsonOnError::Fail);
         assert!(b.config.reject_duplicate_keys);
     }
 

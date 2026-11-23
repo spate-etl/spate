@@ -22,7 +22,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
-use spate::json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, OnError};
+use spate::json::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{TestEncoder, capture_sink, memory_source};
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: deserializer
     let mut config = JsonDeserializerConfig::default();
-    config.on_error = OnError::Skip;
+    config.on_error = JsonOnError::Skip;
     let json = JsonDeserializerBuilder::new(config)?.framing(JsonFraming::Lines);
     // ANCHOR_END: deserializer
 

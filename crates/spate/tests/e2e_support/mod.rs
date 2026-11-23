@@ -24,7 +24,6 @@
 
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
-use rdkafka::ClientConfig;
 pub use rdkafka::Offset;
 use rdkafka::admin::{NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -346,10 +345,6 @@ impl Harness {
     /// The offsets a transaction takes on a partition ahead of its records,
     /// read from one committed record on a topic of its own: the end, less
     /// that record and its marker.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the harness reads the broker outside the connector's client factory"
-    )]
     pub fn offsets_ahead_of_a_transaction(&self) -> i64 {
         const TOPIC: &str = "e2e-transaction-layout";
         self.create_topic(TOPIC, 1);
@@ -360,11 +355,8 @@ impl Harness {
         self.produce_transaction(TOPIC, &[(0, event)], true);
         // The commit returns before the broker writes the marker, and until
         // then the last stable offset `end_offsets` reads stays below the end.
-        let uncommitted: BaseConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .set("isolation.level", "read_uncommitted")
-            .create()
-            .expect("probe consumer");
+        let uncommitted = consumer(&self.brokers, &[("isolation.level", "read_uncommitted")])
+            .unwrap_or_else(|e| panic!("{e}"));
         let mut end = 0;
         wait_until(Duration::from_secs(60), "the transaction's marker", || {
             end = read_ends(&uncommitted, TOPIC, 1)[0];
@@ -1048,7 +1040,7 @@ impl SampleTarget {
 }
 
 /// A consumer in `group` that reads the group's offsets and joins nothing.
-fn probe_consumer(brokers: &str, group: &str) -> BaseConsumer {
+pub fn probe_consumer(brokers: &str, group: &str) -> BaseConsumer {
     consumer(brokers, &[("group.id", group)]).unwrap_or_else(|e| panic!("{e}"))
 }
 

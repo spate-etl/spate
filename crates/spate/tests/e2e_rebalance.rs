@@ -16,8 +16,8 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use rdkafka::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::Consumer;
+use spate_test_support::consumer;
 use std::time::{Duration, Instant};
 use support::*;
 
@@ -57,17 +57,15 @@ fn rebalance_under_load_preserves_every_record() {
         let topic = params.topic.clone();
         let group = params.group.clone();
         std::thread::spawn(move || {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the intruder is a plain group member outside the connector's client factory"
-            )]
-            let consumer: BaseConsumer = ClientConfig::new()
-                .set("bootstrap.servers", &brokers)
-                .set("group.id", &group)
-                .set("enable.auto.commit", "false")
-                .set("auto.offset.reset", "earliest")
-                .create()
-                .expect("intruder consumer");
+            let consumer = consumer(
+                &brokers,
+                &[
+                    ("group.id", &group),
+                    ("enable.auto.commit", "false"),
+                    ("auto.offset.reset", "earliest"),
+                ],
+            )
+            .unwrap_or_else(|e| panic!("intruder consumer: {e}"));
             consumer.subscribe(&[&topic]).expect("intruder subscribe");
             let leave_at = Instant::now() + Duration::from_secs(10);
             while Instant::now() < leave_at {

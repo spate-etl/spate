@@ -38,8 +38,7 @@ mod support;
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
-use rdkafka::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::Consumer;
 use rdkafka::producer::{BaseRecord, Producer};
 use spate_test::metric_sum;
 use spate_test_support::{
@@ -411,16 +410,8 @@ fn encode(schema: &Schema, fields: Vec<(&str, Value)>) -> Vec<u8> {
 /// exact and immediate, an empty topic answers `0` without waiting out a quiet
 /// period, and there is no consumer group whose initial rebalance delay could
 /// be mistaken for an exhausted topic.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the harness reads the topic's watermarks outside the connector's client factory"
-)]
 fn topic_count(brokers: &str, topic: &str) -> usize {
-    let probe: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", format!("probe-{}", std::process::id()))
-        .create()
-        .expect("probe consumer");
+    let probe = support::probe_consumer(brokers, &format!("probe-{}", std::process::id()));
     let timeout = Duration::from_secs(10);
     let metadata = probe
         .fetch_metadata(Some(topic), timeout)

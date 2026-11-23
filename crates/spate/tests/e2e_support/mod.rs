@@ -639,17 +639,17 @@ source:
     registry:
       url: {registry}
 sink:
+  batch:
+    max_rows: {max_rows}
+    max_bytes: 8MiB
+    linger: {linger}
+  inflight:
+    max_per_shard: {inflight}
   clickhouse:
     table: {table}
     shards:
 {shards_yaml}    user: default
     password: {password}
-    batch:
-      max_rows: {max_rows}
-      max_bytes: 8MiB
-      linger: {linger}
-    inflight:
-      max_per_shard: {inflight}
 "#,
             name = self.name,
             threads = self.threads,

@@ -29,7 +29,7 @@ mod writer;
 
 #[cfg(test)]
 pub(crate) use config::Producer as SinkRole;
-pub use config::{Compression, KafkaSink, KafkaSinkConfig};
+pub use config::{KafkaCompression, KafkaSink, KafkaSinkConfig};
 pub(crate) use context::{SinkContext, SinkHooks};
 pub use encoder::{
     BytesKeyFn, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KeyFn,

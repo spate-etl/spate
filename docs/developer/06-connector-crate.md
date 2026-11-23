@@ -43,7 +43,7 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `Format`, the three `Compression` enums, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** `Format`, the ClickHouse and S3 `Compression` enums, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
 
 **Checked by:** review.
 
@@ -90,7 +90,7 @@ The type's own crate already reaches it from every connector.
 
 **Follow:** [`crates/spate-s3/src/lib.rs`](repo:crates/spate-s3/src/lib.rs).
 
-**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, Kafka's sink `Compression`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, `KafkaCompression`, and ClickHouse's `ShardConfig` and `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 

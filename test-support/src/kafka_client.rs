@@ -10,7 +10,7 @@ use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::ToBytes;
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
+use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _, ProducerContext};
 use rdkafka::{Offset, TopicPartitionList};
 
 /// How long one metadata request waits on a cluster that may be electing.
@@ -43,12 +43,24 @@ const TRANSACTIONAL: &[(&str, &str)] = &[("transaction.timeout.ms", "600000")];
     reason = "test helpers build their clients outside spate-kafka's factory"
 )]
 fn client<T: FromClientConfig>(bootstrap: &str, settings: &[(&str, &str)]) -> Result<T, String> {
+    config(bootstrap, settings)
+        .create()
+        .map_err(|e| format!("Kafka client: {e}"))
+}
+
+/// The configuration of every client this module builds: `bootstrap` with
+/// `settings`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test helpers build their clients outside spate-kafka's factory"
+)]
+fn config(bootstrap: &str, settings: &[(&str, &str)]) -> rdkafka::ClientConfig {
     let mut config = rdkafka::ClientConfig::new();
     config.set("bootstrap.servers", bootstrap);
     for &(key, value) in settings {
         config.set(key, value);
     }
-    config.create().map_err(|e| format!("Kafka client: {e}"))
+    config
 }
 
 /// A client that reads `bootstrap`'s metadata.
@@ -347,12 +359,13 @@ fn transactional_settings(id: &str) -> Vec<(&str, &str)> {
 ///
 /// Fails, naming the topic, on any other refusal at once, and with the
 /// queue-full error once `deadline` has passed.
-pub fn send<K, P>(
-    producer: &BaseProducer,
+pub fn send<C, K, P>(
+    producer: &BaseProducer<C>,
     record: BaseRecord<'_, K, P>,
     deadline: Instant,
 ) -> Result<(), String>
 where
+    C: ProducerContext<DeliveryOpaque = ()>,
     K: ToBytes + ?Sized,
     P: ToBytes + ?Sized,
 {
@@ -360,12 +373,13 @@ where
 }
 
 /// [`send`], asking `expired` after each full-queue refusal whether to stop.
-fn send_until<K, P>(
-    producer: &BaseProducer,
+fn send_until<C, K, P>(
+    producer: &BaseProducer<C>,
     mut record: BaseRecord<'_, K, P>,
     mut expired: impl FnMut() -> bool,
 ) -> Result<(), String>
 where
+    C: ProducerContext<DeliveryOpaque = ()>,
     K: ToBytes + ?Sized,
     P: ToBytes + ?Sized,
 {
@@ -385,6 +399,12 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
+
+    use rdkafka::ClientContext;
+    use rdkafka::message::{DeliveryResult, Message as _};
+    use rdkafka::producer::DefaultProducerContext;
+
     use super::*;
 
     /// Bounds a hang only.
@@ -393,10 +413,34 @@ mod tests {
     /// An address nothing listens on.
     const NOWHERE: &str = "127.0.0.1:1";
 
-    fn one_slot(settings: &[(&str, &str)]) -> BaseProducer {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test producer with its own context, outside spate-kafka's factory"
+    )]
+    fn one_slot<C: ProducerContext>(settings: &[(&str, &str)], context: C) -> BaseProducer<C> {
         let mut all = vec![("queue.buffering.max.messages", "1")];
         all.extend_from_slice(settings);
-        client(NOWHERE, &all).unwrap()
+        config(NOWHERE, &all).create_with_context(context).unwrap()
+    }
+
+    /// Records the payload of each delivery report the producer serves.
+    #[derive(Default)]
+    struct Reports(Mutex<Vec<Vec<u8>>>);
+
+    impl ClientContext for Reports {}
+
+    impl ProducerContext for Reports {
+        type DeliveryOpaque = ();
+
+        fn delivery(&self, report: &DeliveryResult<'_>, (): ()) {
+            let (Ok(message) | Err((_, message))) = report;
+            // The producer's drop serves reports while a failed test unwinds,
+            // where a second panic aborts the run.
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(message.payload().unwrap_or_default().to_vec());
+        }
     }
 
     #[test]
@@ -415,7 +459,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_past_the_deadline_returns_its_error() {
-        let producer = one_slot(&[]);
+        let producer = one_slot(&[], DefaultProducerContext);
         send(
             &producer,
             BaseRecord::<(), _>::to("t").payload("a"),
@@ -435,7 +479,7 @@ mod tests {
     fn a_full_queue_is_sent_to_once_a_delivery_report_frees_it() {
         // The first record fails within about a second, and serving its
         // report frees the one slot.
-        let producer = one_slot(&[("message.timeout.ms", "1")]);
+        let producer = one_slot(&[("message.timeout.ms", "1")], Reports::default());
         send(
             &producer,
             BaseRecord::<(), _>::to("t").payload("a"),
@@ -447,7 +491,18 @@ mod tests {
             Instant::now() >= hang
         })
         .unwrap();
-        assert_eq!(producer.in_flight_count(), 1, "the second record is queued");
+        let reports = producer.context().0.lock().unwrap().clone();
+        assert_eq!(reports, [b"a"], "the first record's report freed the slot");
+        let refused = send(
+            &producer,
+            BaseRecord::<(), _>::to("t").payload("c"),
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("QueueFull"),
+            "the second record holds the slot: {refused}"
+        );
     }
 
     fn topic(name: &str, error: Option<&str>, partitions: usize) -> Listed {

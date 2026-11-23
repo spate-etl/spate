@@ -31,7 +31,7 @@
 //! minted earlier and not yet drawn". A named dataset gets the property for
 //! free and stays forty lines of configuration.
 //!
-//! Datasets are enumerated by [`Dataset`]; the storefront model lives in
+//! Datasets are enumerated by [`DatagenDataset`]; the storefront model lives in
 //! [`storefront`].
 //!
 //! # Referential integrity without coordination
@@ -101,7 +101,7 @@ mod plan;
 mod rng;
 mod source;
 
-pub use config::{Clock, DatagenSourceConfig, Dataset, Encoding};
+pub use config::{DatagenClock, DatagenDataset, DatagenEncoding, DatagenSourceConfig};
 pub use dims::{CUSTOMERS, REGIONS, SKUS};
 pub use events::{
     EVENT_SCHEMA_JSON, OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent,

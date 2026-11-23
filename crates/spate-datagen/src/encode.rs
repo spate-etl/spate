@@ -9,7 +9,7 @@
 //! `encoding:` selects the format. The generator authors its own payloads, so
 //! an encoder is chosen from that set rather than supplied by the assembly.
 
-use crate::config::Encoding;
+use crate::config::DatagenEncoding;
 use crate::events::StorefrontEvent;
 use spate_core::error::SourceError;
 
@@ -27,11 +27,11 @@ pub(crate) enum Encoder {
 impl Encoder {
     /// Resolve `encoding`. The Avro schema is parsed here, once, so the record
     /// path never touches it.
-    pub(crate) fn new(encoding: Encoding) -> Result<Encoder, SourceError> {
+    pub(crate) fn new(encoding: DatagenEncoding) -> Result<Encoder, SourceError> {
         match encoding {
-            Encoding::Json => Ok(Encoder::Json),
+            DatagenEncoding::Json => Ok(Encoder::Json),
             #[cfg(feature = "avro")]
-            Encoding::Avro => {
+            DatagenEncoding::Avro => {
                 let schema =
                     apache_avro::Schema::parse_str(crate::EVENT_SCHEMA_JSON).map_err(|e| {
                         SourceError::fatal(format!("parsing the built-in datagen Avro schema: {e}"))
@@ -41,7 +41,7 @@ impl Encoder {
             // Unreachable through `DatagenSource::new`, whose `validate`
             // refuses this combination first. This arm answers a direct call.
             #[cfg(not(feature = "avro"))]
-            Encoding::Avro => Err(SourceError::fatal(
+            DatagenEncoding::Avro => Err(SourceError::fatal(
                 crate::config::avro_feature_off().to_string(),
             )),
         }
@@ -214,9 +214,9 @@ mod tests {
     /// Every encoding this build can resolve, so a property asserted of "the
     /// encoder" is asserted of each of them.
     #[cfg(feature = "avro")]
-    const ENCODINGS: [Encoding; 2] = [Encoding::Json, Encoding::Avro];
+    const ENCODINGS: [DatagenEncoding; 2] = [DatagenEncoding::Json, DatagenEncoding::Avro];
     #[cfg(not(feature = "avro"))]
-    const ENCODINGS: [Encoding; 1] = [Encoding::Json];
+    const ENCODINGS: [DatagenEncoding; 1] = [DatagenEncoding::Json];
 
     fn events(count: usize) -> Vec<StorefrontEvent> {
         plan().take(count).collect()
@@ -239,7 +239,7 @@ mod tests {
     /// clears it.
     #[test]
     fn encoding_appends_to_the_caller_s_buffer_and_leaves_earlier_bytes_alone() {
-        let encoder = Encoder::new(Encoding::Json).unwrap();
+        let encoder = Encoder::new(DatagenEncoding::Json).unwrap();
         let mut arena = Vec::new();
         let mut spans = Vec::new();
         let generated = events(64);
@@ -317,7 +317,7 @@ mod tests {
         use apache_avro::types::Value;
 
         let schema = apache_avro::Schema::parse_str(crate::EVENT_SCHEMA_JSON).unwrap();
-        let encoder = Encoder::new(Encoding::Avro).unwrap();
+        let encoder = Encoder::new(DatagenEncoding::Avro).unwrap();
         let mut seen = [0usize; 3];
 
         for event in events(512) {
@@ -390,7 +390,7 @@ mod tests {
     #[cfg(feature = "avro")]
     #[test]
     fn the_avro_wire_format_is_pinned_across_builds() {
-        let encoder = Encoder::new(Encoding::Avro).unwrap();
+        let encoder = Encoder::new(DatagenEncoding::Avro).unwrap();
         let mut arena = Vec::new();
         for event in events(500) {
             encoder.encode(&event, &mut arena).unwrap();
@@ -408,7 +408,7 @@ mod tests {
     #[cfg(not(feature = "avro"))]
     #[test]
     fn avro_without_the_feature_is_refused_rather_than_silently_emitting_json() {
-        let err = Encoder::new(Encoding::Avro).unwrap_err();
+        let err = Encoder::new(DatagenEncoding::Avro).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert_eq!(
             err.reason(),
@@ -423,7 +423,7 @@ mod tests {
     #[cfg(feature = "avro")]
     #[test]
     fn a_failed_encode_is_fatal_and_leaves_the_buffer_as_it_was_found() {
-        let encoder = Encoder::new(Encoding::Avro).unwrap();
+        let encoder = Encoder::new(DatagenEncoding::Avro).unwrap();
         let event = StorefrontEvent::PaymentCaptured(crate::events::PaymentCaptured {
             order_id: 1,
             amount_cents: u64::MAX,

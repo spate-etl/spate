@@ -62,7 +62,7 @@ fn default_epoch_ms() -> i64 {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum Dataset {
+pub enum DatagenDataset {
     /// Orders, payments and refunds over a small catalog, the model in
     /// [`crate::storefront`].
     #[default]
@@ -73,7 +73,7 @@ pub enum Dataset {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum Encoding {
+pub enum DatagenEncoding {
     /// One JSON document per payload, internally tagged by `type`.
     #[default]
     Json,
@@ -87,7 +87,7 @@ pub enum Encoding {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum Clock {
+pub enum DatagenClock {
     /// Deterministic: `epoch_ms` plus one millisecond per event the lane has
     /// released. Two runs with the same seed produce byte-identical payloads,
     /// which is what lets a test assert on them.
@@ -107,10 +107,10 @@ pub enum Clock {
 pub struct DatagenSourceConfig {
     /// The built-in dataset to generate.
     #[serde(default)]
-    pub dataset: Dataset,
+    pub dataset: DatagenDataset,
     /// Wire format of the payloads.
     #[serde(default)]
-    pub encoding: Encoding,
+    pub encoding: DatagenEncoding,
     /// How many lanes to run, and therefore how many framework partitions
     /// the pipeline sees. Each lane owns a disjoint slice of the order-id
     /// space and generates independently; no lane ever reads another's
@@ -137,7 +137,7 @@ pub struct DatagenSourceConfig {
     pub count: Option<u64>,
     /// Where event timestamps come from.
     #[serde(default)]
-    pub clock: Clock,
+    pub clock: DatagenClock,
     /// Base instant for the `fixed` clock, in milliseconds since the Unix
     /// epoch. Ignored by the `wall` clock.
     #[serde(default = "default_epoch_ms")]
@@ -150,14 +150,14 @@ pub struct DatagenSourceConfig {
 impl Default for DatagenSourceConfig {
     fn default() -> DatagenSourceConfig {
         DatagenSourceConfig {
-            dataset: Dataset::default(),
-            encoding: Encoding::default(),
+            dataset: DatagenDataset::default(),
+            encoding: DatagenEncoding::default(),
             partitions: default_partitions(),
             seed: 0,
             tick_interval: default_tick_interval(),
             events_per_tick: default_events_per_tick(),
             count: None,
-            clock: Clock::default(),
+            clock: DatagenClock::default(),
             epoch_ms: default_epoch_ms(),
         }
     }
@@ -227,7 +227,7 @@ impl DatagenSourceConfig {
                 ));
             }
         }
-        if self.encoding == Encoding::Avro && !cfg!(feature = "avro") {
+        if self.encoding == DatagenEncoding::Avro && !cfg!(feature = "avro") {
             return Err(avro_feature_off());
         }
         Ok(())
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(cfg.tick_interval, Duration::from_millis(250));
         assert_eq!(cfg.events_per_tick, 32);
         assert_eq!(cfg.count, Some(1000));
-        assert_eq!(cfg.clock, Clock::Wall);
+        assert_eq!(cfg.clock, DatagenClock::Wall);
         assert_eq!(cfg.epoch_ms, 42);
     }
 
@@ -375,7 +375,7 @@ mod tests {
         if !cfg!(feature = "avro") {
             cases.push((
                 DatagenSourceConfig {
-                    encoding: Encoding::Avro,
+                    encoding: DatagenEncoding::Avro,
                     ..DatagenSourceConfig::default()
                 },
                 "source.datagen.encoding: avro needs spate-datagen's `avro` feature (the \
@@ -448,7 +448,7 @@ mod tests {
     fn avro_is_accepted_only_when_the_feature_is_on() {
         let parsed = DatagenSourceConfig::from_component_config(&section("  encoding: avro\n"));
         if cfg!(feature = "avro") {
-            assert_eq!(parsed.unwrap().encoding, Encoding::Avro);
+            assert_eq!(parsed.unwrap().encoding, DatagenEncoding::Avro);
         } else {
             let err = parsed.unwrap_err().to_string();
             assert!(err.contains("avro"), "{err}");

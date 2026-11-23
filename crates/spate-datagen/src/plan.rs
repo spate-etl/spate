@@ -36,7 +36,7 @@
 //! reports that count. A downstream check reconciles the orders that were
 //! captured against their lines; it cannot expect every order to be paid.
 
-use crate::config::{Clock, DatagenSourceConfig};
+use crate::config::{DatagenClock, DatagenSourceConfig};
 use crate::dims::{CUSTOMERS, REFUND_REASONS, REGIONS, SKUS, UNIT_CENTS};
 use crate::events::{OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent};
 use crate::rng::{self, SplitMix64};
@@ -120,7 +120,7 @@ pub(crate) struct EventPlan {
     produced: u64,
     open: Ring,
     captured: Ring,
-    clock: Clock,
+    clock: DatagenClock,
     epoch_ms: i64,
 }
 
@@ -179,18 +179,18 @@ impl EventPlan {
 
     /// Milliseconds since the Unix epoch for the event about to be produced.
     ///
-    /// Under [`Clock::Fixed`] this is `epoch_ms` plus one millisecond per
+    /// Under [`DatagenClock::Fixed`] this is `epoch_ms` plus one millisecond per
     /// event *this lane* has already produced, so a lane's timestamps are a
     /// function of its position in its own stream and nothing else: no wall
     /// clock, no interleaving, no dependence on how the runtime scheduled the
     /// threads. The sum saturates, so an `epoch_ms` within a stream's length
     /// of [`i64::MAX`] pins every timestamp there.
     ///
-    /// Under [`Clock::Wall`] it is the host clock and none of that holds.
+    /// Under [`DatagenClock::Wall`] it is the host clock and none of that holds.
     fn event_time(&self) -> i64 {
         match self.clock {
-            Clock::Fixed => self.epoch_ms.saturating_add(self.produced as i64),
-            Clock::Wall => spate_core::clock::wall_now()
+            DatagenClock::Fixed => self.epoch_ms.saturating_add(self.produced as i64),
+            DatagenClock::Wall => spate_core::clock::wall_now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64),
         }
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn the_wall_clock_stamps_a_plausible_present() {
         let cfg = DatagenSourceConfig {
-            clock: Clock::Wall,
+            clock: DatagenClock::Wall,
             ..config(1, 1)
         };
         let at = EventPlan::new(&cfg, 0).next().1;

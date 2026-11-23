@@ -3,8 +3,8 @@
 //! The `sink: { clickhouse: { ... } }` YAML section deserializes into
 //! [`ClickHouseSinkConfig`];
 //! [`ClickHouseSinkBuilder::from_component_config`] validates it and produces
-//! a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
-//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::connect`] supplies
+//! a [`ClickHouseSinkBuilder`] holding per-shard replica endpoints.
+//! [`ClickHouseSinkBuilder::connect`] supplies
 //! the row type and produces the runnable [`ClickHouseSink`], including its
 //! writer.
 
@@ -22,8 +22,7 @@ use serde::{Deserialize, Deserializer, de};
 use spate_core::config::{ComponentConfig, ConfigError, SectionPath, UrlRule, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
-    BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
-    SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
+    FrameCodecFactory, SinkBundle, SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
 };
 use spate_core::tls::SystemRoots;
 use std::collections::BTreeMap;
@@ -45,10 +44,6 @@ pub(crate) const TAG: &str = "clickhouse";
 ///       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
 ///     user: default
 ///     password: ${CLICKHOUSE_PASSWORD}
-///     batch: { max_rows: 500000, max_bytes: 128MiB, linger: 1s }
-///     inflight: { max_per_shard: 2 }
-///     retry: { initial: 100ms, max: 10s, multiplier: 2.0, jitter: 0.2, max_attempts: 0 }
-///     breaker: { failure_threshold: 3, open_for: 5s, half_open_probes: 1 }
 ///     timeouts: { send: 30s, end: 180s, startup: 30s }
 ///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
@@ -83,18 +78,6 @@ pub struct ClickHouseSinkConfig {
     /// settings this sink always sets).
     #[serde(default)]
     pub settings: BTreeMap<String, String>,
-    /// Batch sealing thresholds.
-    #[serde(default)]
-    pub batch: BatchConfig,
-    /// Concurrent in-flight batches per shard.
-    #[serde(default)]
-    pub inflight: InflightConfig,
-    /// Retry/backoff policy for failed writes.
-    #[serde(default)]
-    pub retry: RetryConfig,
-    /// Per-replica circuit breaker.
-    #[serde(default)]
-    pub breaker: BreakerConfig,
     /// Client-side timeouts for one insert, and for one startup request.
     #[serde(default)]
     pub timeouts: TimeoutSection,
@@ -127,10 +110,6 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
             password,
             tls,
             settings,
-            batch,
-            inflight,
-            retry,
-            breaker,
             timeouts,
             compression,
             format,
@@ -144,10 +123,6 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
             .field("password", &redact::option(password))
             .field("tls", tls)
             .field("settings", &redact::map(settings.keys()))
-            .field("batch", batch)
-            .field("inflight", inflight)
-            .field("retry", retry)
-            .field("breaker", breaker)
             .field("timeouts", timeouts)
             .field("compression", compression)
             .field("format", format)
@@ -280,10 +255,6 @@ impl ClickHouseSinkConfig {
             password: None,
             tls: TlsSection::default(),
             settings: BTreeMap::new(),
-            batch: BatchConfig::default(),
-            inflight: InflightConfig::default(),
-            retry: RetryConfig::default(),
-            breaker: BreakerConfig::default(),
             timeouts: TimeoutSection::default(),
             compression: Compression::default(),
             format: Format::default(),
@@ -308,8 +279,7 @@ impl ClickHouseSinkConfig {
     }
 
     /// Checks the configuration rules: the shard topology, each replica URL's
-    /// scheme and credentials, identifiers, the pool sections'
-    /// [`SinkPoolConfig::validate`] rules, the compression level, reserved
+    /// scheme and credentials, identifiers, the compression level, reserved
     /// settings, `distributed_check`, and a `tls.root_ca` set with no
     /// `https://` URL to use it. It reads no file and builds no client, so a
     /// `tls.root_ca` file that cannot be loaded is refused by
@@ -361,9 +331,6 @@ impl ClickHouseSinkConfig {
             && !is_identifier(db)
         {
             return Err(at.invalid("database", format!("`{db}` is not a valid identifier")));
-        }
-        if let Err(why) = self.pool().validate() {
-            return Err(at.error(why.to_string()));
         }
 
         // Compression: the string parser bounds the level, and a config built
@@ -435,11 +402,6 @@ impl ClickHouseSinkConfig {
             ));
         }
         Ok(())
-    }
-
-    /// The worker-pool tuning the four pool sections describe.
-    fn pool(&self) -> SinkPoolConfig {
-        SinkPoolConfig::new(self.batch, self.inflight, self.retry, self.breaker)
     }
 }
 
@@ -633,7 +595,6 @@ pub struct ClickHouseSinkBuilder {
     endpoints: Vec<Vec<ClickHouseEndpoint>>,
     probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
     shard_weights: Arc<[u32]>,
-    pool: SinkPoolConfig,
     distributed: Option<distributed::DistributedCheck>,
     startup: StartupBound,
 }
@@ -790,7 +751,6 @@ impl ClickHouseSinkBuilder {
         Ok(ClickHouseSink {
             writer,
             endpoints: self.endpoints,
-            pool: self.pool,
             frame_codec,
             encoding,
             probe_endpoints: self.probe_endpoints,
@@ -819,8 +779,6 @@ pub struct ClickHouseSink {
     pub writer: ClickHouseWriter,
     /// Per-shard replica endpoints, `shards[i][j]` = shard `i`, replica `j`.
     pub endpoints: Vec<Vec<ClickHouseEndpoint>>,
-    /// Pool knobs mapped onto the framework's configuration.
-    pub pool: SinkPoolConfig,
     /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
     frame_codec: Option<FrameCodecFactory>,
     /// The configured wire format, with the live table's columns fetched at
@@ -941,7 +899,7 @@ impl SinkBundle for ClickHouseSink {
             .iter()
             .map(|shard| shard.iter().map(|e| e.display_url().to_string()).collect())
             .collect();
-        let parts = SinkParts::new(self.writer, self.endpoints, self.pool)
+        let parts = SinkParts::new(self.writer, self.endpoints, SinkPoolConfig::default())
             .with_component_type(TAG)
             .with_replica_labels(replica_labels)
             .with_probe(probe);
@@ -1004,14 +962,11 @@ fn build_with(
         }
     });
 
-    let pool = cfg.pool();
-
     Ok(ClickHouseSinkBuilder {
         cfg,
         endpoints,
         probe_endpoints,
         shard_weights,
-        pool,
         distributed,
         startup,
     })
@@ -1179,7 +1134,6 @@ mod tests {
     use spate_core::clock::SyncClock;
     use spate_core::config::ComponentConfig;
     use spate_core::deser::Owned;
-    use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
 
     /// `body` as the `sink: { clickhouse: ... }` section of a loaded
     /// pipeline config, so its errors start at `sink.clickhouse`.
@@ -1355,7 +1309,6 @@ shards:
         );
         assert_eq!(builder.endpoints.len(), 1);
         assert_eq!(builder.endpoints[0].len(), 1);
-        assert_eq!(builder.pool, SinkPoolConfig::default());
     }
 
     #[test]
@@ -1366,10 +1319,6 @@ table: analytics.orders
 shards:
   - replicas: ["http://a:8123", "http://b:8123"]
   - replicas: ["http://c:8123"]
-batch: { max_rows: 1000, max_bytes: 1MiB, linger: 250ms }
-inflight: { max_per_shard: 4 }
-retry: { initial: 50ms, max: 2s, multiplier: 3.0, jitter: 0.5, max_attempts: 7 }
-breaker: { failure_threshold: 9, open_for: 30s, half_open_probes: 2 }
 timeouts: { send: 5s, end: 60s }
 settings: { insert_quorum: "auto" }
 "#,
@@ -1381,12 +1330,6 @@ settings: { insert_quorum: "auto" }
         );
         assert_eq!(sink.endpoints.len(), 2);
         assert_eq!(sink.endpoints[0].len(), 2);
-        assert_eq!(sink.pool.batch.max_rows, 1000);
-        assert_eq!(sink.pool.batch.max_bytes, 1024 * 1024);
-        assert_eq!(sink.pool.batch.linger, Duration::from_millis(250));
-        assert_eq!(sink.pool.inflight.max_per_shard, 4);
-        assert_eq!(sink.pool.retry.max_attempts, 7);
-        assert_eq!(sink.pool.breaker.failure_threshold, 9);
     }
 
     /// The sink sets `decompress` on every compressed insert, so a configured
@@ -1665,112 +1608,17 @@ settings: { insert_quorum: "auto" }
         assert_eq!(msg, "sink.clickhouse: column `id` is listed more than once");
     }
 
+    /// The framework's pool blocks sit beside `clickhouse:` in the sink
+    /// section, so the body refuses each one by name.
     #[test]
-    fn validation_rejects_bad_retry_and_breaker() {
-        // Every one of these reaches the write loop (or a broken breaker) at
-        // runtime rather than failing at load if the rules are dropped. The
-        // rules live in `SinkPoolConfig::validate`; this asserts the
-        // ClickHouse sink still applies them.
-        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
-        let cases = [
-            ("retry: { multiplier: 0.5 }", "multiplier"),
-            ("retry: { multiplier: -2.0 }", "multiplier"),
-            ("retry: { multiplier: .nan }", "multiplier"),
-            ("retry: { multiplier: .inf }", "multiplier"),
-            ("retry: { jitter: 1.5 }", "jitter"),
-            ("retry: { jitter: -0.1 }", "jitter"),
-            ("retry: { jitter: .nan }", "jitter"),
-            ("retry: { initial: 0s }", "non-zero"),
-            ("retry: { max: 0s }", "non-zero"),
-            ("retry: { initial: 10s, max: 1s }", "must not exceed"),
-            ("breaker: { failure_threshold: 0 }", "failure_threshold"),
-            ("breaker: { half_open_probes: 0 }", "half_open_probes"),
-        ];
-        for (extra, needle) in cases {
-            let yaml = format!("{base}{extra}");
-            let err = ClickHouseSinkBuilder::from_component_config(&component(&yaml)).unwrap_err();
-            assert!(
-                err.to_string().contains(needle),
-                "expected `{needle}` for `{extra}`: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn valid_retry_and_breaker_still_build() {
-        let sink = ClickHouseSinkBuilder::from_component_config(&component(
-            "table: t\nshards: [{replicas: [\"http://a\"]}]\n\
-             retry: { initial: 100ms, max: 10s, multiplier: 1.0, jitter: 0.0 }\n\
-             breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
-        ));
-        assert!(sink.is_ok(), "boundary-valid config must build: {sink:?}");
-    }
-
-    /// Each pool section is refused by the framework's rule, with the
-    /// framework's message under the sink's prefix.
-    #[test]
-    fn pool_rules_are_core_rules_under_the_sink_prefix() {
-        let cases = [
-            ("batch: { max_rows: 0 }", SinkPoolConfigError::ZeroMaxRows),
-            ("batch: { max_bytes: 0 }", SinkPoolConfigError::ZeroMaxBytes),
-            (
-                "batch: { max_rows: 0, max_bytes: 0 }",
-                SinkPoolConfigError::ZeroMaxRows,
-            ),
-            (
-                "batch: { max_rows: 0 }\ninflight: { max_per_shard: 0 }",
-                SinkPoolConfigError::ZeroMaxRows,
-            ),
-            (
-                "inflight: { max_per_shard: 0 }",
-                SinkPoolConfigError::ZeroMaxPerShard,
-            ),
-            (
-                "retry: { multiplier: 0.5 }",
-                SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5)),
-            ),
-            (
-                "breaker: { failure_threshold: 0 }",
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
-            ),
-            (
-                "breaker: { half_open_probes: 0 }",
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroHalfOpenProbes),
-            ),
-            (
-                "breaker: { failure_threshold: 0, half_open_probes: 0 }",
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
-            ),
-        ];
-        for (extra, want) in cases {
-            let yaml = format!("{MINIMAL}{extra}\n");
+    fn a_pool_block_in_the_body_is_refused() {
+        for key in ["batch", "inflight", "retry", "breaker"] {
+            let yaml = format!("{MINIMAL}{key}: {{}}\n");
             let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
                 &yaml,
             )));
-            assert_eq!(msg, format!("sink.clickhouse: {want}"), "for `{extra}`");
+            assert!(msg.contains(&format!("unknown field `{key}`")), "{msg}");
         }
-    }
-
-    /// The pool check runs after the `database` check and before the
-    /// reserved-settings check, so a config with two faults reports the
-    /// same one whichever way the pool rules are written.
-    #[test]
-    fn a_pool_refusal_keeps_its_place_in_validate() {
-        let earlier = format!("{MINIMAL}database: \"bad-db\"\nbatch: {{ max_rows: 0 }}\n");
-        let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
-            &earlier,
-        )));
-        assert!(msg.starts_with("sink.clickhouse.database: "), "{msg}");
-
-        let later =
-            format!("{MINIMAL}settings: {{ decompress: \"0\" }}\nbatch: {{ max_rows: 0 }}\n");
-        let msg = refusal(ClickHouseSinkBuilder::from_component_config(&component(
-            &later,
-        )));
-        assert_eq!(
-            msg,
-            format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxRows)
-        );
     }
 
     /// A configuration written against the three-mode `validate_schema` key
@@ -1811,10 +1659,10 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn unknown_fields_are_rejected_with_a_path() {
         let err = ClickHouseSinkBuilder::from_component_config(&component(
-            "table: orders\nshards: [{replicas: [\"http://a\"]}]\nbatch: {max_rowz: 5}",
+            "table: orders\nshards: [{replicas: [\"http://a\"]}]\ntimeouts: {sendd: 5s}",
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("max_rowz"), "{err}");
+        assert!(err.to_string().contains("sendd"), "{err}");
     }
 
     /// A YAML still holding the removed `columns` key fails to load, naming
@@ -1931,42 +1779,6 @@ settings: { insert_quorum: "auto" }
                 format!("sink.clickhouse.compression: zstd level must be in [1, 22] (got {level})")
             );
         }
-    }
-
-    #[test]
-    fn new_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
-        let mut cfg =
-            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
-        cfg.batch.max_bytes = 0;
-        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
-        assert_eq!(
-            msg,
-            format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxBytes)
-        );
-    }
-
-    /// The zstd level check runs after the pool rules: a config built in
-    /// code with a bad level and a refused pool value reports the pool key.
-    #[test]
-    fn a_zstd_level_refusal_keeps_its_place_against_the_pool_rules() {
-        let zstd_99 = || {
-            let mut cfg =
-                ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
-            cfg.compression = Compression::Zstd(99);
-            cfg
-        };
-
-        let mut cfg = zstd_99();
-        cfg.breaker.failure_threshold = 0;
-        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
-        let want = SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold);
-        assert_eq!(msg, format!("sink.clickhouse: {want}"));
-
-        let mut cfg = zstd_99();
-        cfg.retry.multiplier = 0.5;
-        let msg = refusal(ClickHouseSinkBuilder::new(cfg));
-        let want = SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5));
-        assert_eq!(msg, format!("sink.clickhouse: {want}"));
     }
 
     /// `new` and the YAML defaults are two spellings of one config, so a

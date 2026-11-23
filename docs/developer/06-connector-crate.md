@@ -230,13 +230,11 @@ When the connector also has a passthrough map, refuse a passthrough key that set
 
 Declare in a connector's config only the keys its own code reads.
 Keys the framework reads for every backend of a role sit beside the backend's key in the role's section, as `units_held` does in a `feed:` section.
+A sink leaves out `batch`, `inflight`, `retry` and `breaker` and passes a default pool in its `SinkParts`, which the sink section's blocks overlay.
 
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 
 **Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
-
-**Departs:** the ClickHouse sink still declares `batch`, `inflight`, `retry` and `breaker` in its own config ([#2325](https://github.com/spate-etl/spate/issues/2325)).
-A new sink leaves them out and passes a default pool in its `SinkParts`.
 
 **Checked by:** review.
 

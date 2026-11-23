@@ -780,6 +780,11 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
     let parts = sink.into_parts();
     assert_eq!(parts.component_type, "clickhouse");
     assert_eq!(parts.replica_labels, vec![vec![mock.url().to_string()]]);
+    assert_eq!(
+        parts.pool,
+        spate_core::sink::SinkPoolConfig::default(),
+        "the base pool"
+    );
     let bundled_probe = parts.probe.expect("bundle carries a probe");
     mock.add(handlers::provide::<u8>([1u8]));
     bundled_probe().await.expect("bundled probe works");

@@ -123,6 +123,21 @@ impl S3Source {
     /// [`FramingContract`] is [`PerRecord`](FramingContract::PerRecord) and
     /// the paired deserializer decodes a single unit.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_json::JsonLinesFramer;
+    /// use spate_s3::{S3Source, S3SourceConfig};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    /// # let io = runtime.handle();
+    /// let source = S3Source::new(S3SourceConfig::new("s3://bucket/events/"), io, || {
+    ///     Box::new(JsonLinesFramer::new(64 << 20))
+    /// })?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`S3SourceConfig::validate`].
@@ -156,6 +171,20 @@ impl S3Source {
 
     /// Build from the pipeline's opaque `source: { s3: ... }` section, with
     /// `io` and `framer` as [`new`](S3Source::new) takes them.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::config::ComponentConfig;
+    /// use spate_json::JsonLinesFramer;
+    /// use spate_s3::S3Source;
+    ///
+    /// # fn run(section: &ComponentConfig, io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = S3Source::from_component_config(section, io, || {
+    ///     Box::new(JsonLinesFramer::new(64 << 20))
+    /// })?;
+    /// # Ok(()) }
+    /// ```
     ///
     /// # Errors
     ///

@@ -142,30 +142,33 @@ async fn a_block_the_server_rejects_is_fatal() {
     }
 }
 
-/// A Native block whose one column header carries a type name the server
-/// cannot use fails the write `Fatal` and inserts nothing: an empty name
-/// answers 62 and an unknown family answers 50.
+/// A Native block header the server cannot read fails the write `Fatal` and
+/// inserts nothing: an empty type name answers 62, an unknown type family 50,
+/// 2^31 columns 128 and a column name declaring 2^31 bytes 131.
 #[tokio::test]
 #[ignore = "requires Docker"]
 #[expect(
     clippy::print_stderr,
     reason = "the code each lane answers is read from the test's output"
 )]
-async fn a_type_name_the_server_cannot_use_fails_fatally() {
+async fn a_block_header_the_server_cannot_read_fails_fatally() {
     let srv = server().await;
     let lane = std::env::var("SPATE_CLICKHOUSE_LANE").unwrap_or_else(|_| "primary".into());
     let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &settings("native", "off")).await;
-    // Block header: one column, one row, the name `id`, then the type name.
-    let cases: [(&str, &'static [u8], u32); 2] = [
+    // Block header: the column and row counts as varints, then per column its
+    // name and type name, each with a varint length.
+    let cases: [(&str, &'static [u8], u32); 4] = [
         ("empty type name", b"\x01\x01\x02id\x00\x00", 62),
         ("unknown type family", b"\x01\x01\x02id\x02ZZ\x00", 50),
+        ("2^31 columns", b"\x80\x80\x80\x80\x08\x01", 128),
+        ("2^31-byte name", b"\x01\x01\x80\x80\x80\x80\x08", 131),
     ];
     for (case, block, expected) in cases {
         let batch = support::coded_batch(
             Compression::None,
             vec![Bytes::from_static(block)],
             1,
-            &format!("type-name-{expected}"),
+            &format!("header-{expected}"),
         );
         let err = sink
             .writer
@@ -179,6 +182,39 @@ async fn a_type_name_the_server_cannot_use_fails_fatally() {
         assert_eq!(err.class(), ErrorClass::Fatal, "{case}: {reason}");
         assert_eq!(count(&srv.admin).await, 0, "{case}: nothing inserted");
     }
+}
+
+/// A RowBinary record whose String is over the sink's own
+/// `format_binary_max_string_size` answers 131, fails the write `Fatal` and
+/// inserts nothing.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn a_value_over_the_binary_string_cap_fails_fatally() {
+    let srv = server().await;
+    let capped = format!(
+        "{}settings: {{ format_binary_max_string_size: \"4\" }}\n",
+        settings("rowbinary", "off")
+    );
+    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &capped).await;
+    let row = Order {
+        id: 1,
+        name: "sixteen bytes ok".into(),
+        amount: None,
+    };
+    let batch = coded(&sink, "off", &[&[row]], "string-cap");
+    let err = sink
+        .writer
+        .write_batch(&sink.endpoints[0][0], &batch)
+        .await
+        .expect_err("the value is over the cap");
+    let reason = err.reason();
+    assert_eq!(
+        spate_clickhouse::testing::exception_code(reason),
+        Some(131),
+        "{reason}"
+    );
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert_eq!(count(&srv.admin).await, 0, "nothing inserted");
 }
 
 /// One insert carrying a chunk far above the codec's scratch floor, then

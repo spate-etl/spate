@@ -14,7 +14,7 @@
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
-use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckRef, Checkpointer};
 use spate_core::deser::{DeserMetricsCtx, Deserializer, EmitRecord, RecFamily};
@@ -187,7 +187,7 @@ fn borrowed_batch_explodes_zero_copy_through_the_chain() {
 
     // The borrowed datum deserializer, from ordinary settings (raw framing:
     // the whole payload is one datum for the fixed schema).
-    let settings = AvroDeserializerConfig::raw(SchemaSource::inline(SCHEMA));
+    let settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(SCHEMA));
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

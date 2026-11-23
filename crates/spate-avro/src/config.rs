@@ -64,18 +64,18 @@ pub enum AvroMode {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct SchemaSource {
+pub struct AvroSchemaSection {
     /// The schema JSON itself.
     pub inline: Option<String>,
     /// Path to a `.avsc` file (Kubernetes: a mounted ConfigMap).
     pub path: Option<std::path::PathBuf>,
 }
 
-impl SchemaSource {
+impl AvroSchemaSection {
     /// An inline schema.
     #[must_use]
     pub fn inline(schema: impl Into<String>) -> Self {
-        SchemaSource {
+        AvroSchemaSection {
             inline: Some(schema.into()),
             path: None,
         }
@@ -84,7 +84,7 @@ impl SchemaSource {
     /// A schema loaded from a file.
     #[must_use]
     pub fn path(path: impl Into<std::path::PathBuf>) -> Self {
-        SchemaSource {
+        AvroSchemaSection {
             inline: None,
             path: Some(path.into()),
         }
@@ -121,13 +121,13 @@ impl SchemaSource {
 
 /// Registry connection section.
 ///
-/// Construct with [`RegistrySection::new`] and set the optional fields. The
+/// Construct with [`AvroRegistrySection::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
-pub struct RegistrySection {
+pub struct AvroRegistrySection {
     /// Base URL of the Confluent-compatible schema registry, without credentials.
     /// [`AvroDeserializerConfig::validate`] refuses a URL that carries
     /// credentials.
@@ -145,11 +145,11 @@ pub struct RegistrySection {
     pub tls: TlsSection,
 }
 
-impl RegistrySection {
+impl AvroRegistrySection {
     /// A registry at `url`, without basic auth or extra trust roots.
     #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
-        RegistrySection {
+        AvroRegistrySection {
             url: url.into(),
             username: None,
             password: None,
@@ -160,15 +160,15 @@ impl RegistrySection {
 
 // Hand-written: `password` and the URL userinfo are credentials. The
 // destructure lists every field so a new one cannot reach `Debug` unredacted.
-impl std::fmt::Debug for RegistrySection {
+impl std::fmt::Debug for AvroRegistrySection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let RegistrySection {
+        let AvroRegistrySection {
             url,
             username,
             password,
             tls,
         } = self;
-        f.debug_struct("RegistrySection")
+        f.debug_struct("AvroRegistrySection")
             .field("url", &redact::url(url))
             .field("username", username)
             .field("password", &redact::option(password))
@@ -189,7 +189,7 @@ pub struct AvroDeserializerConfig {
     /// Payload framing mode.
     pub mode: AvroMode,
     /// Registry connection (required in `confluent` mode).
-    pub registry: Option<RegistrySection>,
+    pub registry: Option<AvroRegistrySection>,
     /// Subjects whose latest schemas are fetched at startup. The schema cache
     /// holds at most 1,024 compiled schemas and an estimated 64 MiB of them,
     /// so a list above either bound keeps the subjects listed last. An evicted
@@ -206,9 +206,9 @@ pub struct AvroDeserializerConfig {
     /// (`confluent` and `raw` modes). One that recurses through a union
     /// limits how deep a datum may recurse: see
     /// [`AvroValueDeserializer`](crate::AvroValueDeserializer).
-    pub reader_schema: Option<SchemaSource>,
+    pub reader_schema: Option<AvroSchemaSection>,
     /// The writer schema (required in `raw` and `single_object` modes).
-    pub schema: Option<SchemaSource>,
+    pub schema: Option<AvroSchemaSection>,
 }
 
 /// The shortest `negative_cache_ttl` a build accepts.
@@ -231,17 +231,17 @@ impl Default for AvroDeserializerConfig {
 enum Checked<'a> {
     /// `confluent`, with the registry and its checked URL.
     Confluent {
-        registry: &'a RegistrySection,
+        registry: &'a AvroRegistrySection,
         url: Url,
     },
     /// `raw` or `single_object`, with the writer schema's source.
-    Fixed { schema: &'a SchemaSource },
+    Fixed { schema: &'a AvroSchemaSection },
 }
 
 impl AvroDeserializerConfig {
     /// A `confluent` section reading writer schemas from `registry`.
     #[must_use]
-    pub fn confluent(registry: RegistrySection) -> Self {
+    pub fn confluent(registry: AvroRegistrySection) -> Self {
         // The default mode is `confluent`.
         AvroDeserializerConfig {
             registry: Some(registry),
@@ -251,7 +251,7 @@ impl AvroDeserializerConfig {
 
     /// A `raw` section decoding bare datums with `schema`.
     #[must_use]
-    pub fn raw(schema: SchemaSource) -> Self {
+    pub fn raw(schema: AvroSchemaSection) -> Self {
         AvroDeserializerConfig {
             mode: AvroMode::Raw,
             schema: Some(schema),
@@ -262,7 +262,7 @@ impl AvroDeserializerConfig {
     /// A `single_object` section decoding single-object encoded datums with
     /// `schema`.
     #[must_use]
-    pub fn single_object(schema: SchemaSource) -> Self {
+    pub fn single_object(schema: AvroSchemaSection) -> Self {
         AvroDeserializerConfig {
             mode: AvroMode::SingleObject,
             schema: Some(schema),
@@ -545,7 +545,7 @@ impl AvroDeserializerBuilder {
     /// compile is refused here: built anyway, every record would surface as
     /// `SchemaUnavailable`, which under the default Skip policy drops and
     /// acks 100% of the input while watermarks advance.
-    fn fixed_schema(source: &SchemaSource) -> Result<Arc<CompiledSchema>, ConfigError> {
+    fn fixed_schema(source: &AvroSchemaSection) -> Result<Arc<CompiledSchema>, ConfigError> {
         let json = source.load_text("schema")?;
         // Compiled with apache-avro's parse panic caught.
         let compiled = CompiledSchema::compile(0, &json);
@@ -709,7 +709,7 @@ mod tests {
                 assert_eq!(parsed.password(), Some("urlsecret"));
             }
             for configured in [false, true] {
-                let mut registry = RegistrySection::new(url);
+                let mut registry = AvroRegistrySection::new(url);
                 if configured {
                     registry.username = Some("svc".into());
                     registry.password = Some("configuredsecret".into());
@@ -760,7 +760,7 @@ mod tests {
     fn a_registry_password_without_a_username_is_rejected() {
         let rt = runtime();
         let config = |password: &str| {
-            let mut registry = RegistrySection::new("http://127.0.0.1:1");
+            let mut registry = AvroRegistrySection::new("http://127.0.0.1:1");
             registry.password = Some(password.into());
             AvroDeserializerConfig::confluent(registry)
         };
@@ -816,7 +816,7 @@ mod tests {
                 assert_eq!(parsed.password(), None);
             }
             for configured in [false, true] {
-                let mut registry = RegistrySection::new(url);
+                let mut registry = AvroRegistrySection::new(url);
                 if configured {
                     registry.username = Some("svc".into());
                     registry.password = Some("configuredsecret".into());
@@ -840,7 +840,7 @@ mod tests {
     }
 
     fn registry_config(url: &str, password: Option<&str>) -> AvroDeserializerConfig {
-        let mut registry = RegistrySection::new(url);
+        let mut registry = AvroRegistrySection::new(url);
         registry.username = Some("svc".into());
         registry.password = password.map(Into::into);
         AvroDeserializerConfig::confluent(registry)
@@ -1010,7 +1010,7 @@ mod tests {
     fn build_serde_datum_happy_path() {
         let rt = runtime();
         let builder = build(
-            &AvroDeserializerConfig::raw(SchemaSource::inline(SCHEMA)),
+            &AvroDeserializerConfig::raw(AvroSchemaSection::inline(SCHEMA)),
             &rt,
         )
         .unwrap();
@@ -1041,14 +1041,14 @@ mod tests {
     /// in code and checked with no runtime.
     #[test]
     fn validate_refuses_each_rule_without_a_runtime() {
-        let schema = || SchemaSource::inline(SCHEMA);
-        let both = SchemaSource {
+        let schema = || AvroSchemaSection::inline(SCHEMA);
+        let both = AvroSchemaSection {
             inline: Some(SCHEMA.into()),
             path: Some("/etc/e.avsc".into()),
         };
-        let mut password_only = RegistrySection::new("http://sr");
+        let mut password_only = AvroRegistrySection::new("http://sr");
         password_only.password = Some("s3cret".into());
-        let mut http_root_ca = RegistrySection::new("http://sr");
+        let mut http_root_ca = AvroRegistrySection::new("http://sr");
         http_root_ca.tls.root_ca = Some("/etc/ca.pem".into());
         let fixed = |mode: AvroMode| AvroDeserializerConfig {
             mode,
@@ -1057,7 +1057,7 @@ mod tests {
         let cases: Vec<(&str, AvroDeserializerConfig, &str)> = vec![
             (
                 "url userinfo",
-                AvroDeserializerConfig::confluent(RegistrySection::new("http://u:p@sr")),
+                AvroDeserializerConfig::confluent(AvroRegistrySection::new("http://u:p@sr")),
                 "deserializer.avro.registry.url: carries userinfo; set them in \
                  registry.username and registry.password",
             ),
@@ -1085,7 +1085,7 @@ mod tests {
                 "confluent with schema",
                 AvroDeserializerConfig {
                     schema: Some(schema()),
-                    ..AvroDeserializerConfig::confluent(RegistrySection::new("http://sr"))
+                    ..AvroDeserializerConfig::confluent(AvroRegistrySection::new("http://sr"))
                 },
                 "deserializer.avro.schema: is only used in modes `raw` and `single_object`; in \
                  mode `confluent` writer schemas come from the registry (use `reader_schema` to \
@@ -1115,7 +1115,7 @@ mod tests {
             (
                 "raw with registry",
                 AvroDeserializerConfig {
-                    registry: Some(RegistrySection::new("http://sr")),
+                    registry: Some(AvroRegistrySection::new("http://sr")),
                     ..fixed(AvroMode::Raw)
                 },
                 "deserializer.avro.registry: is not used in mode `raw`",
@@ -1152,7 +1152,7 @@ mod tests {
             ),
             (
                 "schema with neither",
-                AvroDeserializerConfig::raw(SchemaSource::default()),
+                AvroDeserializerConfig::raw(AvroSchemaSection::default()),
                 "deserializer.avro.schema: needs exactly one of `inline` or `path`",
             ),
             (
@@ -1166,7 +1166,7 @@ mod tests {
             (
                 "reader_schema with neither",
                 AvroDeserializerConfig {
-                    reader_schema: Some(SchemaSource::default()),
+                    reader_schema: Some(AvroSchemaSection::default()),
                     ..fixed(AvroMode::Raw)
                 },
                 "deserializer.avro.reader_schema: needs exactly one of `inline` or `path`",
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn new_applies_validate() {
         let rt = runtime();
-        let config = AvroDeserializerConfig::raw(SchemaSource::default());
+        let config = AvroDeserializerConfig::raw(AvroSchemaSection::default());
         assert_eq!(
             refusal(build(&config, &rt)),
             config.validate().unwrap_err().to_string()
@@ -1234,20 +1234,20 @@ mod tests {
     #[test]
     fn mode_constructors_set_their_required_field() {
         let rt = runtime();
-        let raw = AvroDeserializerConfig::raw(SchemaSource::inline(SCHEMA));
+        let raw = AvroDeserializerConfig::raw(AvroSchemaSection::inline(SCHEMA));
         assert_eq!(raw.mode, AvroMode::Raw);
         assert_eq!(
             raw.schema.as_ref().and_then(|s| s.inline.as_deref()),
             Some(SCHEMA)
         );
-        let single = AvroDeserializerConfig::single_object(SchemaSource::inline(SCHEMA));
+        let single = AvroDeserializerConfig::single_object(AvroSchemaSection::inline(SCHEMA));
         assert_eq!(single.mode, AvroMode::SingleObject);
         assert_eq!(
             single.schema.as_ref().and_then(|s| s.inline.as_deref()),
             Some(SCHEMA)
         );
         let confluent =
-            AvroDeserializerConfig::confluent(RegistrySection::new("http://127.0.0.1:1"));
+            AvroDeserializerConfig::confluent(AvroRegistrySection::new("http://127.0.0.1:1"));
         assert_eq!(confluent.mode, AvroMode::Confluent);
         assert_eq!(
             confluent.registry.as_ref().map(|r| r.url.as_str()),
@@ -1276,7 +1276,9 @@ mod tests {
         let rt = runtime();
         let config = AvroDeserializerConfig {
             mode: AvroMode::Raw,
-            reader_schema: Some(SchemaSource::path("/nonexistent-spate-1600/reader.avsc")),
+            reader_schema: Some(AvroSchemaSection::path(
+                "/nonexistent-spate-1600/reader.avsc",
+            )),
             ..AvroDeserializerConfig::default()
         };
         assert_eq!(
@@ -1290,7 +1292,7 @@ mod tests {
     #[test]
     fn fixed_mode_rules_precede_the_schema_load() {
         let rt = runtime();
-        let missing = || SchemaSource::path("/nonexistent-spate-1600/writer.avsc");
+        let missing = || AvroSchemaSection::path("/nonexistent-spate-1600/writer.avsc");
         let prewarm = AvroDeserializerConfig {
             prewarm_subjects: vec!["orders-value".into()],
             ..AvroDeserializerConfig::raw(missing())
@@ -1300,7 +1302,7 @@ mod tests {
             "deserializer.avro.prewarm_subjects: requires mode `confluent`"
         );
         let reader = AvroDeserializerConfig {
-            reader_schema: Some(SchemaSource::inline(SCHEMA)),
+            reader_schema: Some(AvroSchemaSection::inline(SCHEMA)),
             ..AvroDeserializerConfig::single_object(missing())
         };
         assert_eq!(
@@ -1338,7 +1340,7 @@ mod tests {
         }
         let raw = |ttl: Duration| AvroDeserializerConfig {
             negative_cache_ttl: ttl,
-            ..AvroDeserializerConfig::raw(SchemaSource::inline(SCHEMA))
+            ..AvroDeserializerConfig::raw(AvroSchemaSection::inline(SCHEMA))
         };
         assert_eq!(
             refusal(build(
@@ -1378,15 +1380,15 @@ mod tests {
     #[test]
     fn credential_refusals_precede_the_ttl_floor() {
         let rt = runtime();
-        let with_registry = |registry: RegistrySection| AvroDeserializerConfig {
+        let with_registry = |registry: AvroRegistrySection| AvroDeserializerConfig {
             negative_cache_ttl: Duration::ZERO,
             ..AvroDeserializerConfig::confluent(registry)
         };
-        let mut password_only = RegistrySection::new("http://sr");
+        let mut password_only = AvroRegistrySection::new("http://sr");
         password_only.password = Some("s3cret".into());
         for (config, expected) in [
             (
-                with_registry(RegistrySection::new("http://urluser:urlsecret@sr")),
+                with_registry(AvroRegistrySection::new("http://urluser:urlsecret@sr")),
                 "deserializer.avro.registry.url: carries userinfo; set them in \
                  registry.username and registry.password",
             ),
@@ -1408,11 +1410,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("e.avsc");
         std::fs::write(&path, SCHEMA).unwrap();
-        build(&AvroDeserializerConfig::raw(SchemaSource::path(&path)), &rt).unwrap();
+        build(
+            &AvroDeserializerConfig::raw(AvroSchemaSection::path(&path)),
+            &rt,
+        )
+        .unwrap();
 
         for config in [
-            AvroDeserializerConfig::raw(SchemaSource::inline("not json")),
-            AvroDeserializerConfig::single_object(SchemaSource::inline("not json")),
+            AvroDeserializerConfig::raw(AvroSchemaSection::inline("not json")),
+            AvroDeserializerConfig::single_object(AvroSchemaSection::inline("not json")),
         ] {
             assert_eq!(
                 refusal(build(&config, &rt)),

@@ -19,7 +19,8 @@
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 
 use spate_avro::{
-    AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, RegistrySection, SchemaSource,
+    AvroDeserializerBuilder, AvroDeserializerConfig, AvroRegistrySection, AvroSchemaSection,
+    AvroValue,
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
@@ -64,8 +65,8 @@ fn builder(
 }
 
 fn raw_settings(schema: &str, reader: Option<&str>) -> AvroDeserializerConfig {
-    let mut config = AvroDeserializerConfig::raw(SchemaSource::inline(schema));
-    config.reader_schema = reader.map(SchemaSource::inline);
+    let mut config = AvroDeserializerConfig::raw(AvroSchemaSection::inline(schema));
+    config.reader_schema = reader.map(AvroSchemaSection::inline);
     config
 }
 
@@ -427,7 +428,8 @@ fn the_poison_corpora_fail_on_every_payload() {
     let deser = builder(&raw_settings(orders::SCHEMA, None), &rt).build_serde::<orders::Order>();
     assert_eq!(outcomes(deser, &truncated), (0, corpora::BATCH));
 
-    let single_object = AvroDeserializerConfig::single_object(SchemaSource::inline(orders::SCHEMA));
+    let single_object =
+        AvroDeserializerConfig::single_object(AvroSchemaSection::inline(orders::SCHEMA));
     let deser = builder(&single_object, &rt).build_value();
     assert_eq!(
         outcomes(deser, &corpora::stale_single_object()),
@@ -704,7 +706,7 @@ fn the_confluent_corpus_carries_the_wire_header() {
 #[test]
 fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
     let stub = StubRegistry::start(&[(corpora::READY_ID, orders::SCHEMA)]);
-    let mut settings = AvroDeserializerConfig::confluent(RegistrySection::new(stub.url()));
+    let mut settings = AvroDeserializerConfig::confluent(AvroRegistrySection::new(stub.url()));
     settings.negative_cache_ttl = Duration::from_secs(3_600);
     let rt = io_runtime();
     let b = builder(&settings, &rt);
@@ -738,8 +740,9 @@ fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
 /// no fetch is ever attempted.
 #[test]
 fn an_undriven_runtime_leaves_every_id_missing() {
-    let mut settings =
-        AvroDeserializerConfig::confluent(RegistrySection::new("http://127.0.0.1:1".to_owned()));
+    let mut settings = AvroDeserializerConfig::confluent(AvroRegistrySection::new(
+        "http://127.0.0.1:1".to_owned(),
+    ));
     settings.negative_cache_ttl = Duration::from_secs(3_600);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()

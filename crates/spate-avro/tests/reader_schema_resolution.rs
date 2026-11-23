@@ -8,7 +8,7 @@
 use apache_avro::reader::datum::GenericDatumReader;
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
-use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, SchemaSource};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection, AvroValue};
 use spate_core::config::PipelineConfig;
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::ops::chain_owned;
@@ -245,8 +245,8 @@ fn nested_maps_from_a_registry_schema_are_dropped_past_the_resolution_limit() {
 
 /// `datum` through the value deserializer.
 fn spate(writer: &str, reader: &str, datum: &[u8]) -> Result<AvroValue, String> {
-    let mut settings = AvroDeserializerConfig::raw(SchemaSource::inline(writer));
-    settings.reader_schema = Some(SchemaSource::inline(reader));
+    let mut settings = AvroDeserializerConfig::raw(AvroSchemaSection::inline(writer));
+    settings.reader_schema = Some(AvroSchemaSection::inline(reader));
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();

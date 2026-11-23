@@ -7,7 +7,7 @@
 
 #![allow(clippy::print_stderr, reason = "the run's readings are the output")]
 
-use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, RegistrySection};
+use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroRegistrySection, AvroValue};
 use spate_core::config::PipelineConfig;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
@@ -61,7 +61,7 @@ fn holds_flat_memory(name: &str, n: u32, longs: usize, schema: impl Fn(u32) -> S
     );
     let pipeline =
         Pipeline::from_config(PipelineConfig::from_str(&config).expect("config")).expect("builder");
-    let settings = AvroDeserializerConfig::confluent(RegistrySection::new(stub.endpoint()));
+    let settings = AvroDeserializerConfig::confluent(AvroRegistrySection::new(stub.endpoint()));
     let deserializer = AvroDeserializerBuilder::new(settings, &pipeline.io_handle())
         .expect("builder")
         .build_value();

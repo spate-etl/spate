@@ -116,7 +116,7 @@ credential fields. Percent-encoded URL credentials become decoded text in
 these fields. Username-only URLs need only `registry.username`. If separate
 credentials are already configured alongside URL credentials, retain the
 separate fields and remove the URL userinfo. Programmatic configurations
-using `RegistrySection::new` follow the same requirement when loaded by
+using `AvroRegistrySection::new` follow the same requirement when loaded by
 `AvroDeserializerBuilder::new`.
 
 A registry that answers `401` or `403`, or whose certificate fails

@@ -12,8 +12,8 @@
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use spate_avro::{
-    AvroDeserializerBuilder, AvroDeserializerConfig, AvroValue, AvroValueDeserializer,
-    RegistrySection,
+    AvroDeserializerBuilder, AvroDeserializerConfig, AvroRegistrySection, AvroValue,
+    AvroValueDeserializer,
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};
@@ -45,7 +45,7 @@ fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroDeserializerConfig
 }
 
 fn settings_at(url: String, ttl: Duration) -> AvroDeserializerConfig {
-    let mut config = AvroDeserializerConfig::confluent(RegistrySection::new(url));
+    let mut config = AvroDeserializerConfig::confluent(AvroRegistrySection::new(url));
     config.negative_cache_ttl = ttl;
     config
 }
@@ -1328,10 +1328,10 @@ async fn confluent_truncated_string_is_malformed() {
 /// Regression for #878.
 #[tokio::test]
 async fn reader_projection_does_not_hide_truncated_writer_string() {
-    let mut settings = AvroDeserializerConfig::raw(spate_avro::SchemaSource::inline(
+    let mut settings = AvroDeserializerConfig::raw(spate_avro::AvroSchemaSection::inline(
         r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"s","type":"string"}]}"#,
     ));
-    settings.reader_schema = Some(spate_avro::SchemaSource::inline(
+    settings.reader_schema = Some(spate_avro::AvroSchemaSection::inline(
         r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"}]}"#,
     ));
     let b = AvroDeserializerBuilder::new(settings, &tokio::runtime::Handle::current()).unwrap();

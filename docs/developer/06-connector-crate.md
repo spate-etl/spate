@@ -43,7 +43,7 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** `Format`, `SchemaSource`, `Dataset`, `Encoding`, `Clock`, the three `Compression` enums, `RegistrySection`, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
+**Departs:** `Format`, `Dataset`, `Encoding`, `Clock`, the three `Compression` enums, `DistributedCheckSection`, `ShardConfig` and `TimeoutSection` ([#2330](https://github.com/spate-etl/spate/issues/2330)).
 
 **Checked by:** review.
 

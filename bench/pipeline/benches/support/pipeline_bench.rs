@@ -276,8 +276,9 @@ impl Rig {
             S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
                 .expect("the source config")
                 .with_framer(|| Box::new(JsonLinesFramer::new(MAX_LINE_BYTES)));
-        let json =
-            JsonDeserializerBuilder::new(JsonDeserializerConfig::default()).build_serde::<Event>();
+        let json = JsonDeserializerBuilder::new(JsonDeserializerConfig::default())
+            .expect("the default config validates")
+            .build_serde::<Event>();
         let schema = NativeSchema::from_columns(COLUMNS).expect("the schema builds");
         let written = Arc::new(Written::default());
         let mut pool = SinkPoolConfig::default();

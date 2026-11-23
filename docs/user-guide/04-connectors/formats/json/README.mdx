@@ -23,8 +23,9 @@ That example is
 one payload of four lines, one of them malformed, over the in-memory
 connectors, so it needs nothing running:
 `cargo run -p spate --features json --example json_skip_bad_records`.
-`from_component_config` yields that same builder behind a `Result`, and the
-chain's `with_metrics` scopes the families under [Metrics](#metrics).
+Both `new` and `from_component_config` return the builder behind a `Result`
+and run `JsonDeserializerConfig::validate`. The chain's `with_metrics` scopes
+the families under [Metrics](#metrics).
 
 ## Configuration
 

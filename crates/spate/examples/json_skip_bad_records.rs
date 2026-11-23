@@ -63,19 +63,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let sink = sink.with_pool_config(pool_cfg);
 
+    // ANCHOR: deserializer
+    let mut config = JsonDeserializerConfig::default();
+    config.on_error = OnError::Skip;
+    let json = JsonDeserializerBuilder::new(config)?.framing(JsonFraming::Lines);
+    // ANCHOR_END: deserializer
+
     // NDJSON in → typed `Event` → filter → project to a row → capturing sink.
     let runtime = pipeline
         .sink(sink)?
-        .chains(|ctx| {
+        .chains(move |ctx| {
             let chunk_cfg = ctx.chunk();
-            // ANCHOR: deserializer
-            let mut config = JsonDeserializerConfig::default();
-            config.on_error = OnError::Skip;
-            let deser = JsonDeserializerBuilder::new(config)
-                .framing(JsonFraming::Lines)
-                .build_serde::<Event>();
-            // ANCHOR_END: deserializer
-            chain_owned::<Event, _>(deser)
+            chain_owned::<Event, _>(json.build_serde::<Event>())
                 .with_metrics(ctx.pipeline, "main")
                 .filter(|e: &Event| e.value >= 0)
                 .map(|e: Event| format!("{}={}", e.name, e.value).into_bytes())

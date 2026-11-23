@@ -424,6 +424,7 @@ mod tests {
             on_error,
             reject_duplicate_keys: dup,
         })
+        .expect("the config validates")
         .framing(framing)
     }
 

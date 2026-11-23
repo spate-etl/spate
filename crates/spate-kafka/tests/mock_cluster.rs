@@ -63,7 +63,7 @@ fn consumer_debug_logs_continue_through_group_join() {
 
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let _lanes = await_assignment(&mut source, HANG);
     });
@@ -86,7 +86,7 @@ fn full_lifecycle_polls_acks_and_commits() {
     produce(&brokers, TOPIC, 10, 3, "a");
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "life"));
+    let mut source = KafkaSource::new(config(&brokers, "life")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     let mut lanes = await_assignment(&mut source, HANG);
@@ -134,7 +134,7 @@ fn a_lane_releases_its_messages_when_its_batch_is_finished() {
     produce(&brokers, TOPIC, 5, 1, "r");
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "release"));
+    let mut source = KafkaSource::new(config(&brokers, "release")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[PartitionId(0)], 1);
@@ -170,7 +170,7 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     // Statistics feed the warning for a held partition that stops fetching.
     cfg.statistics_interval = Duration::from_millis(250);
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     let meter = spate_core::metrics::Meter::with_namespace("kafka", "pause", "source", "kafka");
     source
         .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
@@ -239,7 +239,7 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
     let mut cfg = config(&brokers, "fetch-start");
     cfg.rdkafka.insert("debug".into(), "topic".into());
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
 
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -297,7 +297,7 @@ fn a_topic_prefixed_reset_policy_reads_a_new_group_from_the_start() {
     cfg.rdkafka
         .insert("topic.auto.offset.reset".into(), "earliest".into());
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
@@ -333,7 +333,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
 
     let cfg = config(&brokers, "lookup-error");
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
 
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -370,7 +370,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
             &spate_core::metrics::ComponentLabels::new("restart", "source", "kafka"),
         ));
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
@@ -394,7 +394,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     let brokers = cluster.bootstrap_servers();
 
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "grp"));
+    let mut source = KafkaSource::new(config(&brokers, "grp")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 4, "sole member owns everything");
@@ -472,7 +472,9 @@ fn startup_without_brokers_times_out_fatally() {
     cfg.startup_timeout = Duration::from_secs(300);
     let cp = Checkpointer::new();
     let clock = TestClock::frozen();
-    let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+    let mut source = KafkaSource::new(cfg)
+        .expect("the config validates")
+        .with_clock(Arc::clone(&clock) as _);
     source.open(SourceCtx::new(cp.handle())).expect("open");
     clock.advance(Duration::from_secs(301));
 
@@ -540,7 +542,7 @@ fn empty_assignment_completes_rebalance_protocol() {
 
     let member = |pipeline: &str| {
         Driver::open_watched(
-            KafkaSource::new(watched_config(&brokers, "empty", 1)),
+            KafkaSource::new(watched_config(&brokers, "empty", 1)).expect("the config validates"),
             pipeline,
         )
     };
@@ -597,7 +599,9 @@ fn an_empty_member_survives_the_assignment_deadline() {
         let mut cfg = watched_config(&brokers, "empty-deadline", 1);
         cfg.assignment_timeout = DEADLINE;
         Driver::open_watched(
-            KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _),
+            KafkaSource::new(cfg)
+                .expect("the config validates")
+                .with_clock(Arc::clone(&clock) as _),
             pipeline,
         )
     };
@@ -640,7 +644,7 @@ fn statistics_populate_kafka_source_metrics() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         // The runtime would mint this Meter from `component_type()` via
         // `Meter::for_component`; tests use the public constructor (prefix
         // `spate_kafka_` instead of the role-scoped `spate_kafka_source_`).
@@ -751,7 +755,7 @@ fn statistics_disabled_registers_no_families() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         // A Meter is present (the runtime always mints one from a declared
         // `component_type`); only the disabled interval should suppress the
         // families.
@@ -822,7 +826,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         ));
 
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
@@ -1012,7 +1016,7 @@ fn zstd_batches_are_read() {
     producer.flush(Duration::from_secs(30)).expect("flush");
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "zstd"));
+    let mut source = KafkaSource::new(config(&brokers, "zstd")).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[lanes[0].partition()], 1);
@@ -1047,7 +1051,7 @@ fn a_corrupt_batch_fails_the_lane() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let meter =
             spate_core::metrics::Meter::with_namespace("kafka", "corrupt-batch", "source", "kafka");
         source
@@ -1118,7 +1122,7 @@ fn a_skipped_v1_message_fails_the_lane() {
     let mut cfg = config(&brokers, "skipped-v1");
     cfg.rdkafka.insert("check.crcs".into(), "true".into());
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[PartitionId(0)], 1);
@@ -1170,7 +1174,7 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let meter = spate_core::metrics::Meter::with_namespace(
             "kafka",
             "mid-batch-auth",
@@ -1248,7 +1252,10 @@ struct Driver {
 
 impl Driver {
     fn open(cfg: KafkaSourceConfig) -> Driver {
-        Driver::open_with(KafkaSource::new(cfg), |ctx| ctx)
+        Driver::open_with(
+            KafkaSource::new(cfg).expect("the config validates"),
+            |ctx| ctx,
+        )
     }
 
     fn open_with(mut source: KafkaSource, ctx: impl FnOnce(SourceCtx) -> SourceCtx) -> Driver {
@@ -1517,7 +1524,10 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
 
     let mut cfg = watched_config(&brokers, "commit-each", 2);
     cfg.commit_interval = Duration::from_hours(1);
-    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "commit-each");
+    let mut driver = Driver::open_watched(
+        KafkaSource::new(cfg).expect("the config validates"),
+        "commit-each",
+    );
     driver.settle_group(2, 4);
     driver.read(10);
     driver.commit();
@@ -1606,7 +1616,7 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
     let brokers = cluster.bootstrap_servers();
 
     let mut driver = Driver::open_watched(
-        KafkaSource::new(watched_config(&brokers, "outside", 2)),
+        KafkaSource::new(watched_config(&brokers, "outside", 2)).expect("the config validates"),
         "outside",
     );
     driver.settle_group(2, 4);
@@ -1652,7 +1662,9 @@ fn more_consumers_than_partitions_keeps_running() {
     let clock = TestClock::frozen();
     let cfg = watched_config(&brokers, "idle-consumer", 2);
     let deadlines = cfg.startup_timeout + cfg.assignment_timeout;
-    let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+    let source = KafkaSource::new(cfg)
+        .expect("the config validates")
+        .with_clock(Arc::clone(&clock) as _);
     let mut driver = Driver::open_watched(source, "idle-consumer");
     driver.settle_group(2, 1);
 
@@ -1683,7 +1695,8 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
 
         let group = format!("lost-{consumers}");
         let cfg = watched_config(&brokers, &group, consumers);
-        let mut driver = Driver::open_watched(KafkaSource::new(cfg), &group);
+        let mut driver =
+            Driver::open_watched(KafkaSource::new(cfg).expect("the config validates"), &group);
         driver.settle_group(consumers, 4);
 
         let failures = driver.lose_a_member(&cluster);
@@ -1728,7 +1741,9 @@ fn a_held_offer_the_group_has_left_is_not_fatal() {
     on_a_cluster_electing_at_once(1, |brokers| {
         let clock = TestClock::frozen();
         let cfg = watched_config(brokers, "stale-held", 2);
-        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "stale-held");
         driver.settle_group(2, 1);
         produce(brokers, TOPIC, 5, 1, "s");
@@ -1750,7 +1765,9 @@ fn a_late_consumer_ends_up_sharing_every_partition() {
         produce(brokers, TOPIC, 5, 4, "l");
         let clock = TestClock::frozen();
         let cfg = watched_config(brokers, "late-share", 2);
-        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "late-share");
         driver.settle_group(2, 4);
         // Both consumers at two partitions and every lane live: a sum of four
@@ -1774,7 +1791,9 @@ fn dropping_after_a_discard_returns() {
     on_a_cluster_electing_at_once(1, |brokers| {
         let clock = TestClock::frozen();
         let cfg = watched_config(brokers, "drop-discard", 2);
-        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "drop-discard");
         driver.settle_group(2, 1);
         assert_returns((), HANG, "dropping after a discard", move || drop(driver));
@@ -1789,7 +1808,9 @@ fn dropping_in_the_pass_after_a_discard_returns() {
     on_a_cluster_electing_at_once(4, |brokers| {
         let clock = TestClock::frozen();
         let cfg = consumers_config(brokers, "drop-pass", 2);
-        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         wait_until(HANG, "a discard or an accept", || {
@@ -1822,7 +1843,9 @@ fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
         let mut cfg = watched_config(&brokers, "hold-ended", 2);
         // This test advances the frozen clock while the group forms.
         cfg.startup_timeout = Duration::from_hours(1);
-        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "hold-ended");
         // Past the hold as soon as the first offer arrives, whenever that is.
         wait_until(HANG, "the first consumer's lanes", || {
@@ -1874,7 +1897,8 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
 
         let mut cfg = watched_config(&brokers, group, 2);
         cfg.commit_interval = Duration::from_hours(1);
-        let mut driver = Driver::open_watched(KafkaSource::new(cfg), group);
+        let mut driver =
+            Driver::open_watched(KafkaSource::new(cfg).expect("the config validates"), group);
         driver.settle_group(2, 4);
         if earlier_loss {
             driver.lose_a_member(&cluster);
@@ -1943,9 +1967,10 @@ fn two_consumers_publish_lag_before_committing() {
         let metrics = Arc::new(spate_core::metrics::SourceMetrics::new(
             &spate_core::metrics::ComponentLabels::new("lag-each", "source", "kafka"),
         ));
-        let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
-            ctx.with_stage_metrics(Some(metrics))
-        });
+        let mut driver = Driver::open_with(
+            KafkaSource::new(cfg).expect("the config validates"),
+            |ctx| ctx.with_stage_metrics(Some(metrics)),
+        );
         driver.settle(2);
         wait_until(HANG, "lag published", || {
             driver.step(Duration::from_millis(100));
@@ -1987,9 +2012,10 @@ fn two_consumers_publish_their_own_statistics() {
         cfg.statistics_interval = interval;
         let (recorder, handle, meter) = support::recorded_meter(group);
         metrics::with_local_recorder(&recorder, || {
-            let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
-                ctx.with_meter(Some(meter)).with_partition_detail(true)
-            });
+            let mut driver = Driver::open_with(
+                KafkaSource::new(cfg).expect("the config validates"),
+                |ctx| ctx.with_meter(Some(meter)).with_partition_detail(true),
+            );
             driver.settle(2);
             driver.read(5);
             if interval.is_zero() {
@@ -2045,8 +2071,10 @@ fn consumer_series_carry_no_passthrough_value() {
     let (recorder, handle, meter) = support::recorded_meter("no-secret");
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         metrics::with_local_recorder(&recorder, || {
-            let mut driver =
-                Driver::open_with(KafkaSource::new(cfg), |ctx| ctx.with_meter(Some(meter)));
+            let mut driver = Driver::open_with(
+                KafkaSource::new(cfg).expect("the config validates"),
+                |ctx| ctx.with_meter(Some(meter)),
+            );
             driver.settle(2);
             wait_until(HANG, "statistics", || {
                 driver.step(Duration::from_millis(100));
@@ -2226,7 +2254,7 @@ fn one_assignment_starts_while_the_coordinator_loads_offsets() {
     );
     let mut cfg = config(&cluster.bootstrap_servers(), "slow-lookup");
     cfg.startup_timeout = Duration::from_secs(120);
-    let mut source = KafkaSource::new(cfg);
+    let mut source = KafkaSource::new(cfg).expect("the config validates");
     let cp = Checkpointer::new();
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
@@ -2666,7 +2694,7 @@ fn two_consumers_each_advance_past_their_own_marker() {
     write_marker(&brokers, 1, Marker::Commit);
     let group = spate_test::unique_name("two-consumers");
     let mut driver = Driver::open_watched(
-        KafkaSource::new(watched_config(&brokers, &group, 2)),
+        KafkaSource::new(watched_config(&brokers, &group, 2)).expect("the config validates"),
         &group,
     );
     driver.settle_group(2, 2);
@@ -2757,7 +2785,7 @@ fn run_marker_pipeline(
     pre(&script);
     let runtime = spate_test::passthrough_runtime(
         spate_core::pipeline::Pipeline::from_config(config).expect("pipeline"),
-        KafkaSource::new(cfg),
+        KafkaSource::new(cfg).expect("the config validates"),
         sink,
         spate_test::TestEncoder,
         spate_core::pipeline::RuntimeOptions::default(),
@@ -3014,7 +3042,7 @@ mod latest_start {
     /// Lanes for a source on `cfg`, opened and assigned.
     fn accepted(cfg: KafkaSourceConfig) -> (KafkaSource, Checkpointer, Vec<Lane>) {
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let lanes = await_assignment(&mut source, HANG);
         (source, cp, lanes)
@@ -3109,7 +3137,8 @@ mod latest_start {
             };
             capture.during(tracing::Level::WARN, || {
                 let cp = Checkpointer::new();
-                let mut source = KafkaSource::new(quiet_latest(&brokers, group));
+                let mut source =
+                    KafkaSource::new(quiet_latest(&brokers, group)).expect("the config validates");
                 source.open(SourceCtx::new(cp.handle())).expect("open");
                 let mut scripted = false;
                 let mut lanes = None;
@@ -3147,6 +3176,7 @@ mod latest_start {
         );
         let clock = TestClock::frozen();
         let mut source = KafkaSource::new(quiet_latest(&brokers, "start-retry"))
+            .expect("the config validates")
             .with_clock(Arc::clone(&clock) as _);
         let cp = Checkpointer::new();
         let capture = spate_test::LogCapture::new();
@@ -3200,6 +3230,7 @@ mod latest_start {
             let brokers = cluster.bootstrap_servers();
             let clock = TestClock::frozen();
             let source = KafkaSource::new(latest_config(&brokers, "retried-epoch", 2))
+                .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
             let capture = spate_test::LogCapture::new();
             let attempts = || {
@@ -3250,6 +3281,7 @@ mod latest_start {
         let capture = spate_test::LogCapture::new();
         capture.during(tracing::Level::WARN, || {
             let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
+                .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
             wait_until(HANG, "the failed start", || {
@@ -3303,7 +3335,9 @@ mod latest_start {
         let clock = TestClock::frozen();
         let capture = spate_test::LogCapture::new();
         capture.during(tracing::Level::WARN, || {
-            let first = KafkaSource::new(config()).with_clock(Arc::clone(&clock) as _);
+            let first = KafkaSource::new(config())
+                .expect("the config validates")
+                .with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
             wait_until(HANG, "the failed start", || {
                 first.step(Duration::from_millis(50));
@@ -3346,7 +3380,9 @@ mod latest_start {
         let clock = TestClock::frozen();
         let mut cfg = quiet_latest(&brokers, "start-deadline");
         cfg.assignment_timeout = Duration::from_secs(5);
-        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let source = KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_with(source, |ctx| ctx);
         driver.settle(1);
         // On the rejoin the partition has a commit, so its lookup is what fails.
@@ -3417,7 +3453,8 @@ mod latest_start {
                 "removed-two"
             };
             let mut driver = Driver::open_watched(
-                KafkaSource::new(latest_config(&brokers, group, consumers)),
+                KafkaSource::new(latest_config(&brokers, group, consumers))
+                    .expect("the config validates"),
                 group,
             );
             driver.settle_group(consumers, 2);
@@ -3449,6 +3486,7 @@ mod latest_start {
         on_a_cluster_electing_at_once(4, |brokers| {
             let clock = TestClock::frozen();
             let source = KafkaSource::new(latest_config(brokers, "reassign-start", 2))
+                .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "reassign-start");
             past_the_hold(&mut driver, &clock);
@@ -3463,6 +3501,7 @@ mod latest_start {
         on_a_cluster_electing_at_once(4, |brokers| {
             let clock = TestClock::frozen();
             let source = KafkaSource::new(latest_config(brokers, "alone-removed", 2))
+                .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "alone-removed");
             past_the_hold(&mut driver, &clock);
@@ -3477,6 +3516,7 @@ mod latest_start {
         on_a_cluster_electing_at_once(4, |brokers| {
             let clock = TestClock::frozen();
             let source = KafkaSource::new(latest_config(brokers, "discard-latest", 2))
+                .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "discard-latest");
             driver.settle_group(2, 4);
@@ -3795,7 +3835,7 @@ mod latest_start {
                 &spate_core::metrics::ComponentLabels::new("lag-start", "source", "kafka"),
             ));
             let cp = Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source
                 .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
                 .expect("open");
@@ -3815,7 +3855,7 @@ mod latest_start {
         );
         let mut cfg = latest_config(&brokers, "slow-list", 1);
         cfg.statistics_interval = Duration::ZERO;
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         wait_until(HANG, "every lane", || {
@@ -3834,7 +3874,7 @@ mod latest_start {
         let mut cfg = quiet_latest(&brokers, "commit-bound");
         cfg.rdkafka
             .insert("socket.timeout.ms".into(), "2000".into());
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         wait_until(HANG, "an assignment", || {
@@ -3861,7 +3901,8 @@ fn a_dynamic_member_fenced_on_join_still_drops() {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID],
         );
         let cp = Checkpointer::new();
-        let mut source = KafkaSource::new(config(&cluster.bootstrap_servers(), "fenced"));
+        let mut source = KafkaSource::new(config(&cluster.bootstrap_servers(), "fenced"))
+            .expect("the config validates");
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut fatal = None;
         wait_until(HANG, "the fenced join's fatal error", || {

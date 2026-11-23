@@ -181,7 +181,7 @@ fn connector_clients(brokers: &str, ca_location: &str) {
         .rdkafka
         .insert("auto.offset.reset".to_string(), "earliest".to_string());
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(source_cfg);
+    let mut source = KafkaSource::new(source_cfg).expect("the config validates");
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = None;
     spate_test::wait_until(HANG, "partition assignment", || {

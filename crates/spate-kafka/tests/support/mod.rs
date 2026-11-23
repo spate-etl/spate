@@ -611,7 +611,7 @@ impl Watched {
         let pipeline = spate_test::unique_name("markers");
         let (recorder, handle, meter) = recorded_meter(pipeline.clone());
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let lanes = metrics::with_local_recorder(&recorder, || {
             let labels =
                 spate_core::metrics::ComponentLabels::new(pipeline.clone(), "source", "kafka");

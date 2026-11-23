@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Source: Kafka ───────────────────────────────────────────────────
     let source_cfg = KafkaSourceConfig::from_component_config(&pipeline.config().source)?;
-    let source = KafkaSource::new(source_cfg);
+    let source = KafkaSource::new(source_cfg)?;
 
     // ── Sinks: one Kafka producer per destination topic ─────────────────
     // Each `sinks:` entry is a full `kafka:` sink section (topic, tuning,

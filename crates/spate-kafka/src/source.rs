@@ -454,10 +454,24 @@ fn poll_order(
 }
 
 impl KafkaSource {
-    /// Create a source from validated configuration.
-    #[must_use]
-    pub fn new(config: KafkaSourceConfig) -> Self {
-        KafkaSource {
+    /// A source over `config`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    ///
+    /// # fn main() -> Result<(), spate_core::config::ConfigError> {
+    /// let source = KafkaSource::new(KafkaSourceConfig::new("localhost:9092", "orders", "orders-etl"))?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`KafkaSourceConfig::validate`].
+    pub fn new(config: KafkaSourceConfig) -> Result<Self, spate_core::config::ConfigError> {
+        config.validate()?;
+        Ok(KafkaSource {
             config,
             members: Vec::new(),
             issuer: None,
@@ -481,7 +495,7 @@ impl KafkaSource {
             seek_with: None,
             #[cfg(test)]
             injected_poll_error: None,
-        }
+        })
     }
 
     /// Read the assignment windows and the accept's lookup and commit bounds
@@ -497,15 +511,24 @@ impl KafkaSource {
     /// Create a source from the pipeline's opaque `source: { kafka: ... }`
     /// section.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::config::ComponentConfig;
+    /// use spate_kafka::KafkaSource;
+    ///
+    /// # fn run(section: &ComponentConfig) -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = KafkaSource::from_component_config(section)?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`KafkaSourceConfig::from_component_config`].
     pub fn from_component_config(
         section: &spate_core::config::ComponentConfig,
     ) -> Result<Self, spate_core::config::ConfigError> {
-        Ok(Self::new(KafkaSourceConfig::from_component_config(
-            section,
-        )?))
+        Self::new(KafkaSourceConfig::from_component_config(section)?)
     }
 
     fn opened(&self) -> Result<(), SourceError> {
@@ -2008,13 +2031,6 @@ impl Source for KafkaSource {
         if !self.members.is_empty() {
             return Err(SourceError::fatal("open() called twice"));
         }
-        // Enforce the passthrough guard (and the whole denylist) before any
-        // client is created. The sink's choke point is its constructors; `open()` is
-        // the source's, catching programmatic construction via
-        // `KafkaSource::new` that bypasses `from_component_config`'s validation.
-        self.config
-            .validate()
-            .map_err(|e| SourceError::fatal(e.to_string()))?;
         crate::security::warn_sasl_plaintext(
             &self.config.rdkafka,
             &SectionPath::source(crate::client::TAG),
@@ -2453,25 +2469,26 @@ mod tests {
         }
     }
 
-    /// `open()` runs the TLS guard on a source made with `new()`, which skips
-    /// `from_component_config`: without the `tls` feature it rejects a security
-    /// passthrough before creating a client, and with it the consumer is
-    /// created.
+    /// `new()` runs the TLS guard: without the `tls` feature it refuses a
+    /// security passthrough, and with it the source opens and creates its
+    /// consumer.
     #[test]
-    fn open_enforces_tls_guard_on_programmatic_source() {
+    fn new_enforces_the_tls_guard() {
         use spate_core::checkpoint::Checkpointer;
         let mut config = test_config();
         config
             .rdkafka
             .insert("security.protocol".into(), "ssl".into());
-        let mut source = KafkaSource::new(config);
-        let cp = Checkpointer::new();
-        let result = source.open(SourceCtx::new(cp.handle()));
+        let built = KafkaSource::new(config);
         if cfg!(feature = "tls") {
-            result.expect("tls build: open succeeds");
+            let mut source = built.expect("tls build: new accepts the security config");
+            let cp = Checkpointer::new();
+            source
+                .open(SourceCtx::new(cp.handle()))
+                .expect("tls build: open succeeds");
         } else {
-            let msg = result
-                .expect_err("non-tls build: open rejects the security config")
+            let msg = built
+                .expect_err("non-tls build: new refuses the security config")
                 .to_string();
             assert!(msg.contains("kafka-tls"), "actionable: {msg}");
             assert!(msg.contains("source.kafka.rdkafka"), "scoped: {msg}");
@@ -2487,7 +2504,7 @@ mod tests {
         config
             .rdkafka
             .insert("partition.assignment.strategy".into(), "hunter2".into());
-        let mut source = KafkaSource::new(config);
+        let mut source = KafkaSource::new(config).expect("the config validates");
         let cp = Checkpointer::new();
         let err = source
             .open(SourceCtx::new(cp.handle()))
@@ -2498,43 +2515,30 @@ mod tests {
         assert!(!msg.contains("hunter2"), "{msg}");
     }
 
-    /// `open()` refuses a sub-millisecond `statistics_interval` on a source
-    /// made with `new()`, as a fatal error, before it creates a consumer.
-    /// Regression for #1528.
+    /// `new()` refuses a sub-millisecond `statistics_interval`. Regression
+    /// for #1528.
     #[test]
-    fn open_refuses_a_sub_millisecond_statistics_interval() {
+    fn new_refuses_a_sub_millisecond_statistics_interval() {
         let mut config = test_config();
         config.statistics_interval = Duration::from_micros(500);
-        let mut source = KafkaSource::new(config);
-        let cp = Checkpointer::new();
-        let err = source
-            .open(SourceCtx::new(cp.handle()))
-            .expect_err("open accepted a 500us statistics_interval");
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        let reason = err.reason();
-        assert!(
-            reason.contains("source.kafka.statistics_interval"),
-            "{reason}"
-        );
+        let err = KafkaSource::new(config)
+            .expect_err("new accepted a 500us statistics_interval")
+            .to_string();
+        assert!(err.contains("source.kafka.statistics_interval"), "{err}");
     }
 
-    /// `open()` refuses a sub-millisecond `commit_interval` on a source made
-    /// with `new()`, as a fatal error that names the key and no passthrough
-    /// value, before it creates a consumer. Regression for #1661.
+    /// `new()` refuses a sub-millisecond `commit_interval` with an error that
+    /// names the key and no passthrough value. Regression for #1661.
     #[test]
-    fn open_refuses_a_sub_millisecond_commit_interval() {
+    fn new_refuses_a_sub_millisecond_commit_interval() {
         let mut config = test_config();
         config.commit_interval = Duration::from_micros(500);
         config.rdkafka.insert("client.id".into(), "hunter2".into());
-        let mut source = KafkaSource::new(config);
-        let cp = Checkpointer::new();
-        let err = source
-            .open(SourceCtx::new(cp.handle()))
-            .expect_err("open accepted a 500us commit_interval");
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        let reason = err.reason();
-        assert!(reason.contains("source.kafka.commit_interval"), "{reason}");
-        assert!(!reason.contains("hunter2"), "{reason}");
+        let err = KafkaSource::new(config)
+            .expect_err("new accepted a 500us commit_interval")
+            .to_string();
+        assert!(err.contains("source.kafka.commit_interval"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
     }
 
     /// Reproduces the assignment bookkeeping of a partial revocation on
@@ -2601,7 +2605,7 @@ mod tests {
     ) -> (KafkaSource, Arc<TestClock>) {
         cfg.brokers = crate::testutil::refused_broker();
         cfg.consumers = consumers;
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let clock = freeze(&mut source);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -2794,17 +2798,15 @@ mod tests {
         use spate_test::HANG;
         use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-        /// `open` refuses a consumer count of zero on a source built without
-        /// `from_component_config`.
+        /// `new` refuses a consumer count of zero.
         #[test]
-        fn open_rejects_zero_consumers_on_programmatic_source() {
+        fn new_refuses_zero_consumers() {
             let mut config = test_config();
             config.consumers = 0;
-            let mut source = KafkaSource::new(config);
-            let cp = Checkpointer::new();
-            let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
-            assert_eq!(err.class(), ErrorClass::Fatal);
-            assert!(err.reason().contains("source.kafka.consumers"), "{err}");
+            let err = KafkaSource::new(config)
+                .expect_err("new accepted zero consumers")
+                .to_string();
+            assert!(err.contains("source.kafka.consumers"), "{err}");
         }
 
         /// A poll reports its first fatal error, else its first error.
@@ -3478,7 +3480,7 @@ mod tests {
         /// that needs its consumers.
         #[test]
         fn a_source_used_before_open_is_fatal() {
-            let mut source = KafkaSource::new(test_config());
+            let mut source = KafkaSource::new(test_config()).expect("the config validates");
             let polled = source.poll_events(Duration::ZERO).map(|_| ());
             let committed = source.commit(&[(PartitionId(0), 1)]);
             let flushed = source.flush_commits();
@@ -3579,7 +3581,7 @@ mod tests {
         fn open_refuses_a_count_it_cannot_allocate() {
             let mut config = test_config();
             config.consumers = usize::MAX;
-            let mut source = KafkaSource::new(config);
+            let mut source = KafkaSource::new(config).expect("the config validates");
             let cp = Checkpointer::new();
             match source.open(SourceCtx::new(cp.handle())) {
                 Err(e) => {
@@ -3600,7 +3602,7 @@ mod tests {
                 config
                     .rdkafka
                     .insert("topic.client.id".into(), "app".into());
-                let mut source = KafkaSource::new(config);
+                let mut source = KafkaSource::new(config).expect("the config validates");
                 let cp = Checkpointer::new();
                 match source.open(SourceCtx::new(cp.handle())) {
                     Err(e) => {
@@ -3709,7 +3711,7 @@ mod tests {
                 cfg.rdkafka.insert((*key).to_string(), (*value).to_string());
             }
             let cp = spate_core::checkpoint::Checkpointer::new();
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.seek_with = seek;
             source
                 .open(SourceCtx::new(cp.handle()))
@@ -4765,7 +4767,7 @@ mod tests {
             ("auto.offset.reset".to_string(), "latest".to_string()),
             ("session.timeout.ms".to_string(), "6000".to_string()),
         ]);
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         spate_test::wait_until(HANG, "an assignment held", || {
@@ -4838,7 +4840,7 @@ mod tests {
             cfg.consumers = consumers;
             cfg.rdkafka
                 .insert("auto.offset.reset".to_string(), policy.to_string());
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             let clock = freeze(&mut source);
             let calls: Calls = Arc::default();
             let (moved, seen) = (Arc::clone(&clock), Arc::clone(&calls));
@@ -5251,7 +5253,7 @@ mod tests {
         /// An opened source, and its consumers, which outlive a drop of the
         /// source so a test can read them before they close.
         fn open(cfg: KafkaSourceConfig) -> (KafkaSource, Vec<Member>) {
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let members = source
@@ -5326,7 +5328,7 @@ mod tests {
             let mut cfg = config(&cluster, "retried-reassign", 2);
             cfg.rdkafka
                 .insert("auto.offset.reset".to_string(), "latest".to_string());
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             let clock = freeze(&mut source);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -5751,7 +5753,7 @@ mod tests {
             ("heartbeat.interval.ms".to_string(), "500".to_string()),
             ("auto.offset.reset".to_string(), "earliest".to_string()),
         ]);
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         spate_test::wait_until(HANG, "every partition held", || {
@@ -5989,7 +5991,7 @@ mod tests {
             "session.timeout.ms".to_string(),
             "6000".to_string(),
         )]);
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut held = None;
@@ -6382,7 +6384,7 @@ mod tests {
             // Out of real time's reach: the startup deadline's error carries
             // the last consumer error, so only the handshake error may end it.
             cfg.startup_timeout = Duration::from_hours(1);
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let mut seen = None;
@@ -6460,7 +6462,7 @@ mod tests {
         }
         let cp = Checkpointer::new();
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             source.open(SourceCtx::new(cp.handle())).expect("open");
         });
         crate::testutil::assert_one_cleartext_warning(&lines, "source.kafka");
@@ -6484,7 +6486,7 @@ mod tests {
             cfg.rdkafka.insert(key.into(), value.into());
         }
         cfg.startup_timeout = Duration::from_secs(30);
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).expect("the config validates");
         let clock = freeze(&mut source);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -6661,7 +6663,7 @@ mod tests {
         /// `open` rather than from the event.
         #[test]
         fn a_loss_before_the_first_assignment_stays_in_the_startup_window() {
-            let mut source = KafkaSource::new(test_config());
+            let mut source = KafkaSource::new(test_config()).expect("the config validates");
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
 
@@ -6798,7 +6800,7 @@ mod tests {
             let mut cfg = test_config();
             cfg.brokers = crate::testutil::refused_broker();
             cfg.startup_timeout = Duration::from_secs(30);
-            let mut source = KafkaSource::new(cfg);
+            let mut source = KafkaSource::new(cfg).expect("the config validates");
             let clock = freeze(&mut source);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");

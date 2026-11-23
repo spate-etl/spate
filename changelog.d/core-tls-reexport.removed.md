@@ -1,0 +1,3 @@
+**Breaking:** **The Avro and ClickHouse crates no longer re-export `TlsSection`** (`spate-avro`, `spate-clickhouse`)
+
+`TlsSection` is reached only at `spate::tls::TlsSection`, or at `spate_core::tls::TlsSection` in code that depends on `spate-core` directly. The paths `spate::avro::TlsSection`, `spate::clickhouse::TlsSection`, `spate_avro::TlsSection` and `spate_clickhouse::TlsSection` are removed. They named the same type, so code that imported it from both connectors did not compile. Change each such import to `spate::tls::TlsSection`. The `tls:` YAML blocks and their behaviour are unchanged.

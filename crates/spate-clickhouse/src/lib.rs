@@ -262,7 +262,7 @@ mod writer;
 
 pub use config::{
     ClickHouseSink, ClickHouseSinkBuilder, ClickHouseSinkConfig, Compression,
-    DistributedCheckSection, Format, TlsSection,
+    DistributedCheckSection, Format,
 };
 pub use distributed::DistributedCheckError;
 pub use encoder::ClickHouseFormatEncoder;

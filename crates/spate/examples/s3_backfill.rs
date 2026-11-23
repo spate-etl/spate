@@ -31,6 +31,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
+use spate::framing::RecordFramer;
 use spate::json::{JsonDeserializerBuilder, JsonLinesFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
@@ -83,9 +84,10 @@ fn run_once(yaml: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // ANCHOR: source
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(yaml)?)?;
     // ANCHOR: framer
-    let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(JsonLinesFramer::new(64 << 20)));
+    let framer = || -> Box<dyn RecordFramer> { Box::new(JsonLinesFramer::new(64 << 20)) };
     // ANCHOR_END: framer
+    let source =
+        S3Source::from_component_config(&pipeline.config().source, &pipeline.io_handle(), framer)?;
     // ANCHOR_END: source
     let deser_section = pipeline
         .config()

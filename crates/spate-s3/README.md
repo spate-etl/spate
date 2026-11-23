@@ -56,8 +56,8 @@ their defaults.
 - `tls.root_ca` names a PEM bundle the client trusts in addition to the system
   trust store. It fails at load when `url` is not an S3 store, or when `store`
   sets an endpoint that is not `https://`.
-- The record format is not a key. `S3Source::with_framer` sets the framer in
-  code, and a source built without one fails when it opens.
+- The record format is not a key. `S3Source::new` and
+  `S3Source::from_component_config` take the framer in code.
 
 The
 [Configuration section of the S3 source page](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#configuration)

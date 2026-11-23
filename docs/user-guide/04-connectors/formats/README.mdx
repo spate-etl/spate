@@ -33,7 +33,7 @@ When a streaming source is given a framer it frames one record per payload. The
 framer is wired onto the source in code, and the deserializer's framing is set
 in code too, so the `deserializer:` section carries only decode knobs:
 
-```rust file=crates/spate/examples/s3_backfill.rs region=framer
+```rust file=crates/spate/examples/s3_backfill.rs region=source
 ```
 
 That wiring comes from

@@ -1,5 +1,5 @@
 //! The record-framing seam: the source's framing contract, and a custom
-//! [`RecordFramer`] supplied via [`S3Source::with_framer`], driven end-to-end.
+//! [`RecordFramer`] given to [`S3Source::new`], driven end-to-end.
 
 mod support;
 
@@ -10,9 +10,7 @@ use spate_core::source::Source;
 use spate_s3::S3Source;
 use std::collections::VecDeque;
 use std::io;
-use support::{
-    PipelineYaml, captured_rows, data_dir, exit, launch_customized, sorted, test_options,
-};
+use support::{PipelineYaml, captured_rows, data_dir, exit, launch_framed, sorted, test_options};
 
 /// A trivial custom framer that splits records on `;` instead of `\n`, a
 /// non-newline layout, to show the framer is chosen by the caller and the
@@ -71,33 +69,11 @@ fn a_framed_source_reports_per_record() {
 
     // The source is format-agnostic; the caller supplies the framer. A framed
     // source always emits one record per payload.
-    let source = S3Source::from_component_config(&section, rt.handle().clone())
-        .unwrap()
-        .with_framer(|| Box::new(SemicolonSplitter::default()));
+    let source = S3Source::from_component_config(&section, rt.handle(), || {
+        Box::new(SemicolonSplitter::default())
+    })
+    .unwrap();
     assert_eq!(source.framing_contract(), FramingContract::PerRecord);
-}
-
-#[test]
-fn a_source_without_a_framer_fails_to_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = data_dir(&dir);
-
-    let yaml = PipelineYaml::file("s3-no-framer-test", &data)
-        .threads(1)
-        .build();
-
-    // No framer supplied (identity `make_source`): the source must refuse to
-    // open rather than silently framing nothing.
-    let launched = launch_customized(&yaml, test_options(), |_| {}, |s, _io| s);
-    let report = exit(&launched);
-    let ExitState::Failed(failure) = report.state else {
-        panic!("a source with no framer must fail, got {:?}", report.state);
-    };
-    assert!(
-        failure.reason.contains("framer"),
-        "actionable missing-framer error: {}",
-        failure.reason
-    );
 }
 
 #[test]
@@ -111,11 +87,11 @@ fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
         .threads(1)
         .build();
 
-    let launched = launch_customized(
+    let launched = launch_framed(
         &yaml,
         test_options(),
         |_| {},
-        |source, _io| source.with_framer(|| Box::new(SemicolonSplitter::default())),
+        || Box::new(SemicolonSplitter::default()),
     );
     let report = exit(&launched);
     assert_eq!(report.state, ExitState::Completed);

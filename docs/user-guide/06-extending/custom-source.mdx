@@ -190,7 +190,7 @@ container format ships a block framer. `FramerWriter` bridges a `Write`-based
 decompressor to a framer so compression stays orthogonal. A streaming source
 takes its framer at construction and stays format-agnostic, so every streaming
 source reuses every format's framer. Worked reference:
-[`spate-s3`](repo:crates/spate-s3) and its `with_framer`.
+[`spate-s3`](repo:crates/spate-s3) and its `S3Source::new`.
 
 Tell the framework how your payloads are framed with **`framing_contract`**, so
 framing is established once (on the source) instead of coordinating it with the

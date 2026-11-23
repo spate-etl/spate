@@ -9,8 +9,8 @@
 //!
 //! The record-boundary logic itself lives behind
 //! [`spate_core::framing::RecordFramer`], whose concrete impl is supplied by the
-//! chosen format (e.g. `spate-json`'s `JsonLinesFramer`) via
-//! [`S3Source::with_framer`](crate::S3Source::with_framer); `spate-s3` owns no
+//! chosen format (e.g. `spate-json`'s `JsonLinesFramer`) to
+//! [`S3Source::new`](crate::S3Source::new); `spate-s3` owns no
 //! framing of its own. This module owns only the S3-specific parts:
 //! compression codec resolution by object-key extension, streaming
 //! decompression, and driving the supplied framer across object boundaries.
@@ -167,8 +167,8 @@ pub(crate) struct ObjectFramer {
     /// Decoded bytes of finished objects (the in-progress object's count lives
     /// in its framer).
     finished_decoded_bytes: u64,
-    /// Builds the per-object framer, supplied by the format via
-    /// [`S3Source::with_framer`](crate::S3Source::with_framer).
+    /// Builds the per-object framer, supplied by the format to
+    /// [`S3Source::new`](crate::S3Source::new).
     make_framer: FramerFactory,
 }
 

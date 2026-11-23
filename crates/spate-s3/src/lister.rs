@@ -2335,10 +2335,10 @@ mod tests {
         );
         crate::source::S3Source::from_component_config(
             &spate_test::component_config("s3", &yaml),
-            rt.handle().clone(),
+            rt.handle(),
+            crate::testutil::ndjson_framer,
         )
         .unwrap()
-        .with_framer(crate::testutil::ndjson_framer)
     }
 
     fn scripted_section() -> spate_core::config::FeedSection {

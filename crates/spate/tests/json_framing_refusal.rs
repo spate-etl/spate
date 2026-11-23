@@ -33,9 +33,11 @@ sink: {{ capture: {{}} }}
         data.display()
     );
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).unwrap()).unwrap();
-    let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())
-        .unwrap()
-        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)));
+    let source =
+        S3Source::from_component_config(&pipeline.config().source, &pipeline.io_handle(), || {
+            Box::new(JsonLinesFramer::new(1 << 20))
+        })
+        .unwrap();
     let section = pipeline.config().deserializer.clone().unwrap();
     let (sink, script) = capture_sink(1, 1);
     let err = pipeline

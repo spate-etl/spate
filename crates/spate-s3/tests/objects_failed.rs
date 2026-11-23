@@ -15,8 +15,7 @@ use std::sync::Arc;
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     DEADLINE, Launched, PipelineYaml, data_dir, etag_of, launch_customized,
-    launch_on_notifications, line_framer, lines_bytes, notification, recs, stop, test_options,
-    unit_over,
+    launch_on_notifications, lines_bytes, notification, recs, stop, test_options, unit_over,
 };
 
 /// Each reason the S3 page documents for the counter, in the order the
@@ -69,11 +68,7 @@ fn a_missing_object_counts_not_found_once_per_delivery() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _| {
-            line_framer(source)
-                .with_feed(source_feed)
-                .with_store(spy_store)
-        },
+        move |source, _| source.with_feed(source_feed).with_store(spy_store),
     );
     wait_until(DEADLINE, "the unit is dead-lettered", || {
         feed.counts().dead_lettered == 1
@@ -118,11 +113,7 @@ fn a_missing_member_fails_its_whole_unit() {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _| {
-            line_framer(source)
-                .with_feed(source_feed)
-                .with_store(spy_store)
-        },
+        move |source, _| source.with_feed(source_feed).with_store(spy_store),
     );
     wait_until(DEADLINE, "the unit is dead-lettered", || {
         feed.counts().dead_lettered == 1
@@ -162,7 +153,7 @@ fn read_until_dead_lettered(name: &str, data: &Path, unit: Unit) -> Launched {
         &yaml,
         test_options(),
         |_| {},
-        move |source, _| line_framer(source).with_feed(source_feed),
+        move |source, _| source.with_feed(source_feed),
     );
     wait_until(DEADLINE, "the unit is dead-lettered", || {
         feed.counts().dead_lettered == 1

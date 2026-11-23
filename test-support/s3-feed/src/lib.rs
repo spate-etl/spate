@@ -18,6 +18,7 @@ use spate_core::feed::{
     Confirmation, ConnectError, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedMetricsCtx,
     FeedWaker, Receipt, Unit,
 };
+use spate_core::framing::RecordFramer;
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::SinkPoolConfig;
 use spate_json::JsonLinesFramer;
@@ -275,6 +276,38 @@ pub fn launch_customized<F: Feed + 'static>(
     checkpoint: &str,
     stop_clock: Option<Arc<StopClock>>,
 ) -> Worker<F> {
+    launch_framed(
+        connect,
+        source_yaml,
+        feed_section,
+        pre,
+        || Box::new(JsonLinesFramer::new(1 << 20)),
+        customize,
+        checkpoint,
+        stop_clock,
+    )
+}
+
+/// [`launch_customized`], with the source cutting records with the framers
+/// `framer` builds in place of NDJSON lines up to 1 MiB.
+///
+/// # Panics
+///
+/// As [`launch_customized`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "launch_customized's arguments and the framer, each named at every call"
+)]
+pub fn launch_framed<F: Feed + 'static>(
+    connect: impl FnOnce(&FeedSection, &Handle) -> Result<F, ConnectError>,
+    source_yaml: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+    framer: impl Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
+    customize: impl FnOnce(S3Source) -> S3Source,
+    checkpoint: &str,
+    stop_clock: Option<Arc<StopClock>>,
+) -> Worker<F> {
     let yaml = pipeline_yaml(source_yaml, feed_section, checkpoint);
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
@@ -283,11 +316,8 @@ pub fn launch_customized<F: Feed + 'static>(
     let io = pipeline.io_handle();
     let feed = Arc::new(connect(&section, &io).unwrap());
     let recording = Recording::new(Arc::clone(&feed));
-    let source = customize(
-        S3Source::from_component_config(&pipeline.config().source, io)
-            .unwrap()
-            .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20))),
-    );
+    let source =
+        customize(S3Source::from_component_config(&pipeline.config().source, &io, framer).unwrap());
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 1;
     pool.batch.linger = Duration::from_millis(10);

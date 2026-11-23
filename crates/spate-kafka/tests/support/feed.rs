@@ -671,11 +671,12 @@ pub(crate) fn list_once(
     let (publisher, io) = publisher;
     let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
     let config = PipelineConfig::from_str(&pipeline_yaml(&source, section_yaml)).unwrap();
-    S3Source::from_component_config(&config.source, io.handle().clone())
-        .unwrap()
-        .with_framer(|| Box::new(JsonLinesFramer::new(1 << 20)))
-        .list_once(config.feed.as_ref().unwrap(), Arc::new(publisher.unwrap()))
-        .unwrap();
+    S3Source::from_component_config(&config.source, io.handle(), || {
+        Box::new(JsonLinesFramer::new(1 << 20))
+    })
+    .unwrap()
+    .list_once(config.feed.as_ref().unwrap(), Arc::new(publisher.unwrap()))
+    .unwrap();
 }
 
 /// A bounded worker over `data`, connected with `connect`, whose end check

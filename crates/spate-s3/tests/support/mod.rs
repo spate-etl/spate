@@ -11,6 +11,7 @@ use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{Feed, Unit};
+use spate_core::framing::RecordFramer;
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_json::JsonLinesFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
@@ -149,9 +150,9 @@ pub(crate) fn ndjson_framer() -> JsonLinesFramer {
     JsonLinesFramer::new(1 << 20)
 }
 
-/// The default framer every suite wires into its source (NDJSON line framing).
-pub(crate) fn line_framer(source: S3Source) -> S3Source {
-    source.with_framer(|| Box::new(ndjson_framer()))
+/// The default framer every suite gives its source (NDJSON line framing).
+pub(crate) fn line_framer() -> Box<dyn RecordFramer> {
+    Box::new(ndjson_framer())
 }
 
 /// A pipeline running in the background plus its observation handles.
@@ -173,19 +174,29 @@ pub(crate) fn launch_scripted(
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    launch_customized(yaml, options, pre, |source, _io| line_framer(source))
+    launch_customized(yaml, options, pre, |source, _io| source)
 }
 
 /// Like [`launch_scripted`], but `make_source` may customize the source
-/// (e.g. `.with_framer(...)`, `.with_store(...)`) before it is handed to the
-/// runtime; it receives the pipeline's I/O handle.
+/// (e.g. `.with_store(...)`) before it is handed to the runtime; it receives
+/// the pipeline's I/O handle. The source comes with [`line_framer`].
 pub(crate) fn launch_customized(
     yaml: &str,
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, None, None, make_source)
+    launch_inner(yaml, options, pre, None, None, line_framer, make_source)
+}
+
+/// Like [`launch_scripted`], with `framer` in place of [`line_framer`].
+pub(crate) fn launch_framed(
+    yaml: &str,
+    options: RuntimeOptions,
+    pre: impl FnOnce(&SinkScript),
+    framer: impl Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
+) -> Launched {
+    launch_inner(yaml, options, pre, None, None, framer, |source, _io| source)
 }
 
 /// [`launch_customized`] with the runtime's stop timed on `clock`, which the
@@ -197,7 +208,15 @@ pub(crate) fn launch_customized_on_clock(
     clock: Arc<TestClock>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, None, Some(clock), make_source)
+    launch_inner(
+        yaml,
+        options,
+        pre,
+        None,
+        Some(clock),
+        line_framer,
+        make_source,
+    )
 }
 
 /// [`launch_customized`] with `feed` passed to `Pipeline::feed`, for the
@@ -209,7 +228,15 @@ pub(crate) fn launch_with_feed(
     feed: Arc<dyn Feed>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, Some((feed, false)), None, make_source)
+    launch_inner(
+        yaml,
+        options,
+        pre,
+        Some((feed, false)),
+        None,
+        line_framer,
+        make_source,
+    )
 }
 
 /// [`launch_customized`] with `feed` passed to `Pipeline::seeded_feed`, for
@@ -221,7 +248,15 @@ pub(crate) fn launch_with_seeded_feed(
     feed: Arc<dyn Feed>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, Some((feed, true)), None, make_source)
+    launch_inner(
+        yaml,
+        options,
+        pre,
+        Some((feed, true)),
+        None,
+        line_framer,
+        make_source,
+    )
 }
 
 /// [`launch_with_feed`] with the runtime's stop timed on `clock`, which the
@@ -240,6 +275,7 @@ pub(crate) fn launch_with_feed_on_clock(
         pre,
         Some((feed, false)),
         Some(clock),
+        line_framer,
         make_source,
     )
 }
@@ -251,6 +287,7 @@ fn launch_inner(
     // The feed code passes in, and whether it passes it as seeded.
     feed: Option<(Arc<dyn Feed>, bool)>,
     stop_clock: Option<Arc<TestClock>>,
+    framer: impl Fn() -> Box<dyn RecordFramer> + Send + Sync + 'static,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
     let mut config = PipelineConfig::from_str(yaml).expect("config parses");
@@ -269,7 +306,7 @@ fn launch_inner(
     };
     let io = pipeline.io_handle();
     let source = make_source(
-        S3Source::from_component_config(&pipeline.config().source, io.clone())
+        S3Source::from_component_config(&pipeline.config().source, &io, framer)
             .expect("source config"),
         io,
     );
@@ -362,7 +399,7 @@ pub(crate) fn launch_on_notifications(
         .replace("\"s3://b/data/\"", &format!("\"{scheme}://b/data/\""));
     let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
     launch_customized(&yaml, test_options(), pre, move |source, _io| {
-        line_framer(source).with_store(store).with_feed(feed)
+        source.with_store(store).with_feed(feed)
     })
 }
 

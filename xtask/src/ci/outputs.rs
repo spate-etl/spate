@@ -81,14 +81,17 @@ impl StoreLane {
 ///
 /// - `feed_notifications` needs the primary S3 store to publish to the broker,
 ///   and RustFS's Kafka client does not reach Redpanda.
-/// - `tls_system_ca` configures Apache Kafka's SSL listener through its
-///   `KAFKA_*` variables.
+/// - `tls_system_ca` and `tls_root_ca` configure Apache Kafka's SSL listener
+///   through its `KAFKA_*` variables.
 /// - `e2e_leader_move` stalls on Redpanda in two librdkafka defects a leader
 ///   move can trigger: a lock-order deadlock
 ///   (confluentinc/librdkafka#5476) and a partition left on a broker that
 ///   no longer leads it (confluentinc/librdkafka#5629).
 pub(crate) const BROKER_LANE_SUITES: [(&str, &[&str]); 2] = [
-    ("spate-kafka", &["feed_notifications", "tls_system_ca"]),
+    (
+        "spate-kafka",
+        &["feed_notifications", "tls_system_ca", "tls_root_ca"],
+    ),
     ("spate", &["e2e_leader_move"]),
 ];
 
@@ -217,10 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn a_broker_lane_filter_leaves_three_suites_to_the_primary_lane() {
+    fn a_broker_lane_filter_leaves_four_suites_to_the_primary_lane() {
         assert_eq!(
             BrokerLane::new("other").filter,
-            "(package(spate-kafka) & !binary(feed_notifications) & !binary(tls_system_ca)) \
+            "(package(spate-kafka) & !binary(feed_notifications) & !binary(tls_system_ca) \
+             & !binary(tls_root_ca)) \
              | (package(spate) & !binary(e2e_leader_move)) \
              | (package(spate-test-support) & binary(containers) \
              & test(=kafka_broker_round_trips_a_record))"
@@ -231,7 +235,8 @@ mod tests {
     fn the_primary_broker_suites_are_the_ones_a_broker_lane_leaves_out() {
         assert_eq!(
             primary_broker_suites(),
-            "(package(spate-kafka) & (binary(feed_notifications) | binary(tls_system_ca))) \
+            "(package(spate-kafka) & (binary(feed_notifications) | binary(tls_system_ca) \
+             | binary(tls_root_ca))) \
              | (package(spate) & binary(e2e_leader_move))"
         );
     }

@@ -81,8 +81,8 @@ The `kafka-brokers` leg leaves some suites to the primary lane.
 
 - `feed_notifications`: the primary S3 store, RustFS, does not deliver its
   notifications to Redpanda.
-- `tls_system_ca`: it configures Apache Kafka's SSL listener through `KAFKA_*`
-  variables.
+- `tls_system_ca` and `tls_root_ca`: they configure Apache Kafka's SSL
+  listener through `KAFKA_*` variables.
 - `e2e_leader_move`: a leader move on Redpanda can stall the client in two
   librdkafka defects, a lock-order deadlock
   ([confluentinc/librdkafka#5476](https://github.com/confluentinc/librdkafka/issues/5476))

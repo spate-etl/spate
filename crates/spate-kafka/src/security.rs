@@ -48,9 +48,9 @@ fn check(
             return Err(at.invalid("tls.root_ca", REBUILD));
         }
         // librdkafka builds its SSL context only for these two protocols.
-        if !protocol(rdkafka).is_some_and(|p| {
-            p.eq_ignore_ascii_case("ssl") || p.eq_ignore_ascii_case("sasl_ssl")
-        }) {
+        if !protocol(rdkafka)
+            .is_some_and(|p| p.eq_ignore_ascii_case("ssl") || p.eq_ignore_ascii_case("sasl_ssl"))
+        {
             return Err(at.invalid(
                 "tls.root_ca",
                 "needs rdkafka.\"security.protocol\" set to ssl or sasl_ssl, the \
@@ -333,7 +333,13 @@ pub(crate) mod tests {
         ];
         for cfg in plain {
             assert!(
-                check(&cfg, &TlsSection::default(), &SectionPath::sink("kafka"), false).is_ok(),
+                check(
+                    &cfg,
+                    &TlsSection::default(),
+                    &SectionPath::sink("kafka"),
+                    false
+                )
+                .is_ok(),
                 "{cfg:?}"
             );
         }
@@ -364,14 +370,18 @@ pub(crate) mod tests {
         ];
         for cfg in secured {
             let at = SectionPath::source("kafka");
-            let err = check(&cfg, &TlsSection::default(), &at, false).expect_err("tls off must reject");
+            let err =
+                check(&cfg, &TlsSection::default(), &at, false).expect_err("tls off must reject");
             let msg = err.to_string();
             assert!(
                 msg.starts_with("source.kafka.rdkafka: requests TLS/SASL"),
                 "{cfg:?}: {msg}"
             );
             assert!(msg.contains("kafka-tls"), "{cfg:?}: {msg}");
-            assert!(check(&cfg, &TlsSection::default(), &at, true).is_ok(), "tls on: {cfg:?}");
+            assert!(
+                check(&cfg, &TlsSection::default(), &at, true).is_ok(),
+                "tls on: {cfg:?}"
+            );
         }
     }
 

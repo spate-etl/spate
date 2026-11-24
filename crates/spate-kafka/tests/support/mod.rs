@@ -34,6 +34,8 @@ pub(crate) mod latest;
 pub(crate) mod mock;
 pub(crate) mod raw;
 pub(crate) mod sink;
+#[cfg(feature = "tls")]
+pub(crate) mod tls;
 pub(crate) mod topics;
 pub(crate) mod wire;
 

@@ -70,6 +70,7 @@ unknown fields are rejected with the offending key.
 | `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate, which can run up to 2 s past it. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
 | `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer, feeding the feed's [client statistics](#client-statistics). The attempt follower sends no statistics. `0s` disables statistics and those families with it; the feed's other families stay. A non-zero value under `1ms` or above `24h` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties for every client of the feed, applied after validation — see below. |
+| `tls.root_ca` | path | unset | A PEM file of CA certificates trusted in addition to the system roots. Needs the `kafka-tls` feature and `security.protocol` set to `ssl` or `sasl_ssl`. See [Security](#security-tls-mtls-sasl). |
 
 `units_held` beside `kafka:` sets how many units a worker holds at once, and
 `attempt_cap` the attempt at which a unit goes to the dead-letter topic: a
@@ -113,6 +114,7 @@ is denied, because passthrough and feed values apply in unspecified order.
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
 | `bootstrap.servers`, `metadata.broker.list` | One librdkafka property, owned by the typed `brokers` field. |
 | `enable.gapless.guarantee` | Raises a fatal producer error on any gap, which stops the feed. |
+| `ssl.ca.location`, `ssl.ca.pem`, `ssl.ca.certificate.stores`, `enable.ssl.certificate.verification` | Refused only while `tls.root_ca` is set, which then sets the CA. |
 
 The attempt follower sets the same group, offset and commit properties the
 consumer does, so the denylist covers it too.
@@ -158,7 +160,7 @@ topic and reads none, for a process that only publishes, such as a lister run
 (see [The lister run](../../sources/s3/README.mdx#the-lister-run)).
 It reads the workers' own `feed: { kafka: … }` section and refuses any section
 a worker refuses, so every key stays required. Its writes use `brokers`,
-`topic`, `delivery_timeout`, `statistics_interval` and the `rdkafka`
+`topic`, `delivery_timeout`, `statistics_interval`, `tls` and the `rdkafka`
 passthrough, and the other three topic names serve its checks. Connecting runs
 the [startup checks](#startup-checks) a worker runs, then builds one producer
 with the settings the feed owns. The handle joins no group, starts none of the

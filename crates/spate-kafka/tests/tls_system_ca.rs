@@ -17,21 +17,15 @@ use rdkafka::client::ClientContext;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, ConsumerContext};
 use rdkafka::error::KafkaError;
-use rdkafka::producer::{BaseProducer, Producer as _};
-use spate_core::checkpoint::Checkpointer;
-use spate_core::sink::ShardWriter;
-use spate_core::source::{Source, SourceCtx, SourceEvent};
-use spate_kafka::sink::KafkaSinkConfig;
-use spate_kafka::{KafkaSink, KafkaSource, KafkaSourceConfig};
+use spate_core::tls::TlsSection;
 use spate_test::HANG;
-use spate_test_support::{SingleBroker, TestCa, container_image, pem};
+use spate_test_support::{TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{collections::BTreeMap, fs};
-use support::sink::sealed;
-use support::{broker, drain_lane};
+use support::tls::{create_topic, raw, tls_broker};
 use testcontainers::core::wait::ExitWaitStrategy;
 use testcontainers::core::{AccessMode, Mount, WaitFor};
 use testcontainers::runners::SyncRunner;
@@ -42,7 +36,6 @@ const HASHED: &str = "system_openssl_default_preserves_hashed_directory_trust";
 const ARM: &str = "SPATE_TEST_PROBE_ARM";
 const BROKERS: &str = "SPATE_TEST_PROBE_BROKERS";
 const TOPIC: &str = "tls-system-ca";
-const RECORDS: usize = 10;
 const CLIENT_BINARY: &str = "/spate/tls_system_ca";
 /// The nested build's target directory inside the builder container.
 const BUILDER_TARGET_DIR: &str = "/tmp/target";
@@ -123,79 +116,12 @@ fn system_openssl_default_preserves_hashed_directory_trust() {
     }
 }
 
-/// Boots a TLS broker signed by a fresh CA, and returns the CA as PEM, the
-/// container and its address.
-fn tls_broker() -> (String, SingleBroker, String) {
-    let ca = TestCa::new("spate-kafka-test CA");
-    let (chain, key) = ca.leaf(&["127.0.0.1", "localhost"]);
-    // Kafka reads these as properties, where `\n` is a newline.
-    let inline = |pem: String| pem.replace('\n', "\\n");
-    let kafka = SingleBroker::start(
-        broker()
-            .with_env_var(
-                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-                "BROKER:PLAINTEXT,PLAINTEXT:SSL,CONTROLLER:PLAINTEXT",
-            )
-            .with_env_var("KAFKA_SSL_KEYSTORE_TYPE", "PEM")
-            .with_env_var(
-                "KAFKA_SSL_KEYSTORE_KEY",
-                inline(pem("PRIVATE KEY", key.secret_pkcs8_der())),
-            )
-            .with_env_var(
-                "KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN",
-                inline(pem("CERTIFICATE", &chain)),
-            ),
-    )
-    .expect("start kafka container");
-    let brokers = kafka.bootstrap().to_owned();
-    (pem("CERTIFICATE", &ca.der()), kafka, brokers)
-}
-
 /// Runs a sink, its readiness probe and a source over TLS with the connector's
 /// CA default, after creating the topic with a raw client naming `ca_location`.
 fn connector_clients(brokers: &str, ca_location: &str) {
-    create_topic(brokers, ca_location);
+    create_topic(raw(brokers).set("ssl.ca.location", ca_location), TOPIC);
     let tls = BTreeMap::from([("security.protocol".to_string(), "ssl".to_string())]);
-
-    let mut sink_cfg = KafkaSinkConfig::new(brokers, TOPIC);
-    sink_cfg.statistics_interval = Duration::ZERO;
-    sink_cfg.rdkafka = tls.clone();
-    let sink = KafkaSink::new(sink_cfg).expect("sink build");
-    let batch = sealed(
-        &mut sink.encoder_bytes(),
-        (0..RECORDS).map(|i| format!("tls-{i}")),
-    );
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    rt.block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
-        .expect("write_batch over TLS");
-    rt.block_on(sink.probe_fn()())
-        .expect("readiness probe over TLS");
-
-    let mut source_cfg = KafkaSourceConfig::new(brokers, TOPIC, "tls-system-ca");
-    source_cfg.startup_timeout = Duration::from_secs(60);
-    source_cfg.rdkafka = tls;
-    source_cfg
-        .rdkafka
-        .insert("auto.offset.reset".to_string(), "earliest".to_string());
-    let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(source_cfg).expect("the config validates");
-    source.open(SourceCtx::new(cp.handle())).expect("open");
-    let mut lanes = None;
-    spate_test::wait_until(HANG, "partition assignment", || {
-        if let SourceEvent::LanesAssigned(assigned) = source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        {
-            lanes = Some(assigned);
-        }
-        lanes.is_some()
-    });
-    let mut lanes = lanes.expect("assigned");
-    let rows = drain_lane(&mut source, &mut lanes[0], RECORDS, HANG);
-    assert_eq!(rows.len(), RECORDS);
+    support::tls::connector_clients(brokers, TOPIC, &tls, &TlsSection::default());
 }
 
 /// Runs the client arm named by the environment, if any, and reports whether it did.
@@ -409,31 +335,6 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
-}
-
-/// Create the topic the connector clients use. The sink never creates a
-/// topic, so a raw producer's metadata read does it, under librdkafka's
-/// auto-create default and the CA at `ca_location`.
-fn create_topic(brokers: &str, ca_location: &str) {
-    let producer: BaseProducer = raw(brokers)
-        .set("ssl.ca.location", ca_location)
-        .build()
-        .expect("raw producer");
-    spate_test::wait_until(HANG, "the topic exists", || {
-        producer
-            .client()
-            .fetch_metadata(Some(TOPIC), Duration::from_secs(10))
-            .is_ok_and(|m| m.topics().iter().all(|t| t.error().is_none()))
-    });
-}
-
-/// A raw TLS client configuration for `brokers`, with no CA setting.
-fn raw(brokers: &str) -> ClientConfig {
-    let mut cc = support::raw_config();
-    cc.set("bootstrap.servers", brokers)
-        .set("security.protocol", "ssl")
-        .set("group.id", "tls-system-ca-raw");
-    cc
 }
 
 /// Whether a consumer on `cc` verifies the broker's certificate, read from

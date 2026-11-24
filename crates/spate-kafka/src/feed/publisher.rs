@@ -56,8 +56,8 @@ impl KafkaFeedPublisher {
     ///
     /// It reads the section a worker reads and refuses any section a worker
     /// refuses. Its writes use `brokers`, `topic`, `delivery_timeout`,
-    /// `statistics_interval` and the `rdkafka` passthrough; the other three
-    /// topic names serve its checks. Connecting runs the checks
+    /// `statistics_interval`, `tls` and the `rdkafka` passthrough; the other
+    /// three topic names serve its checks. Connecting runs the checks
     /// [`KafkaFeed::connect`](super::KafkaFeed::connect) runs, on the runtime
     /// `io`, in at most 30 seconds, then builds the producer.
     ///

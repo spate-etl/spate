@@ -14,7 +14,7 @@ categories.workspace = true
 [features]
 # `spate-test-support/kafka-tls` reaches test builds only: packaging drops a
 # dev-dependency's feature.
-tls = ["rdkafka/ssl-vendored", "dep:openssl-sys", "spate-test-support/kafka-tls"]
+tls = ["rdkafka/ssl-vendored", "dep:openssl-sys", "spate-core/tls-roots", "spate-test-support/kafka-tls"]
 # `KafkaJsonEncoder::with_simd_json`, a per-encoder opt-in. Without the call
 # the encoder keeps serde_json.
 json-simd = ["dep:simd-json"]

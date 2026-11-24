@@ -70,6 +70,7 @@ sink:
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `spate_kafka_sink_*` families; `0s` disables statistics and those families with it. A non-zero value under `1ms` or above `24h` is refused. |
 | `compression` | `none\|gzip\|snappy\|lz4\|zstd` | `none` | Producer compression (`compression.codec`). |
 | `rdkafka` | string map | `{}` | Raw librdkafka producer properties, applied verbatim after validation — see below. |
+| `tls.root_ca` | path | unset | A PEM file of CA certificates trusted in addition to the system roots. Needs the `kafka-tls` feature and `security.protocol` set to `ssl` or `sasl_ssl`. See [Security](#security-tls-mtls-sasl). |
 
 ## The `rdkafka` passthrough and the denylist
 
@@ -94,6 +95,7 @@ values apply in unspecified order).
 | `delivery.report.only.error` | The sink counts every report to acknowledge a batch; suppressing success reports would hang every write. |
 | `enable.gapless.guarantee` | Raises librdkafka fatal errors on any gap, conflicting with the framework's retry-and-replay model. |
 | `allow.auto.create.topics` | **Forced off.** A write to a missing topic, or the readiness probe's read of one, fails, and never creates the topic with the broker's defaults. |
+| `ssl.ca.location`, `ssl.ca.pem`, `ssl.ca.certificate.stores`, `enable.ssl.certificate.verification` | Refused only while `tls.root_ca` is set, which then sets the CA. |
 
 The producer is created **at startup**, so a passthrough that conflicts
 with the forced durability settings (e.g. `max.in.flight` > 5 or

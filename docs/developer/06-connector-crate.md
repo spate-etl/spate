@@ -227,8 +227,6 @@ When the connector also has a passthrough map, refuse a passthrough key that set
 
 **Follow:** [`crates/spate-sqs/src/config.rs`](repo:crates/spate-sqs/src/config.rs).
 
-**Departs:** the Kafka connectors, which take trust roots only through `ssl.*` keys in the `rdkafka` map ([#2322](https://github.com/spate-etl/spate/issues/2322)).
-
 **Checked by:** review.
 
 ### Leave the framework's keys to core

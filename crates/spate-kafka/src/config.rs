@@ -6,6 +6,7 @@ use serde::Deserialize;
 use spate_core::config::{
     ComponentConfig, ConfigError, DurationBounds, SectionPath, check_duration, redact,
 };
+use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -207,9 +208,10 @@ pub struct KafkaSourceConfig {
     /// `earliest`, since the source settles each start under `latest` itself.
     /// Framework-owned properties (see crate docs) are rejected. With the
     /// `tls` feature and vendored OpenSSL, a map naming neither
-    /// `ssl.ca.location` nor `ssl.ca.pem` gets `ssl.ca.location: probe` unless
-    /// `SSL_CERT_FILE` or `SSL_CERT_DIR` is set; a build linked against the
-    /// system OpenSSL keeps librdkafka's native CA default.
+    /// `ssl.ca.location` nor `ssl.ca.pem`, in a section without `tls.root_ca`,
+    /// gets `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR`
+    /// is set; a build linked against the system OpenSSL keeps librdkafka's
+    /// native CA default.
     ///
     /// The framework sets no prefetch cap of its own, so
     /// `queued.min.messages` (default 100000) and
@@ -239,6 +241,15 @@ pub struct KafkaSourceConfig {
     /// this map sets it.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
+    /// The roots the consumers verify brokers against. Certificates in
+    /// `root_ca` are trusted in addition to the system trust store, which
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` replace when set. `root_ca` needs
+    /// the `tls` feature and `rdkafka."security.protocol"` set to `ssl` or
+    /// `sasl_ssl`. While it is set, `rdkafka` may not name `ssl.ca.location`,
+    /// `ssl.ca.pem`, `ssl.ca.certificate.stores` or
+    /// `enable.ssl.certificate.verification`.
+    #[serde(default)]
+    pub tls: TlsSection,
 }
 
 // Hand-written: the `rdkafka` map carries credentials. The destructure lists
@@ -256,6 +267,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             misplaced_partition_timeout,
             statistics_interval,
             rdkafka,
+            tls,
         } = self;
         f.debug_struct("KafkaSourceConfig")
             .field("brokers", brokers)
@@ -268,6 +280,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             .field("misplaced_partition_timeout", misplaced_partition_timeout)
             .field("statistics_interval", statistics_interval)
             .field("rdkafka", &redact::map(rdkafka.keys()))
+            .field("tls", tls)
             .finish()
     }
 }
@@ -292,6 +305,7 @@ impl KafkaSourceConfig {
             misplaced_partition_timeout: default_misplaced_partition_timeout(),
             statistics_interval: default_statistics_interval(),
             rdkafka: BTreeMap::new(),
+            tls: TlsSection::default(),
         }
     }
 
@@ -386,7 +400,7 @@ impl KafkaSourceConfig {
                  order; set one",
             ));
         }
-        crate::security::check_tls_feature(&self.rdkafka, &at)?;
+        crate::security::check_tls_feature(&self.rdkafka, &self.tls, &at)?;
         if let Some(strategy) = self.rdkafka.get("partition.assignment.strategy")
             && strategy.contains("cooperative")
         {
@@ -438,6 +452,8 @@ impl KafkaSourceConfig {
             rdkafka: &self.rdkafka,
             statistics_interval: self.statistics_interval,
             openssl_env,
+            root_ca: self.tls.root_ca.is_some(),
+            ca_pem: None,
         }
     }
 

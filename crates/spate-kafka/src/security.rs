@@ -1,10 +1,11 @@
 //! TLS/SASL handling shared by every Kafka client: the load-time guard for
-//! the opt-in transport, and the CA default the client factory applies.
+//! the opt-in transport, the CA bundle a section's `tls.root_ca` builds, and
+//! the CA default the client factory applies.
 //!
-//! TLS/mTLS and SASL are configured entirely through each connector's raw
-//! `rdkafka` property passthrough (`security.protocol`, `ssl.*`, `sasl.*`).
-//! There is no typed security section, which keeps `rdkafka` types out of
-//! the public API. Those properties only do anything when librdkafka was compiled
+//! TLS/mTLS and SASL are configured through each connector's raw `rdkafka`
+//! property passthrough (`security.protocol`, `ssl.*`, `sasl.*`). The one typed
+//! key is `tls.root_ca`, core's [`TlsSection`], which adds a private CA to the
+//! system roots. Those settings only do anything when librdkafka was compiled
 //! with SSL/SASL support, which is the crate's off-by-default `tls` feature.
 //!
 //! Without the feature, librdkafka rejects a security request only when the
@@ -15,33 +16,55 @@
 //! late and asymmetrically.
 
 use spate_core::config::{ConfigError, SectionPath};
+use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 
-/// Reject a passthrough that requests TLS/SASL when this build lacks the
-/// transport. A no-op when the `tls` feature is enabled.
+/// What a build without the `tls` feature says to a request for TLS or SASL.
+const REBUILD: &str = "requests TLS/SASL, but this build was compiled without it; rebuild \
+                       with the `kafka-tls` feature (spate = { features = [\"kafka-tls\"] })";
+
+/// Reject a passthrough or a `tls.root_ca` that requests TLS/SASL when this
+/// build lacks the transport, and a `tls.root_ca` under a protocol that does
+/// not verify the broker.
 ///
-/// The error starts at `at`, the path of the section that holds `rdkafka`.
+/// Each error starts at `at`, the path of the section that holds `rdkafka`
+/// and `tls`.
 pub(crate) fn check_tls_feature(
     rdkafka: &BTreeMap<String, String>,
+    tls_section: &TlsSection,
     at: &SectionPath,
 ) -> Result<(), ConfigError> {
-    check(rdkafka, at, cfg!(feature = "tls"))
+    check(rdkafka, tls_section, at, cfg!(feature = "tls"))
 }
 
 fn check(
     rdkafka: &BTreeMap<String, String>,
+    tls_section: &TlsSection,
     at: &SectionPath,
     tls: bool,
 ) -> Result<(), ConfigError> {
+    if tls_section.root_ca.is_some() {
+        if !tls {
+            return Err(at.invalid("tls.root_ca", REBUILD));
+        }
+        // librdkafka builds its SSL context only for these two protocols.
+        if !protocol(rdkafka)
+            .is_some_and(|p| p.eq_ignore_ascii_case("ssl") || p.eq_ignore_ascii_case("sasl_ssl"))
+        {
+            return Err(at.invalid(
+                "tls.root_ca",
+                "needs rdkafka.\"security.protocol\" set to ssl or sasl_ssl, the \
+                 protocols under which librdkafka verifies the broker",
+            ));
+        }
+    }
     if tls {
         return Ok(());
     }
 
     // `builtin.features`, `enable.ssl.*` and `enable.sasl.*` need OpenSSL from
     // outside the `ssl.` / `sasl.` prefixes.
-    let wants_security = rdkafka
-        .get("security.protocol")
-        .is_some_and(|v| !v.eq_ignore_ascii_case("plaintext"))
+    let wants_security = protocol(rdkafka).is_some_and(|v| !v.eq_ignore_ascii_case("plaintext"))
         || rdkafka
             .get("builtin.features")
             .is_some_and(|v| names_openssl_feature(v))
@@ -52,13 +75,18 @@ fn check(
         });
 
     if wants_security {
-        return Err(at.invalid(
-            "rdkafka",
-            "requests TLS/SASL, but this build was compiled without it; rebuild \
-             with the `kafka-tls` feature (spate = { features = [\"kafka-tls\"] })",
-        ));
+        return Err(at.invalid("rdkafka", REBUILD));
     }
     Ok(())
+}
+
+/// `security.protocol` as librdkafka reads it, without leading whitespace,
+/// for a match that ignores ASCII case. `None` when the passthrough does not
+/// set it.
+fn protocol(rdkafka: &BTreeMap<String, String>) -> Option<&str> {
+    rdkafka
+        .get("security.protocol")
+        .map(|v| v.trim_ascii_start())
 }
 
 /// Logs one warning when `rdkafka` sends a non-empty `sasl.password` over
@@ -76,9 +104,7 @@ pub(crate) fn warn_sasl_plaintext(rdkafka: &BTreeMap<String, String>, at: &Secti
 /// Whether `sasl.password` is non-empty and `security.protocol` is
 /// `sasl_plaintext`. librdkafka matches the protocol in any case.
 fn sends_password_without_tls(rdkafka: &BTreeMap<String, String>) -> bool {
-    rdkafka
-        .get("security.protocol")
-        .is_some_and(|v| v.eq_ignore_ascii_case("sasl_plaintext"))
+    protocol(rdkafka).is_some_and(|v| v.eq_ignore_ascii_case("sasl_plaintext"))
         && rdkafka.get("sasl.password").is_some_and(|p| !p.is_empty())
 }
 
@@ -95,18 +121,63 @@ fn names_openssl_feature(features: &str) -> bool {
     })
 }
 
+/// The PEM bundle librdkafka verifies brokers against when `tls.root_ca` is
+/// set: the system roots, then the certificates in `root_ca`. `None` when
+/// `root_ca` is unset.
+///
+/// Reading the system trust store blocks, as [`SystemRoots::load`] does.
+///
+/// [`SystemRoots::load`]: spate_core::tls::SystemRoots::load
+///
+/// # Errors
+///
+/// Why `root_ca` could not be read, for the caller to anchor at
+/// `tls.root_ca`.
+#[cfg(feature = "tls")]
+pub(crate) fn ca_bundle(tls_section: &TlsSection) -> Result<Option<String>, String> {
+    ca_bundle_from(tls_section, spate_core::tls::SystemRoots::load)
+}
+
+/// Without the `tls` feature validation refuses `tls.root_ca`, so there is
+/// no bundle to build.
+#[cfg(not(feature = "tls"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the `tls` build's"
+)]
+pub(crate) fn ca_bundle(_tls_section: &TlsSection) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// [`ca_bundle`] over the system roots `system` reads.
+#[cfg(feature = "tls")]
+fn ca_bundle_from(
+    tls_section: &TlsSection,
+    system: impl FnOnce() -> spate_core::tls::SystemRoots,
+) -> Result<Option<String>, String> {
+    let Some(root_ca) = tls_section.root_ca.as_deref() else {
+        return Ok(None);
+    };
+    spate_core::tls::TrustRoots::load(system(), Some(root_ca))
+        .map(|roots| Some(roots.to_pem()))
+        .map_err(|e| e.to_string())
+}
+
 /// Set `ssl.ca.location` to `probe` in a `tls` build that links vendored
-/// OpenSSL, when the passthrough names no CA and `openssl_env` is false.
+/// OpenSSL, when the passthrough names no CA, `tls.root_ca` is unset and
+/// `openssl_env` is false.
 ///
 /// A build linked against the system OpenSSL keeps librdkafka's native CA
 /// default.
 pub(crate) fn apply_ca_default(
     cc: &mut rdkafka::ClientConfig,
     rdkafka: &BTreeMap<String, String>,
+    root_ca: bool,
     openssl_env: bool,
 ) {
     if let Some(location) = ca_location_default(
         rdkafka,
+        root_ca,
         cfg!(feature = "tls"),
         cfg!(spate_openssl_vendored),
         openssl_env,
@@ -127,13 +198,15 @@ pub(crate) fn openssl_env_overrides() -> bool {
 
 fn ca_location_default(
     rdkafka: &BTreeMap<String, String>,
+    root_ca: bool,
     tls: bool,
     vendored: bool,
     openssl_env: bool,
 ) -> Option<&'static str> {
-    let names_ca = ["ssl.ca.location", "ssl.ca.pem"]
-        .iter()
-        .any(|k| rdkafka.contains_key(*k));
+    let names_ca = root_ca
+        || ["ssl.ca.location", "ssl.ca.pem"]
+            .iter()
+            .any(|k| rdkafka.contains_key(*k));
     (tls && vendored && !names_ca && !openssl_env).then_some("probe")
 }
 
@@ -246,6 +319,8 @@ pub(crate) mod tests {
             map(&[]),
             map(&[("security.protocol", "plaintext")]),
             map(&[("security.protocol", "PLAINTEXT")]),
+            // librdkafka drops leading whitespace from the protocol.
+            map(&[("security.protocol", " plaintext")]),
             // Non-security keys that share the `enable.` prefix.
             map(&[("enable.idempotence", "true")]),
             map(&[("enable.auto.commit", "false")]),
@@ -258,7 +333,13 @@ pub(crate) mod tests {
         ];
         for cfg in plain {
             assert!(
-                check(&cfg, &SectionPath::sink("kafka"), false).is_ok(),
+                check(
+                    &cfg,
+                    &TlsSection::default(),
+                    &SectionPath::sink("kafka"),
+                    false
+                )
+                .is_ok(),
                 "{cfg:?}"
             );
         }
@@ -289,41 +370,91 @@ pub(crate) mod tests {
         ];
         for cfg in secured {
             let at = SectionPath::source("kafka");
-            let err = check(&cfg, &at, false).expect_err("tls off must reject");
+            let err =
+                check(&cfg, &TlsSection::default(), &at, false).expect_err("tls off must reject");
             let msg = err.to_string();
             assert!(
                 msg.starts_with("source.kafka.rdkafka: requests TLS/SASL"),
                 "{cfg:?}: {msg}"
             );
             assert!(msg.contains("kafka-tls"), "{cfg:?}: {msg}");
-            assert!(check(&cfg, &at, true).is_ok(), "tls on: {cfg:?}");
+            assert!(
+                check(&cfg, &TlsSection::default(), &at, true).is_ok(),
+                "tls on: {cfg:?}"
+            );
         }
     }
 
     /// `probe` applies only in a `tls` build that links vendored OpenSSL, whose
-    /// passthrough names no CA and whose environment has no OpenSSL override.
-    /// Regression for #609 and #825.
+    /// passthrough names no CA, whose section sets no `tls.root_ca`, and whose
+    /// environment has no OpenSSL override. Regression for #609 and #825.
     #[test]
     fn ca_default_tracks_openssl_provenance() {
         for tls in [false, true] {
             for vendored in [false, true] {
                 for openssl_env in [false, true] {
-                    for named in [
-                        map(&[]),
-                        map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
-                        map(&[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")]),
-                    ] {
-                        let expected = (tls && vendored && !openssl_env && named.is_empty())
-                            .then_some("probe");
-                        assert_eq!(
-                            ca_location_default(&named, tls, vendored, openssl_env),
-                            expected,
-                            "tls {tls}, vendored {vendored}, env {openssl_env}, {named:?}"
-                        );
+                    for root_ca in [false, true] {
+                        for named in [
+                            map(&[]),
+                            map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
+                            map(&[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")]),
+                        ] {
+                            let expected =
+                                (tls && vendored && !openssl_env && !root_ca && named.is_empty())
+                                    .then_some("probe");
+                            assert_eq!(
+                                ca_location_default(&named, root_ca, tls, vendored, openssl_env),
+                                expected,
+                                "tls {tls}, vendored {vendored}, env {openssl_env}, \
+                                 root_ca {root_ca}, {named:?}"
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Without the `tls` feature there is no bundle, whatever the section
+    /// names, and no file is read.
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn no_bundle_without_the_tls_feature() {
+        let mut section = TlsSection::default();
+        assert_eq!(ca_bundle(&section), Ok(None));
+        section.root_ca = Some("/nonexistent/private-ca.pem".into());
+        assert_eq!(ca_bundle(&section), Ok(None));
+    }
+
+    /// The bundle holds the system roots, then the certificates in
+    /// `root_ca`. Without `root_ca` there is none, and the system store is
+    /// left unread. An unreadable `root_ca` is refused with core's reason.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn the_bundle_keeps_the_system_roots_and_adds_root_ca() {
+        use spate_core::tls::{SystemRoots, read_root_ca};
+        use spate_test_support::TestCa;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (system, private) = (TestCa::new("system"), TestCa::new("private"));
+        let mut section = TlsSection::default();
+        assert_eq!(
+            ca_bundle_from(&section, || panic!("no root_ca reads no system root")),
+            Ok(None)
+        );
+        section.root_ca = Some(private.write(dir.path()));
+        let pem = ca_bundle_from(&section, || SystemRoots::from_certs(vec![system.der()]))
+            .unwrap()
+            .expect("a bundle");
+        let written = dir.path().join("bundle.pem");
+        std::fs::write(&written, pem).unwrap();
+        assert_eq!(
+            read_root_ca(&written).unwrap(),
+            vec![system.der(), private.der()]
+        );
+        section.root_ca = Some(dir.path().join("missing.pem"));
+        let why = ca_bundle_from(&section, SystemRoots::default).unwrap_err();
+        assert!(why.contains("missing.pem"), "{why}");
     }
 
     /// `openssl_env_overrides` reads both variables and treats an empty value
@@ -362,6 +493,7 @@ pub(crate) mod tests {
         for (case, (protocol, secret, cleartext)) in [
             (Some("sasl_plaintext"), Some("p"), true),
             (Some("SASL_PLAINTEXT"), Some("p"), true),
+            (Some(" sasl_plaintext"), Some("p"), true),
             (Some("sasl_plaintext"), Some(""), false),
             (Some("sasl_plaintext"), None, false),
             (Some("sasl_ssl"), Some("p"), false),

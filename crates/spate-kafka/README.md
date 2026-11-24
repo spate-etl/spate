@@ -34,6 +34,7 @@ source:
     misplaced_partition_timeout: 60s  # time fetching off the leader before failing; 0s off
     statistics_interval: 5s   # librdkafka statistics; 0s turns them off
     rdkafka: {}               # raw librdkafka properties, checked at load
+    tls: {}                   # root_ca: a CA file trusted beside the system roots
 ```
 
 Each value after `group_id` is the default.
@@ -44,7 +45,10 @@ outside 1ms to 24h, and a non-zero `statistics_interval` outside the same
 range. A static member id (`group.instance.id`) needs `consumers: 1`. A
 passthrough that sets both `auto.offset.reset` and `topic.auto.offset.reset` is
 refused too. The `rdkafka:` map refuses each property the source owns, with the
-reason, and any cooperative assignment strategy.
+reason, and any cooperative assignment strategy. While `tls.root_ca` is set, it also refuses
+`ssl.ca.location`, `ssl.ca.pem`, `ssl.ca.certificate.stores` and
+`enable.ssl.certificate.verification`, and `security.protocol` has to be `ssl`
+or `sasl_ssl`.
 
 The
 [Kafka source page](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#configuration)
@@ -107,6 +111,7 @@ sink:
     statistics_interval: 5s   # librdkafka statistics; 0s turns them off
     compression: lz4          # none | gzip | snappy | lz4 | zstd; unset by default
     rdkafka: {}               # raw librdkafka producer properties
+    tls: {}                   # root_ca: a CA file trusted beside the system roots
 ```
 
 Each value after `topic` except `compression` is the default. The framework's
@@ -118,7 +123,10 @@ under 1ms or above about 24.8 days, a `max_message_bytes` outside 1000 to
 `compression.codec`. Every shard writes through the one producer, so raising
 `shards` adds writers that contend on that client. Batch size is the throughput
 lever. The `rdkafka:` map refuses each property the sink owns, with the reason,
-and the properties the framework owns for every client.
+and the properties the framework owns for every client. While `tls.root_ca` is set, it also refuses
+`ssl.ca.location`, `ssl.ca.pem`, `ssl.ca.certificate.stores` and
+`enable.ssl.certificate.verification`, and `security.protocol` has to be `ssl`
+or `sasl_ssl`.
 
 The
 [Kafka sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/kafka#configuration)
@@ -190,6 +198,7 @@ feed:
     delivery_timeout: 30s           # bound on each write's delivery report
     statistics_interval: 5s         # librdkafka statistics; 0s turns them off
     rdkafka: {}                     # raw properties for every feed client
+    tls: {}                         # root_ca: a CA file trusted beside the system roots
   attempt_cap: 10                   # a key of feed: itself, beside kafka:
 ```
 
@@ -201,7 +210,10 @@ Loading refuses an empty topic, group or broker list. The retry topic has to
 differ from the work topic, the dead-letter topic from both, and the attempt
 topic from the other three. `delivery_timeout` runs from 1ms to about 24.8
 days. One `rdkafka:` map configures all seven of the feed's clients, and it
-refuses each property any of them owns.
+refuses each property any of them owns. While `tls.root_ca` is set, it also refuses
+`ssl.ca.location`, `ssl.ca.pem`, `ssl.ca.certificate.stores` and
+`enable.ssl.certificate.verification`, and `security.protocol` has to be `ssl`
+or `sasl_ssl`.
 
 The
 [Kafka feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka#configuration)
@@ -271,7 +283,7 @@ states when a worker ends the job.
   comes from librdkafka's statistics and has no other input. See the
   [source's configuration](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#configuration).
 - Without `kafka-tls`, each role refuses a TLS or SASL property in its
-  `rdkafka:` map at load. See
+  `rdkafka:` map, and a `tls.root_ca`, at load. See
   [Security](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#security-tls-mtls-sasl).
 - A non-empty `sasl.password` with `security.protocol: sasl_plaintext` loads,
   and logs one warning that the credential is sent without TLS. See

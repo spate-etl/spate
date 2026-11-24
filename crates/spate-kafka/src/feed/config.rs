@@ -3,6 +3,8 @@
 use crate::client::{Base, Keys, Role, TAG, check_message_timeout};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, SectionPath, redact};
+use spate_core::feed::ConnectError;
+use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -226,6 +228,8 @@ struct Body {
     statistics_interval: Duration,
     #[serde(default)]
     rdkafka: BTreeMap<String, String>,
+    #[serde(default)]
+    tls: TlsSection,
     /// Read only to refuse it with a pointer to the section key.
     #[serde(default)]
     attempt_cap: Option<serde::de::IgnoredAny>,
@@ -256,6 +260,13 @@ pub(crate) struct KafkaFeedConfig {
     pub(crate) statistics_interval: Duration,
     /// Raw librdkafka properties for every feed client.
     pub(crate) rdkafka: BTreeMap<String, String>,
+    /// The roots every feed client verifies brokers against: the system
+    /// roots, and the certificates in `root_ca` beside them.
+    pub(crate) tls: TlsSection,
+    /// The bundle `tls.root_ca` builds, read once by
+    /// [`connecting`](Self::connecting) for every client the feed or the
+    /// publisher creates. `None` before then, and without `root_ca`.
+    pub(crate) ca_pem: Option<String>,
     /// The attempt at which a unit moves to the dead-letter topic: a unit
     /// failed on this attempt or later, or a unit whose recorded attempts
     /// have reached it, unread. From the section's `attempt_cap`.
@@ -276,6 +287,8 @@ impl std::fmt::Debug for KafkaFeedConfig {
             delivery_timeout,
             statistics_interval,
             rdkafka,
+            tls,
+            ca_pem,
             attempt_cap,
         } = self;
         f.debug_struct("KafkaFeedConfig")
@@ -288,6 +301,8 @@ impl std::fmt::Debug for KafkaFeedConfig {
             .field("delivery_timeout", delivery_timeout)
             .field("statistics_interval", statistics_interval)
             .field("rdkafka", &redact::map(rdkafka.keys()))
+            .field("tls", tls)
+            .field("ca_pem_bytes", &ca_pem.as_deref().map(str::len))
             .field("attempt_cap", attempt_cap)
             .finish()
     }
@@ -313,10 +328,34 @@ impl KafkaFeedConfig {
             delivery_timeout: body.delivery_timeout,
             statistics_interval: body.statistics_interval,
             rdkafka: body.rdkafka,
+            tls: body.tls,
+            ca_pem: None,
             attempt_cap: section.attempt_cap_or_default(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// [`from_section`](Self::from_section), with the bundle `tls.root_ca`
+    /// builds, for a feed or publisher about to create its clients.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_section`](Self::from_section), and
+    /// [`ConnectError::Config`] at `feed.kafka.tls.root_ca` when `root_ca`
+    /// cannot be read.
+    pub(crate) fn connecting(section: &FeedSection) -> Result<KafkaFeedConfig, ConnectError> {
+        Self::from_section(section)?.resolve(crate::security::ca_bundle)
+    }
+
+    /// This config with the bundle `bundle` builds from its `tls`.
+    fn resolve(
+        mut self,
+        bundle: impl FnOnce(&TlsSection) -> Result<Option<String>, String>,
+    ) -> Result<KafkaFeedConfig, ConnectError> {
+        self.ca_pem = bundle(&self.tls)
+            .map_err(|why| SectionPath::feed(BACKEND).invalid("tls.root_ca", why))?;
+        Ok(self)
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
@@ -368,7 +407,7 @@ impl KafkaFeedConfig {
         if let Err(refusal) = self.base(false).denied(&roles) {
             return Err(at.error(refusal.to_string()));
         }
-        crate::security::check_tls_feature(&self.rdkafka, &at)
+        crate::security::check_tls_feature(&self.rdkafka, &self.tls, &at)
     }
 
     /// What the feed's clients share with every Kafka client.
@@ -383,6 +422,8 @@ impl KafkaFeedConfig {
             rdkafka: &self.rdkafka,
             statistics_interval: self.statistics_interval,
             openssl_env,
+            root_ca: self.tls.root_ca.is_some(),
+            ca_pem: self.ca_pem.as_deref(),
         }
     }
 
@@ -406,6 +447,35 @@ mod tests {
                            topic: units\n  retry_topic: units-retry\n  \
                            dead_letter_topic: units-dead\n  \
                            attempt_topic: units-attempts\n";
+
+    /// The bundle a feed resolves reaches every role's client as
+    /// `ssl.ca.pem`, and a bundle that cannot be built is a config error at
+    /// `feed.kafka.tls.root_ca`.
+    #[test]
+    fn every_feed_role_takes_the_resolved_bundle() {
+        const BUNDLE: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        let mut config = KafkaFeedConfig::from_section(&section(MINIMAL)).unwrap();
+        config.tls.root_ca = Some("/etc/spate/private-ca.pem".into());
+        let refused = config
+            .clone()
+            .resolve(|_| Err("unreadable".to_owned()))
+            .unwrap_err();
+        assert!(matches!(refused, ConnectError::Config(_)), "{refused}");
+        assert_eq!(refused.to_string(), "feed.kafka.tls.root_ca: unreadable");
+        let config = config
+            .resolve(|tls| {
+                assert_eq!(tls.root_ca, Some("/etc/spate/private-ca.pem".into()));
+                Ok(Some(BUNDLE.to_owned()))
+            })
+            .unwrap();
+        for role in FeedRole::ALL {
+            assert_eq!(
+                config.config(role, false).get("ssl.ca.pem"),
+                Some(BUNDLE),
+                "{role:?}"
+            );
+        }
+    }
 
     fn section(yaml: &str) -> FeedSection {
         serde_yaml::from_str(yaml).unwrap()

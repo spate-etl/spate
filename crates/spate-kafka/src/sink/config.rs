@@ -42,6 +42,7 @@ use spate_core::clock::tokio::{Clock as IoClock, SystemClock as IoSystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
 use spate_core::deser::{Owned, RecFamily};
 use spate_core::sink::{SinkBundle, SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe};
+use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
@@ -225,11 +226,21 @@ pub struct KafkaSinkConfig {
     /// the connector guide) are rejected; batching knobs like `linger.ms`
     /// and `batch.num.messages` may be tuned here. With the `tls` feature and
     /// vendored OpenSSL, a map naming neither `ssl.ca.location` nor
-    /// `ssl.ca.pem` gets `ssl.ca.location: probe` unless `SSL_CERT_FILE` or
-    /// `SSL_CERT_DIR` is set; a build linked against the system OpenSSL keeps
-    /// librdkafka's native CA default.
+    /// `ssl.ca.pem`, in a section without `tls.root_ca`, gets
+    /// `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is
+    /// set; a build linked against the system OpenSSL keeps librdkafka's
+    /// native CA default.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
+    /// The roots the producers verify brokers against. Certificates in
+    /// `root_ca` are trusted in addition to the system trust store, which
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` replace when set. `root_ca` needs
+    /// the `tls` feature and `rdkafka."security.protocol"` set to `ssl` or
+    /// `sasl_ssl`. While it is set, `rdkafka` may not name `ssl.ca.location`,
+    /// `ssl.ca.pem`, `ssl.ca.certificate.stores` or
+    /// `enable.ssl.certificate.verification`.
+    #[serde(default)]
+    pub tls: TlsSection,
 }
 
 // Hand-written: the `rdkafka` map carries credentials. The destructure lists
@@ -245,6 +256,7 @@ impl std::fmt::Debug for KafkaSinkConfig {
             statistics_interval,
             compression,
             rdkafka,
+            tls,
         } = self;
         f.debug_struct("KafkaSinkConfig")
             .field("brokers", brokers)
@@ -255,6 +267,7 @@ impl std::fmt::Debug for KafkaSinkConfig {
             .field("statistics_interval", statistics_interval)
             .field("compression", compression)
             .field("rdkafka", &redact::map(rdkafka.keys()))
+            .field("tls", tls)
             .finish()
     }
 }
@@ -273,6 +286,7 @@ impl KafkaSinkConfig {
             statistics_interval: default_statistics_interval(),
             compression: None,
             rdkafka: BTreeMap::new(),
+            tls: TlsSection::default(),
         }
     }
 
@@ -347,7 +361,7 @@ impl KafkaSinkConfig {
         if let Err(refusal) = self.base(false).denied(&roles) {
             return Err(at.error(refusal.to_string()));
         }
-        crate::security::check_tls_feature(&self.rdkafka, at)?;
+        crate::security::check_tls_feature(&self.rdkafka, &self.tls, at)?;
         if self.compression.is_some() {
             for key in self.rdkafka.keys() {
                 if canonical(key) == "compression.codec" {
@@ -386,6 +400,8 @@ impl KafkaSinkConfig {
             rdkafka: &self.rdkafka,
             statistics_interval: self.statistics_interval,
             openssl_env,
+            root_ca: self.tls.root_ca.is_some(),
+            ca_pem: None,
         }
     }
 
@@ -487,6 +503,9 @@ impl KafkaSink {
     /// creation, so a passthrough that conflicts with the forced durability
     /// settings fails at startup here rather than on the first batch.
     ///
+    /// With `tls.root_ca` set, it first reads the system trust store and the
+    /// file, on the calling thread.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -500,8 +519,9 @@ impl KafkaSink {
     /// # Errors
     ///
     /// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a
-    /// configuration rule, or when librdkafka refuses to create the producer or
-    /// the probe producer.
+    /// configuration rule, when `tls.root_ca` cannot be read or holds no
+    /// certificate, or when librdkafka refuses to create the producer or the
+    /// probe producer.
     pub fn new(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         build_on(
             cfg,
@@ -574,7 +594,11 @@ fn build_on(
     // fills it) to the main producer's context (whose `stats` callback
     // publishes through it).
     let stats_slot = Arc::new(Mutex::new(None));
-    let base = cfg.base(crate::security::openssl_env_overrides());
+    let ca_pem =
+        crate::security::ca_bundle(&cfg.tls).map_err(|why| at.invalid("tls.root_ca", why))?;
+    let base = cfg
+        .base(crate::security::openssl_env_overrides())
+        .trusting(ca_pem.as_deref());
     let producer: ThreadedProducer<SinkContext> = base
         .create(
             &Producer {
@@ -653,6 +677,29 @@ mod tests {
                 .collect::<String>()
         ))
         .expect("loads")
+    }
+
+    /// A `tls.root_ca` the sink cannot read, missing or holding no
+    /// certificate, is refused at the entry's key with core's reason, before
+    /// any producer is built.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn an_unreadable_root_ca_in_a_sinks_entry_names_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_pem = dir.path().join("not.pem");
+        std::fs::write(&not_pem, "not a certificate").unwrap();
+        for root_ca in [dir.path().join("missing.pem"), not_pem] {
+            let cfg = sinks_entry(&format!(
+                "{}  rdkafka:\n    security.protocol: ssl\n  tls:\n    root_ca: {}\n",
+                minimal(),
+                root_ca.display()
+            ));
+            let section = cfg.sink_config("eu").expect("declared");
+            let msg = refusal(KafkaSink::from_component_config(section).map(drop));
+            assert!(msg.starts_with("sinks.eu.kafka.tls.root_ca: "), "{msg}");
+            let name = root_ca.file_name().unwrap().to_str().unwrap();
+            assert!(msg.contains(name), "{msg}");
+        }
     }
 
     /// An owned passthrough key in a `sinks:` entry is refused at the entry.

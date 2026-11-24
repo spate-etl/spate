@@ -7,7 +7,10 @@ description: "Connectors load TLS trust roots through spate_core::tls, with no f
 - **Status:** accepted
 - **Date:** 2026-11-15
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0110](0110-kafka-takes-trust-roots-through-core-tls-section.md),
+  for the whole module behind `tls-roots` and a Kafka-only build compiling
+  none of it
 
 ## Context and problem statement
 

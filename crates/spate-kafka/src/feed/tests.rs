@@ -986,6 +986,42 @@ fn a_publisher_refuses_the_section_a_worker_refuses() {
     assert_eq!(worker.to_string(), publisher.to_string());
 }
 
+/// A `tls.root_ca` the feed cannot read, missing or holding no certificate,
+/// refuses the worker and the publisher as a config error at the key, with
+/// core's reason, before either builds a client.
+#[cfg(feature = "tls")]
+#[test]
+fn an_unreadable_root_ca_refuses_the_worker_and_the_publisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_pem = dir.path().join("not.pem");
+    std::fs::write(&not_pem, "not a certificate").unwrap();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    for root_ca in [dir.path().join("missing.pem"), not_pem] {
+        let section: FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  rdkafka:\n    security.protocol: ssl\n  \
+             tls:\n    root_ca: {}\n",
+            root_ca.display()
+        ))
+        .unwrap();
+        let name = root_ca.file_name().unwrap().to_str().unwrap();
+        for err in [
+            KafkaFeed::connect(&section, io.handle()).unwrap_err(),
+            KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err(),
+        ] {
+            assert!(matches!(err, ConnectError::Config(_)), "{err}");
+            let msg = err.to_string();
+            assert!(msg.contains("feed.kafka.tls.root_ca: "), "{msg}");
+            assert!(msg.contains(name), "{msg}");
+        }
+    }
+}
+
 /// Buffer one unit of partition 0 for `feed`'s reader.
 fn buffer_one(feed: &KafkaFeed) {
     let mut st = feed.core.lock();

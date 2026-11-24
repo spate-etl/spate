@@ -761,7 +761,7 @@ mod tests {
         let all = "cargo nextest run --profile docker --workspace --all-features --locked \
                    --run-ignored ignored-only";
         let broker = "not ((package(spate-kafka) & (binary(feed_notifications) \
-                      | binary(tls_system_ca))) | (package(spate) & binary(e2e_leader_move)))";
+                      | binary(tls_system_ca) | binary(tls_root_ca))) | (package(spate) & binary(e2e_leader_move)))";
         assert_eq!(
             super::integration_test(&[Capability::Notifications], false).display(),
             format!("{all} -E '{broker}'")

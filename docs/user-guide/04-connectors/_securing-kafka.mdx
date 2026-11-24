@@ -10,13 +10,14 @@ The bundled librdkafka is built **without TLS/SASL by default**, so connecting
 to a secured cluster needs the opt-in **`kafka-tls`** feature. The feature
 builds OpenSSL from vendored sources, which adds to the
 [toolchain requirements](../01-getting-started/01-installation.mdx#toolchain-requirements).
-Once enabled,
-every security property is set through the connector's raw `rdkafka:`
-passthrough; these keys are **not** on the denylist, and the configuration is
-identical for every Kafka connector. Setting any security
-property **without** the feature fails fast at config load with an actionable
-message rather than an obscure runtime error. Every `rdkafka:` value renders
-`<redacted>` in the config's `Debug` output; the keys stay visible.
+Once enabled, every security property is set through the connector's raw
+`rdkafka:` passthrough, and the configuration is identical for every Kafka
+connector. A private CA can also go in the typed `tls.root_ca` key. The security
+keys are **not** on the denylist, except the four CA keys listed below, which
+are refused while `tls.root_ca` is set. Setting any security property or
+`tls.root_ca` **without** the feature fails fast at config load with an
+actionable message rather than an obscure runtime error. Every `rdkafka:` value
+renders `<redacted>` in the config's `Debug` output; the keys stay visible.
 
 ```toml
 # Cargo.toml
@@ -32,11 +33,32 @@ not at all):
 ```yaml
 rdkafka:
   security.protocol: ssl
-  ssl.ca.location: /etc/kafka/ca.pem   # omit to use the system trust store
+tls:
+  root_ca: /etc/kafka/ca.pem   # omit to use the system trust store alone
 ```
 
-Without `ssl.ca.location` or `ssl.ca.pem`, the CA default depends on which
-OpenSSL the build links:
+`tls.root_ca` names a PEM file of CA certificates the connector trusts in
+addition to the system roots, as the S3, SQS and ClickHouse connectors do. It
+needs `security.protocol` set to `ssl` or `sasl_ssl`, and a section that sets
+it with any other protocol, or none, is refused at load. The connector reads
+the system roots and the file when the source opens, and when the sink, the
+feed and the feed publisher are built or connect. It passes both to librdkafka
+as `ssl.ca.pem`. A file it cannot read, or one that holds no certificate,
+fails that step with an error at `tls.root_ca`.
+
+With `tls.root_ca` set, the system roots come from the store the other
+connectors read, where `SSL_CERT_FILE` and `SSL_CERT_DIR` replace the
+platform's. Without it, librdkafka finds the system roots through OpenSSL as
+described below, so the two sets can differ.
+
+While `tls.root_ca` is set, `rdkafka:` may not hold `ssl.ca.location`,
+`ssl.ca.pem`, `ssl.ca.certificate.stores` or
+`enable.ssl.certificate.verification`. To trust a CA in a hashed certificate
+directory, leave `tls.root_ca` unset and name the directory in
+`ssl.ca.location`.
+
+Without `tls.root_ca`, `ssl.ca.location` or `ssl.ca.pem`, the CA default
+depends on which OpenSSL the build links:
 
 - **Vendored OpenSSL**, the `kafka-tls` default: the connector sets
   `ssl.ca.location: probe`. On Linux and BSD, librdkafka then loads the first
@@ -65,10 +87,11 @@ pipeline by certificate instead of (or alongside) SASL:
 ```yaml
 rdkafka:
   security.protocol: ssl
-  ssl.ca.location: /etc/kafka/ca.pem
   ssl.certificate.location: /etc/kafka/client.pem
   ssl.key.location: /etc/kafka/client.key
   ssl.key.password: "${KAFKA_KEY_PASSWORD}"   # only if the key is encrypted
+tls:
+  root_ca: /etc/kafka/ca.pem
 ```
 
 A PKCS#12 keystore works too (`ssl.keystore.location` + `ssl.keystore.password`)
@@ -85,7 +108,8 @@ rdkafka:
   sasl.mechanism: SCRAM-SHA-256          # or SCRAM-SHA-512, or PLAIN
   sasl.username: "${KAFKA_USER}"
   sasl.password: "${KAFKA_PASSWORD}"
-  ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
+tls:
+  root_ca: /etc/kafka/ca.pem             # for the TLS side of sasl_ssl
 ```
 
 A non-empty `sasl.password` with `security.protocol: sasl_plaintext`, the
@@ -118,7 +142,9 @@ of:
 
 - a broker certificate the client fails to verify. The reason reads
   `certificate verify failed` whether the CA is untrusted, the name does not
-  match or the certificate has expired by the client's clock.
+  match or the certificate has expired by the client's clock. librdkafka's
+  text then says to check `ssl.ca.location`. With `tls.root_ca` set, add the
+  issuing CA to that file or to the system trust store instead.
 - a TLS alert listed in `spate::error::TLS_REJECTION_ALERTS`, with which the
   broker rejects the handshake. The reason carries the alert's name and
   number, such as `handshake failure` (`SSL alert number 40`), which a TLS 1.2

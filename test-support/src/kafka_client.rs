@@ -851,6 +851,37 @@ mod tests {
     }
 
     #[test]
+    fn a_read_again_answers_past_a_refusal_with_the_offset_and_the_high_mark() {
+        let (holder, brokers) = mock_with("units", 1);
+        let producer = producer(&brokers).unwrap();
+        for payload in ["one", "two"] {
+            send(
+                &producer,
+                BaseRecord::<(), _>::to("units")
+                    .partition(0)
+                    .payload(payload),
+                Instant::now() + HANG,
+            )
+            .unwrap();
+        }
+        producer.flush(HANG).unwrap();
+        let reader = consumer(&brokers, &[("group.id", "again")]).unwrap();
+        let mut at = TopicPartitionList::new();
+        at.add_partition_offset("units", 0, Offset::Offset(3))
+            .unwrap();
+        reader.commit(&at, CommitMode::Sync).unwrap();
+        holder.client().mock_cluster().unwrap().request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        assert_eq!(
+            committed_offsets(&reader, "units", 1, HANG),
+            Ok(vec![Offset::Offset(3)])
+        );
+        assert_eq!(high_watermark(&reader, "units", 0, HANG), Ok(2));
+    }
+
+    #[test]
     fn a_watermark_read_returns_the_high_mark_or_the_error() {
         let (_holder, brokers) = mock_with("units", 1);
         let producer = producer(&brokers).unwrap();

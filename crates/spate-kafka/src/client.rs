@@ -261,7 +261,16 @@ pub(crate) struct Base<'a> {
     /// caller. On Linux, cargo exports both to every process it runs, so a
     /// test passes the value instead of reading it.
     pub(crate) openssl_env: bool,
+    /// Whether the section sets `tls.root_ca`, which owns librdkafka's CA
+    /// properties.
+    pub(crate) root_ca: bool,
+    /// The bundle `tls.root_ca` builds, set as `ssl.ca.pem`. `None` where no
+    /// client is built, as in validation.
+    pub(crate) ca_pem: Option<&'a str>,
 }
+
+/// Why the passthrough may not name a CA property while `tls.root_ca` is set.
+const ROOT_CA_CONFLICT: &str = "conflicts with the typed `tls.root_ca` field; set one, not both";
 
 // Hand-written: the `rdkafka` map carries credentials. The destructure lists
 // every field so a new one cannot reach `Debug` unredacted.
@@ -273,6 +282,8 @@ impl fmt::Debug for Base<'_> {
             rdkafka,
             statistics_interval,
             openssl_env,
+            root_ca,
+            ca_pem,
         } = self;
         f.debug_struct("Base")
             .field("section", section)
@@ -280,11 +291,19 @@ impl fmt::Debug for Base<'_> {
             .field("rdkafka", &redact::map(rdkafka.keys()))
             .field("statistics_interval", statistics_interval)
             .field("openssl_env", openssl_env)
+            .field("root_ca", root_ca)
+            .field("ca_pem_bytes", &ca_pem.map(str::len))
             .finish()
     }
 }
 
-impl Base<'_> {
+impl<'a> Base<'a> {
+    /// This base with `ca_pem`, the bundle the section's `tls.root_ca`
+    /// built, for each client it creates.
+    pub(crate) fn trusting(self, ca_pem: Option<&'a str>) -> Self {
+        Base { ca_pem, ..self }
+    }
+
     fn declare(&self, keys: &mut Keys<'_>, role: &dyn Role) {
         keys.own(
             "bootstrap.servers",
@@ -303,6 +322,21 @@ impl Base<'_> {
             || self.statistics_interval.as_millis().to_string(),
             "owned by the typed `statistics_interval` field",
         );
+        if self.root_ca {
+            keys.own_if(
+                self.ca_pem.is_some(),
+                "ssl.ca.pem",
+                || self.ca_pem.unwrap_or_default().to_owned(),
+                ROOT_CA_CONFLICT,
+            );
+            for key in [
+                "ssl.ca.location",
+                "ssl.ca.certificate.stores",
+                "enable.ssl.certificate.verification",
+            ] {
+                keys.forbid(key, ROOT_CA_CONFLICT);
+            }
+        }
         role.declare(keys);
     }
 
@@ -318,7 +352,7 @@ impl Base<'_> {
         for (k, v) in self.rdkafka {
             cc.set(k, v);
         }
-        crate::security::apply_ca_default(&mut cc, self.rdkafka, self.openssl_env);
+        crate::security::apply_ca_default(&mut cc, self.rdkafka, self.root_ca, self.openssl_env);
         // librdkafka reads an empty value as unset and sends `rdkafka`.
         let passed = self.rdkafka.get("client.id").filter(|v| !v.is_empty());
         let id = match (passed, role.instance()) {
@@ -1235,6 +1269,14 @@ mod tests {
                 .collect()
         }
 
+        /// Set `tls.root_ca` in every section.
+        fn set_root_ca(&mut self) {
+            let root_ca = Some(std::path::PathBuf::from("/etc/spate/private-ca.pem"));
+            self.source.tls.root_ca.clone_from(&root_ca);
+            self.sink.tls.root_ca.clone_from(&root_ca);
+            self.feed.tls.root_ca = root_ca;
+        }
+
         fn validate(&self, section: Section) -> Result<(), ConfigError> {
             match section {
                 Section::Source => self.source.validate(),
@@ -1665,7 +1707,147 @@ mod tests {
         }
     }
 
-    /// `Debug` on a base shows every passthrough key and none of the values.
+    /// A PEM bundle as an entry builds it from `tls.root_ca`.
+    const BUNDLE: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
+    /// With `tls.root_ca` set, every role's client takes the entry's bundle as
+    /// `ssl.ca.pem` and gets no `ssl.ca.location`, the `probe` default
+    /// included. A base with no bundle, as validation builds, sets neither.
+    #[test]
+    fn every_role_takes_the_root_ca_bundle() {
+        let mut sections = Sections::over(&BTreeMap::new());
+        sections.set_root_ca();
+        for (_, base, role) in sections.roles(false) {
+            let label = format!("{}-{}", base.section, role.name());
+            let unbuilt = base.config(&*role);
+            assert_eq!(unbuilt.get("ssl.ca.pem"), None, "{label}");
+            assert_eq!(unbuilt.get("ssl.ca.location"), None, "{label}");
+            let built = base.trusting(Some(BUNDLE)).config(&*role);
+            assert_eq!(built.get("ssl.ca.pem"), Some(BUNDLE), "{label}");
+            assert_eq!(built.get("ssl.ca.location"), None, "{label}");
+        }
+    }
+
+    /// While `tls.root_ca` is set, the passthrough may not name a CA property
+    /// or turn certificate verification off, under any spelling. Without it,
+    /// it may.
+    #[test]
+    fn root_ca_refuses_the_passthrough_ca_keys() {
+        for key in [
+            "ssl.ca.location",
+            "ssl.ca.pem",
+            "ssl.ca.certificate.stores",
+            "enable.ssl.certificate.verification",
+        ] {
+            for spelling in spellings(key) {
+                let mut sections = Sections::over(&map(&[(&spelling, "x")]));
+                for (_, base, role) in sections.roles(false) {
+                    let label = format!("{}-{} {spelling}", base.section, role.name());
+                    assert!(base.denied(&[&*role]).is_ok(), "{label}");
+                }
+                sections.set_root_ca();
+                for (_, base, role) in sections.roles(false) {
+                    let label = format!("{}-{} {spelling}", base.section, role.name());
+                    let err = base.denied(&[&*role]).expect_err(&label).to_string();
+                    assert!(
+                        err.starts_with(&format!(
+                            "rdkafka.\"{spelling}\" cannot be overridden: conflicts with the \
+                             typed `tls.root_ca` field; set one, not both"
+                        )),
+                        "{label}: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Each section loaded from YAML with `tls.root_ca` and, when given,
+    /// `security.protocol`, through its own loader, with the path its errors
+    /// start at: `source.kafka`, the sink component's own path (`kafka`
+    /// here), and `feed.kafka`.
+    fn load_with_root_ca(protocol: Option<&str>) -> [(&'static str, Result<(), ConfigError>); 3] {
+        let mut extra = "  tls:\n    root_ca: /etc/spate/private-ca.pem\n".to_owned();
+        if let Some(protocol) = protocol {
+            extra.push_str(&format!(
+                "  rdkafka:\n    security.protocol: \"{protocol}\"\n"
+            ));
+        }
+        let source = spate_test::component_config(
+            "kafka",
+            &format!("  brokers: localhost:9092\n  topic: orders\n  group_id: spate\n{extra}"),
+        );
+        let sink = spate_test::component_config(
+            "kafka",
+            &format!("  brokers: localhost:9092\n  topic: orders\n{extra}"),
+        );
+        let feed: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n{extra}"
+        ))
+        .unwrap();
+        [
+            (
+                "source.kafka",
+                KafkaSourceConfig::from_component_config(&source).map(drop),
+            ),
+            (
+                "kafka",
+                KafkaSinkConfig::from_component_config(&sink).map(drop),
+            ),
+            ("feed.kafka", KafkaFeedConfig::from_section(&feed).map(drop)),
+        ]
+    }
+
+    /// `tls.root_ca` loads only under `ssl` or `sasl_ssl`, which librdkafka
+    /// reads after leading whitespace and in any case, and is refused at the
+    /// key under any other protocol or none.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn root_ca_needs_a_protocol_that_verifies_the_broker() {
+        for protocol in [
+            None,
+            Some("plaintext"),
+            Some("sasl_plaintext"),
+            Some(" PLAINTEXT"),
+        ] {
+            for (path, loaded) in load_with_root_ca(protocol) {
+                let msg = loaded
+                    .expect_err(&format!("{path} {protocol:?}"))
+                    .to_string();
+                assert!(
+                    msg.starts_with(&format!(
+                        "{path}.tls.root_ca: needs rdkafka.\"security.protocol\" set to ssl \
+                         or sasl_ssl"
+                    )),
+                    "{protocol:?}: {msg}"
+                );
+            }
+        }
+        for protocol in ["ssl", "SASL_SSL", " ssl", "sasl_ssl"] {
+            for (path, loaded) in load_with_root_ca(Some(protocol)) {
+                loaded.unwrap_or_else(|e| panic!("{path} {protocol:?}: {e}"));
+            }
+        }
+    }
+
+    /// Without the `tls` feature, `tls.root_ca` is refused at the key with
+    /// the rebuild instruction, in every section.
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn root_ca_needs_the_tls_feature() {
+        for (path, loaded) in load_with_root_ca(None) {
+            let msg = loaded.expect_err(path).to_string();
+            assert!(
+                msg.starts_with(&format!("{path}.tls.root_ca: requests TLS/SASL")),
+                "{msg}"
+            );
+            assert!(msg.contains("kafka-tls"), "{msg}");
+        }
+    }
+
+    /// `Debug` on a base shows every passthrough key and none of the values,
+    /// and the CA bundle's length and none of its text.
     #[test]
     fn base_debug_never_prints_passthrough_values() {
         let rdkafka = map(&[
@@ -1681,11 +1863,15 @@ mod tests {
             rdkafka: &rdkafka,
             statistics_interval: Duration::from_secs(5),
             openssl_env: false,
+            root_ca: true,
+            ca_pem: Some("-----BEGIN CERTIFICATE-----\nMIIB\n"),
         };
         let printed = format!("{base:?}");
         assert!(!printed.contains("PRIVATE-KEY"), "{printed}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("\"ssl.key.pem\": <redacted>"), "{printed}");
+        assert!(!printed.contains("MIIB"), "{printed}");
+        assert!(printed.contains("ca_pem_bytes: Some(33)"), "{printed}");
     }
 
     /// Pins that building a TLS client leaves OpenSSL's exit handler

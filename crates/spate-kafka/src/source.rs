@@ -2057,13 +2057,18 @@ impl Source for KafkaSource {
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
+        let ca_pem = crate::security::ca_bundle(&self.config.tls).map_err(|why| {
+            let at = SectionPath::source(crate::client::TAG);
+            SourceError::fatal(at.invalid("tls.root_ca", why).to_string())
+        })?;
+        let base = self
+            .config
+            .base(crate::security::openssl_env_overrides())
+            .trusting(ca_pem.as_deref());
         // Every consumer has the one `rdkafka` passthrough, so the first one's
         // bound is each one's.
         let first = crate::config::Consumer::member(&self.config, 0);
-        let cc = self
-            .config
-            .base(crate::security::openssl_env_overrides())
-            .config(&first);
+        let cc = base.config(&first);
         self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
         self.misplaced_limit = if crate::client::fetches_from_followers(&cc) {
             Duration::ZERO
@@ -2091,9 +2096,7 @@ impl Source for KafkaSource {
                     )
                 })
             };
-            let consumer: BaseConsumer<SourceContext> = self
-                .config
-                .base(crate::security::openssl_env_overrides())
+            let consumer: BaseConsumer<SourceContext> = base
                 .create(&role, SourceHooks::default())
                 .map_err(|reason| SourceError::fatal(format!("create consumer: {reason}")))?;
             consumer
@@ -2466,6 +2469,7 @@ mod tests {
                 "auto.offset.reset".to_string(),
                 "earliest".to_string(),
             )]),
+            tls: spate_core::tls::TlsSection::default(),
         }
     }
 
@@ -2492,6 +2496,35 @@ mod tests {
                 .to_string();
             assert!(msg.contains("kafka-tls"), "actionable: {msg}");
             assert!(msg.contains("source.kafka.rdkafka"), "scoped: {msg}");
+        }
+    }
+
+    /// A `tls.root_ca` the source cannot read, missing or holding no
+    /// certificate, fails `open` at the key with core's reason, as a fatal
+    /// error, before any consumer is built.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn open_refuses_an_unreadable_root_ca_at_the_key() {
+        use spate_core::checkpoint::Checkpointer;
+        let dir = tempfile::tempdir().unwrap();
+        let not_pem = dir.path().join("not.pem");
+        std::fs::write(&not_pem, "not a certificate").unwrap();
+        for root_ca in [dir.path().join("missing.pem"), not_pem] {
+            let mut config = test_config();
+            config
+                .rdkafka
+                .insert("security.protocol".into(), "ssl".into());
+            config.tls.root_ca = Some(root_ca.clone());
+            let mut source = KafkaSource::new(config).expect("the config validates");
+            let cp = Checkpointer::new();
+            let err = source
+                .open(SourceCtx::new(cp.handle()))
+                .expect_err("the bundle cannot be built");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+            let msg = err.to_string();
+            assert!(msg.contains("source.kafka.tls.root_ca: "), "{msg}");
+            let name = root_ca.file_name().unwrap().to_str().unwrap();
+            assert!(msg.contains(name), "{msg}");
         }
     }
 

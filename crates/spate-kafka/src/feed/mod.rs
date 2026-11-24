@@ -715,7 +715,7 @@ impl KafkaFeed {
         bound: Duration,
         clock: SyncClock,
     ) -> Result<KafkaFeed, ConnectError> {
-        let config = KafkaFeedConfig::from_section(section)?;
+        let config = KafkaFeedConfig::connecting(section)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
             &spate_core::config::SectionPath::feed(BACKEND),

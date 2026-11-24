@@ -123,7 +123,7 @@ impl KafkaFeedPublisher {
         scope: startup::Scope,
         bound: Duration,
     ) -> Result<KafkaFeedPublisher, ConnectError> {
-        let config = KafkaFeedConfig::from_section(section)?;
+        let config = KafkaFeedConfig::connecting(section)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
             &spate_core::config::SectionPath::feed(BACKEND),

@@ -63,10 +63,10 @@ rejection site in the pipeline thread calls `on_queue_rejected`, and every
 completed push or flush calls `on_push_done`.
 
 The per-shard reading was measured beside the count. It paused less on one arm
-and as often on the others, and neither changed the rate. A slow shard limits every pipeline thread through seal-order parking either
-way, and both readings then pause at once, because that shard is full and its
-worker waits for a permit. The count is one atomic where the per-shard reading
-is one per shard.
+and as often on the others, and neither changed the rate. A slow shard limits
+every pipeline thread through seal-order parking either way, and both readings
+then pause at once, because that shard is full and its worker waits for a
+permit. The count is one atomic where the per-shard reading is one per shard.
 
 A wait of `min_pause` on every queue rejection was rejected because it also
 delays the pause when the sink is the limit. A new key was rejected for the
@@ -83,7 +83,7 @@ leave a source unpaused behind a worker that has stopped taking chunks.
   as before, so a saturated sink still stops the source client's prefetch.
 - Bad, because the queue still fills. Pipeline threads retry where they used to
   pause, on a fixed 2 ms sleep, so `spate_queue_full_events_total` counts each
-  retry and rises five to nineteen times under contention. Issue #2395 tracks the
+  retry and rose five to 150 times on the measured arms. Issue #2395 tracks the
   retry cadence.
 - Bad, because every thread runs where some used to sit paused, and on the
   measured host each row then cost 1% to 31% more CPU cycles for the same
@@ -134,7 +134,8 @@ windows per leg, base against the landed code. Process CPU is
 - `spate_queue_full_events_total` rose from about 25,000 to 236,000–287,000
   per window on the first arm, and from 27,000–33,000 to 152,000–184,000 on
   the third.
-- Instructions retired per settled row stayed within 1% of base on every arm.
+- Instructions retired per settled row stayed at most 1% above base on every
+  arm.
   Cycles per row rose 1% to 31%, because instructions
   per cycle fell while every thread ran unpaused. On the third arm the process
   used 6.1 to 6.7 cores against 5.5 to 5.6 for the same rows. Base loses
@@ -147,7 +148,8 @@ windows per leg, base against the landed code. Process CPU is
 
 ## More information
 
-- Landed in the pull request that added `WatermarkController::on_queue_rejected`.
+- Landed in the pull request that added
+  `WatermarkController::on_queue_rejected`.
 - ADR-0107 is the first decision to wait `min_pause` before a pause, and the
   reason given there applies here.
 - The behavior is described in

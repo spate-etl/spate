@@ -135,12 +135,14 @@ worked through in
 the budget's **low watermark** (default `low_ratio` 0.5) has to hold
 everything the sink legitimately keeps in flight.
 
-The pending-writes term (`shards × max_per_shard × batch.max_bytes`) dominates.
-If the budget is smaller, the source is paused for backpressure **before** the
-sink's writers are even full; you would be throttling yourself below the sink's
-real capacity, and a saturated pipeline duty-cycles against `min_pause`. Size it
-to satisfy the rule with headroom; the cost is memory, since the budget is a RAM
-ceiling the host must have.
+At the default queue size, the pending-writes term
+(`shards × max_per_shard × batch.max_bytes`) dominates. A queue raised to stop
+pauses (see [Queues](../../../05-deployment/tuning.mdx#queues)) can match it. If
+the budget is smaller than the rule asks, the source is paused for backpressure
+**before** the sink's writers are even full; you would be throttling yourself
+below the sink's real capacity, and a saturated pipeline duty-cycles against
+`min_pause`. Size it to satisfy the rule with headroom; the cost is memory,
+since the budget is a RAM ceiling the host must have.
 
 ## Checkpoint pending limit
 

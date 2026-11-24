@@ -164,19 +164,21 @@ is being duty-cycled.
 
 ## What backpressure looks like when it engages
 
-Sustained `spate_backpressure_paused == 1` means the sink can't
-keep up (a capacity problem: add replicas or shards, or tune batching),
-or the budget is undersized as above. Paused lanes translate into a growing
-backlog at the source, visible as `sum(spate_source_lag_records)` for
-sources that publish lag. That is the correct, bounded failure mode: data
-waits at the source, not in process memory.
+Sustained `spate_backpressure_paused == 1` means the sink can't keep up (a
+capacity problem: add replicas or shards, or tune batching), the budget is
+undersized as above, or a shard's queue is too shallow for the rate it takes
+(`spate_queue_full_events_total` climbing while `spate_sink_inflight_batches`
+stays below the cap, see [Queues](../05-deployment/tuning.mdx#queues)). Paused
+lanes translate into a growing backlog at the source, visible as
+`sum(spate_source_lag_records)` for sources that publish lag. That is the
+correct, bounded failure mode: data waits at the source, not in process memory.
 
 ## Further reading
 
 - [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — why one shard
   dispatches several sealed batches at once, which is the term that dominates
-  the sizing rule, and why a shard whose writes are parked back-pressures the
-  source instead of shedding load.
+  the sizing rule at the default queue size, and why a shard whose writes are
+  parked back-pressures the source instead of shedding load.
 - [Architecture](01-architecture.mdx) — where the queues and budget sit in
   the process.
 - [Monitoring](../05-deployment/monitoring.mdx) — alerting on pressure

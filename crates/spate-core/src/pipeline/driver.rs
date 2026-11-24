@@ -1251,10 +1251,26 @@ mod tests {
     /// thread asked for a pause.
     fn one_rejection_pauses(site: Site, gated: bool) -> bool {
         let (mode, idle_flush, lane) = match site {
-            Site::DriveBatch => (ChainMode::BlockOnce(AtomicBool::new(false)), AN_HOUR, Some(1)),
-            Site::FlushNow => (ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)), AN_HOUR, None),
-            Site::FlushUntil => (ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)), AN_HOUR, Some(0)),
-            Site::IdleFlush => (ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)), IDLE, None),
+            Site::DriveBatch => (
+                ChainMode::BlockOnce(AtomicBool::new(false)),
+                AN_HOUR,
+                Some(1),
+            ),
+            Site::FlushNow => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                AN_HOUR,
+                None,
+            ),
+            Site::FlushUntil => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                AN_HOUR,
+                Some(0),
+            ),
+            Site::IdleFlush => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                IDLE,
+                None,
+            ),
         };
         let mut paused = false;
         with_driver(mode, AN_HOUR, idle_flush, lane, |d| {
@@ -1358,7 +1374,8 @@ mod tests {
             |d| {
                 let start = std::time::Instant::now();
                 wait_until(HANG, "batches over four minimum pauses", || {
-                    start.elapsed() >= MIN_PAUSE * 4 && d.shared.consumed.load(Ordering::Relaxed) >= 4
+                    start.elapsed() >= MIN_PAUSE * 4
+                        && d.shared.consumed.load(Ordering::Relaxed) >= 4
                 });
                 assert!(!d.paused());
             },
@@ -1369,7 +1386,11 @@ mod tests {
     /// rejected more than `min_pause` after the first rejection. The completed
     /// flush ended the first run, so the thread does not pause.
     fn a_completed_flush_ends_the_run(site: Site) {
-        let idle_flush = if matches!(site, Site::IdleFlush) { IDLE } else { AN_HOUR };
+        let idle_flush = if matches!(site, Site::IdleFlush) {
+            IDLE
+        } else {
+            AN_HOUR
+        };
         let lane = matches!(site, Site::FlushUntil).then_some(0);
         with_driver(
             ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),

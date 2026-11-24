@@ -308,9 +308,9 @@ impl<C: Clock> WatermarkController<C> {
             State::Normal => {
                 // A span, so a lone rejection followed by a quiet source does
                 // not pause the thread long after.
-                let contended = self
-                    .contended
-                    .is_some_and(|(first, last)| last.duration_since(first) >= self.params.min_pause);
+                let contended = self.contended.is_some_and(|(first, last)| {
+                    last.duration_since(first) >= self.params.min_pause
+                });
                 if self.rejected || contended || budget.usage() >= self.params.high_bytes {
                     self.rejected = false;
                     self.contended = None;

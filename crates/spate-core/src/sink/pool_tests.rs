@@ -1033,14 +1033,19 @@ async fn a_batch_waiting_for_a_permit_counts_its_shard_as_gated() {
     };
     cfg.inflight.max_per_shard = 1;
     let f = fixture(1, 1, cfg, 16);
-    f.writer.script(0, 0, [Outcome::Write(Duration::from_secs(10))]);
+    f.writer
+        .script(0, 0, [Outcome::Write(Duration::from_secs(10))]);
 
     let (ack, ack_rx) = AckRef::test_pair();
     // A: seals on max_bytes and holds the only permit for 10 s.
     f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
     f.budget.add(32);
     tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(f.budget.gated_shards(), 0, "a write in flight, none waiting");
+    assert_eq!(
+        f.budget.gated_shards(),
+        0,
+        "a write in flight, none waiting"
+    );
     // B: seals with no permit free and waits.
     f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
     f.budget.add(32);
@@ -1070,7 +1075,8 @@ async fn writes_with_permits_to_spare_leave_the_shard_ungated() {
     let mut cfg = small_batches();
     cfg.inflight.max_per_shard = 4;
     let f = fixture(1, 1, cfg, 16);
-    f.writer.set_default(Outcome::Write(Duration::from_secs(10)));
+    f.writer
+        .set_default(Outcome::Write(Duration::from_secs(10)));
 
     let (ack, _ack_rx) = AckRef::test_pair();
     for sent in 1..=3 {

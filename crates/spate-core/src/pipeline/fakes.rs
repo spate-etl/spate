@@ -705,7 +705,9 @@ impl RunnableChain for FakeChain {
                     reason: BlockReason::Capacity,
                 };
             }
-            ChainMode::BlockEveryOtherPush(blocked) if !blocked.fetch_xor(true, Ordering::Relaxed) => {
+            ChainMode::BlockEveryOtherPush(blocked)
+                if !blocked.fetch_xor(true, Ordering::Relaxed) =>
+            {
                 return PushOutcome::Blocked {
                     resume_at: from,
                     reason: BlockReason::Capacity,
@@ -745,8 +747,7 @@ impl RunnableChain for FakeChain {
     fn flush(&mut self) -> PushOutcome {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
-        let every_other =
-            matches!(&self.mode, ChainMode::BlockEveryOtherFlush(blocked) if !blocked.fetch_xor(true, Ordering::Relaxed));
+        let every_other = matches!(&self.mode, ChainMode::BlockEveryOtherFlush(blocked) if !blocked.fetch_xor(true, Ordering::Relaxed));
         if every_other || matches!(self.mode, ChainMode::FlushBlocked) {
             return PushOutcome::Blocked {
                 resume_at: 0,

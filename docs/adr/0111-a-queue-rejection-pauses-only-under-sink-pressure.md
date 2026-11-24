@@ -62,8 +62,8 @@ spans `min_pause`. `WatermarkController::on_push_done` ends the run. Every
 rejection site in the pipeline thread calls `on_queue_rejected`, and every
 completed push or flush calls `on_push_done`.
 
-The per-shard reading was measured beside the count and paused no less on any
-arm. A slow shard limits every pipeline thread through seal-order parking either
+The per-shard reading was measured beside the count. It paused less on one arm
+and as often on the others, and neither changed the rate. A slow shard limits every pipeline thread through seal-order parking either
 way, and both readings then pause at once, because that shard is full and its
 worker waits for a permit. The count is one atomic where the per-shard reading
 is one per shard.
@@ -82,8 +82,12 @@ leave a source unpaused behind a worker that has stopped taking chunks.
 - Good, because a rejection while a shard waits for a permit pauses at once,
   as before, so a saturated sink still stops the source client's prefetch.
 - Bad, because the queue still fills. Pipeline threads retry where they used to
-  pause, so `spate_queue_full_events_total` counts each retry and rises about
-  tenfold under contention. A deeper queue still removes most of the retries.
+  pause, on a fixed 2 ms sleep, so `spate_queue_full_events_total` counts each
+  retry and rises five to nineteen times under contention. Issue #2395 tracks the
+  retry cadence.
+- Bad, because every thread runs where some used to sit paused, and on the
+  measured host each row then cost 1% to 31% more CPU cycles for the same
+  instructions.
 - Bad, because the count is per pipeline. One waiting shard in any sink makes
   every rejection sink pressure, so a fan-out with one slow sink pauses at once
   as before.
@@ -111,26 +115,35 @@ after it).
 ## Evidence
 
 Measured by a queue benchmark rig this repository does not carry, on one
-18-core host under load from other processes, against a prototype of the chosen
-option and, in the second set, a prototype of the per-shard reading. The
-prototypes differ from the landed code in where the rejection is classed and in
-which sites call the new methods. Every arm used 512 KiB queues and made every
-twentieth write four times slower. Figures are per 20-second window, for two
-windows.
+18-core host (6 Super and 12 Performance cores) under load from other
+processes. Every arm used 512 KiB queues, 32 pipeline threads, and made every
+twentieth write four times slower. Figures are per 20-second window, for three
+windows per leg, base against the landed code. Process CPU is
+`/usr/bin/time -l` over the whole run, divided by the rows it settled.
 
-- 8 shards, 32 pipeline threads, 1 ms writes, `min_pause` 50 ms, offered
-  118.7M rows/s: 9,133 and 9,331 pauses at 92.0M and 101.2M rows/s
-  before, 37 and 2 pauses at 112.4M and 118.6M rows/s with the count.
-- 32 shards, 32 pipeline threads, 4 write permits per shard, 16 ms writes at
-  500 MB/s, `min_pause` 50 ms, offered 89.7M rows/s: 6,268 and 6,531 pauses before, 443
-  and 1,075 with the count, 426 and 141 with the per-shard reading. All three
-  held the offered rate.
-- A sink saturated at 8 shards and 32 threads, with 16 ms writes at 500 MB/s
-  and `min_pause` 500 ms: the source
-  was paused 97% to 99% of thread time before and 94% to 96% with the count.
-- `spate_queue_full_events_total` rose from about 25,000 to 250,000–286,000 per
-  window on the first arm, and from about 32,000 to 168,000–217,000 on the
-second.
+- 8 shards, 1 ms writes, `min_pause` 50 ms, offered 118.7M rows/s: 8,972 to
+  9,262 pauses at 103.4M to 106.1M rows/s before, none at 118.6M rows/s after.
+- 1 shard, 1 ms writes, `min_pause` 500 ms, offered 48.4M rows/s: 1,211 to
+  1,223 pauses at 35.0M to 39.5M rows/s before, none at 48.4M rows/s after.
+- 32 shards, 4 write permits per shard, 16 ms writes at 500 MB/s, `min_pause`
+  50 ms, offered 89.7M rows/s: 5,951 to 6,414 pauses before, 128 to 355 after.
+  Both held the offered rate.
+- A sink saturated at 8 shards, with 16 ms writes at 500 MB/s and `min_pause`
+  500 ms: the source was paused 96% to 98% of thread time before and 94% to
+  96% after.
+- `spate_queue_full_events_total` rose from about 25,000 to 236,000–287,000
+  per window on the first arm, and from 27,000–33,000 to 152,000–184,000 on
+  the third.
+- Instructions retired per settled row stayed within 1% of base on every arm.
+  Cycles per row rose 1% to 31%, because instructions
+  per cycle fell while every thread ran unpaused. On the third arm the process
+  used 6.1 to 6.7 cores against 5.5 to 5.6 for the same rows. Base loses
+  instructions per cycle the same way when its queues are made deeper. The
+  rig does not separate cache and memory contention from the host's two core
+  types.
+- A prototype of the per-shard reading, measured beside a prototype of the
+  count on the third arm, paused 141 to 426 times per window against 443 to
+  1,075 for the count's prototype, and neither changed the rate.
 
 ## More information
 

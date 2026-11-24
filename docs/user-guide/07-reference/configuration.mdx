@@ -98,7 +98,7 @@ sink batch settings.
 | `max_inflight_bytes` | bytes | `256MiB` | Global cap on bytes admitted into the pipeline but not yet durably written. Must be `> 0`. |
 | `high_ratio` | float | `0.8` | Fraction of the budget at which sources are paused. |
 | `low_ratio` | float | `0.5` | Fraction of the budget below which sources may resume. Ratios must satisfy `0 < low_ratio < high_ratio <= 1`. |
-| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. Also how long a partition stays at `checkpoint.max_pending_batches` before its lanes are paused at the source: `0s` pauses them at once, and a longer value leaves the source fetching for that long. |
+| `min_pause` | duration | `500ms` | Minimum pause before resuming — avoids flapping, since resuming a paused lane is not free for every source. Also how long a partition stays at `checkpoint.max_pending_batches` before its lanes are paused at the source: `0s` pauses them at once, and a longer value leaves the source fetching for that long. Also how long shard-queue rejections last, with no push or flush completing, before they pause the source while no shard waits for a write permit. |
 
 ## `admin:`
 

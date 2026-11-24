@@ -322,10 +322,19 @@ Set it per sink in YAML as `sink.queue.max_bytes`, or per branch as
 the queue holds a number of chunks: `max_bytes: 8MiB` at 64 KiB chunks is 128
 chunks.
 
-A full queue rejects the chunk, and the rejection pauses the source whatever the
-in-flight budget reads. `spate_queue_full_events_total` counts the rejections.
-So a queue that is too shallow pauses the source even when the sink keeps up and
-the budget has room.
+A full queue rejects the chunk, and `spate_queue_full_events_total` counts the
+rejection. What the rejection does depends on the shard worker:
+
+- If a worker holds a sealed batch and waits for an `inflight.max_per_shard`
+  slot, the sink is the limit. The rejection pauses the source whatever the
+  in-flight budget reads.
+- If every worker can take work, the pipeline thread retries the chunk and
+  keeps reading. The source pauses only once rejections have lasted
+  `backpressure.min_pause` with no push or flush completing.
+
+So a queue too shallow for bursts fills and counts rejections while the source
+keeps reading, and a queue too shallow to ride out slow writes pauses the
+source.
 
 The default stays at 8 chunks because a shallow queue fails in the direction
 that is easier to diagnose: it under-uses a fast sink, where a deep queue can
@@ -396,11 +405,15 @@ full queue has three causes, and they read differently:
 - **Permits idle.** `spate_sink_inflight_batches` stays below
   `inflight.max_per_shard` and `spate_sink_permit_wait_duration_seconds` stays
   near zero. The shard worker is not taking chunks off the queue as fast as
-  bursts arrive, so the sink waits for work while the source pauses. Raise
-  `queue.max_bytes`; at high rates across many threads the same measurements
-  needed 128 to 256 MiB. When `spate_pipeline_io_busy_ratio` stays above 0.9,
-  raise `pipeline.io_threads` first, as the
-  [starting alerts](../../METRICS.md#alerting-starting-points) say.
+  bursts arrive. The pipeline threads retry the rejected chunks, so the source
+  keeps reading while the counter climbs. Raise `queue.max_bytes` to cut the
+  retries; at high rates across many threads, 128 to 256 MiB stopped the
+  rejections in the same measurements. When `spate_pipeline_io_busy_ratio`
+  stays above 0.9, raise `pipeline.io_threads` first, as the
+  [starting alerts](../../METRICS.md#alerting-starting-points) say. If the
+  source also pauses here, a worker has stopped taking chunks, since a retried
+  rejection pauses only after `backpressure.min_pause` with no push
+  completing.
 - **Permits busy, store keeping up on average.** In-flight batches sit at the
   cap and permit wait rises. Yet the shard's rate stays well below
   `inflight.max_per_shard` times the mean batch size (`spate_sink_batch_bytes`)

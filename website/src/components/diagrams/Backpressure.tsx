@@ -115,8 +115,9 @@ export default function BackpressureDiagram(): React.JSX.Element {
       draw={draw}
       steps={[
         <>
-          A full shard queue refuses <code>try_send</code>, or the in-flight byte budget crosses its
-          high watermark.
+          A full shard queue refuses <code>try_send</code> while a shard waits for a write permit, or the
+          in-flight byte budget crosses its high watermark. A queue refused while every shard can take
+          work is retried, and counts here only once refusals have lasted <code>min_pause</code>.
         </>,
         <>The pipeline thread sends a pause request for its lanes to the controller. It never blocks on a channel send.</>,
         <>

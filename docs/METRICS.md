@@ -231,7 +231,7 @@ Queues are labeled by edge: `queue` = `<upstream>-><downstream>` (e.g.
 |---|---|---|---|
 | `spate_queue_depth` | gauge | `queue` | Chunks currently queued, sampled by the senders on each send and by the shard worker after each intake pass. Two writers set it, so a reading can trail the channel by one write until the next send or intake pass. While a sealed batch waits for an `inflight.max_per_shard` slot the worker reads nothing, and the gauge holds the senders' sample, typically `capacity`. A closed queue keeps its last reading through the shutdown drain. The live resume decision uses the channel directly, not this gauge. |
 | `spate_queue_capacity` | gauge | `queue` | The queue's bound in chunks: the sink's `queue.max_bytes` divided by its `chunk.target_bytes`, rounded up, or 8 when `queue.max_bytes` is unset. |
-| `spate_queue_full_events_total` | counter | `queue` | `try_send` rejections (each is a backpressure signal, never a block). A rejected chunk is parked and retried once per poll cycle while blocked, and every retry that still finds the queue full counts again — so during a sustained stall this tracks retry cadence, not distinct fill episodes. |
+| `spate_queue_full_events_total` | counter | `queue` | `try_send` rejections, never a block. A rejection pauses the source at once while a shard waits for an `inflight.max_per_shard` slot, and otherwise only once rejections have lasted `backpressure.min_pause` with no push or flush completing. A rejected chunk is parked and retried once per poll cycle while blocked, and every retry that still finds the queue full counts again — so during a sustained stall this tracks retry cadence, not distinct fill episodes. |
 
 ## Backpressure (`spate_backpressure_*`)
 
@@ -433,8 +433,9 @@ Configured on the exporter, by name suffix or full name:
   plus the longest sink `batch.linger` plus the write, so keep the threshold
   above that.
 - `spate_backpressure_paused == 1` sustained — the sink cannot keep up, or a
-  shard queue is too shallow for its rate. `spate_queue_full_events_total`
-  rising with `spate_sink_inflight_batches` below the cap points at the queue
+  shard queue is too shallow to ride out slow writes. Pauses with
+  `spate_queue_full_events_total` rising and `spate_sink_inflight_batches`
+  below the cap point at a shard worker that has stopped taking chunks
   ([Queues](user-guide/05-deployment/tuning.mdx#queues)).
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before

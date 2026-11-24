@@ -92,7 +92,7 @@ metric_names! {
 
         // Queues.
 
-        /// `try_send` rejections (each is a backpressure signal, never a block).
+        /// `try_send` rejections, never a block.
         QUEUE_FULL_EVENTS_TOTAL = "spate_queue_full_events_total",
 
         // Backpressure.

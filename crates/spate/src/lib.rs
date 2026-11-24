@@ -41,7 +41,7 @@
 //!  std thread         │ lane.poll → deserialize (borrowed) → operator │──try_send──▶ per-shard
 //!  (× N)              │ chain (map/filter/flat_map, monomorphized)    │             bounded queues
 //!                     └───────────────────────────────────────────────┘                  │
-//!                          ▲          full? pause lanes, keep polling                    ▼
+//!                          ▲          sink full? pause lanes, keep polling               ▼
 //!                          │                                            ┌───────────────────────────┐
 //!                     ┌──────────┐   acks (never block)                 │ sink workers: merge chunks,│
 //!                     │ source   │◀───────────────────────────────────── │ seal batches, rotate       │

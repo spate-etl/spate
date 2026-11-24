@@ -301,6 +301,10 @@ pub struct BackpressureSection {
     /// [`CheckpointSection::max_pending_batches`] before its lanes are paused
     /// at the source. Zero pauses them as soon as the partition reaches the
     /// ceiling, and a longer value leaves the source fetching for that long.
+    ///
+    /// Also how long shard-queue rejections last, with no push or flush
+    /// completing, before they pause the source while no shard waits for a
+    /// write permit.
     #[serde(with = "humantime_serde")]
     pub min_pause: Duration,
 }

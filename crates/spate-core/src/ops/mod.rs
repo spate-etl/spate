@@ -142,7 +142,10 @@ use crate::source::PayloadBatch;
 #[non_exhaustive]
 pub enum BlockReason {
     /// The terminal stage could not accept more output (a shard queue is
-    /// full). This is sink backpressure.
+    /// full). The driver records it with
+    /// [`WatermarkController::on_queue_rejected`](crate::backpressure::WatermarkController::on_queue_rejected),
+    /// which reads it as sink backpressure while a shard waits for a write
+    /// permit.
     Capacity,
     /// A deserializer reported
     /// [`DeserError::NotReady`](crate::error::DeserError::NotReady): the

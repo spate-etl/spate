@@ -219,6 +219,36 @@ impl Drop for Ledger {
     }
 }
 
+/// This worker's place in the budget's count of shards that wait for a write
+/// permit. `Drop` takes it back, so a worker aborted or unwinding from a panic
+/// leaves no shard counted.
+struct GateShare {
+    budget: Arc<InflightBudget>,
+    counted: bool,
+}
+
+impl GateShare {
+    /// Count or uncount this shard. Touches the shared count only on a change,
+    /// since the intake loop calls it on every pass.
+    fn set(&mut self, gated: bool) {
+        if gated == self.counted {
+            return;
+        }
+        if gated {
+            self.budget.gate_shard();
+        } else {
+            self.budget.ungate_shard();
+        }
+        self.counted = gated;
+    }
+}
+
+impl Drop for GateShare {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
 impl<W: ShardWriter> ShardWorker<W> {
     pub(crate) async fn run(mut self) -> WorkerReport {
         let mut acc = Accumulator::new();
@@ -259,7 +289,14 @@ impl<W: ShardWriter> ShardWorker<W> {
         // The armed linger sleep, kept across intake passes so a lingering
         // batch boxes a single sleep.
         let mut linger: Option<(Instant, Sleep)> = None;
+        let mut gate = GateShare {
+            budget: Arc::clone(&self.budget),
+            counted: false,
+        };
         loop {
+            // A sealed batch with no permit stops intake, which is the state a
+            // queue rejection must read as sink pressure.
+            gate.set(!waiting.is_empty());
             let linger_at = acc
                 .first_at
                 .map(|t| deadline_after(t, self.cfg.batch.linger));
@@ -315,6 +352,9 @@ impl<W: ShardWriter> ShardWorker<W> {
                 }
             }
         }
+
+        // Intake has stopped, so a rejection from here on is no sink pressure.
+        gate.set(false);
 
         // ---- Drain (see graceful-shutdown.mdx) ----
         // The queue may still hold chunks the drivers handed over, closed but

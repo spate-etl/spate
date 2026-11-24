@@ -267,6 +267,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                             deadline,
                             &*stop_clock,
                             &mut bp,
+                            &budget,
                             &events,
                             &health,
                             params.thread,
@@ -283,8 +284,11 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     // instead of waiting out a full `idle_flush` lull. Held
                     // acks pin partition watermarks under sustained load.
                     match chain.flush() {
-                        PushOutcome::Done => flushed_since_data = true,
-                        PushOutcome::Blocked { .. } => bp.on_send_rejected(),
+                        PushOutcome::Done => {
+                            flushed_since_data = true;
+                            bp.on_push_done();
+                        }
+                        PushOutcome::Blocked { .. } => bp.on_queue_rejected(&budget),
                         PushOutcome::Fatal(error) => {
                             let _ = events.send(DriverEvent::Fatal {
                                 thread: params.thread,
@@ -307,6 +311,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         deadline,
                         &*stop_clock,
                         &mut bp,
+                        &budget,
                         &events,
                         &health,
                         params.thread,
@@ -346,6 +351,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                 &mut flushed_since_data,
                 params.idle_flush,
                 &mut bp,
+                &budget,
                 &events,
                 params.thread,
             );
@@ -417,6 +423,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     &mut flushed_since_data,
                     params.idle_flush,
                     &mut bp,
+                    &budget,
                     &events,
                     params.thread,
                 );
@@ -486,6 +493,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         &mut flushed_since_data,
                         params.idle_flush,
                         &mut bp,
+                        &budget,
                         &events,
                         params.thread,
                     );
@@ -689,8 +697,10 @@ fn park_until_shutdown<L: SourceLane>(
 /// resume cursor until the batch completes.
 ///
 /// The batch borrows the lane's buffers, so the retry loop must hold it.
-/// While blocked, the loop keeps ticking the backpressure controller (raising
-/// a pause request the first time), heartbeats, and sleeps briefly. The
+/// While blocked, the loop records each rejection with the backpressure
+/// controller and ticks it, heartbeats, and sleeps briefly. A rejection
+/// raises a pause request at once while a shard worker waits for a write
+/// permit, and otherwise once rejections have lasted `min_pause`. The
 /// never-block invariant is about channel sends; deferring this thread's
 /// *next* poll is what backpressure does.
 #[expect(
@@ -719,7 +729,10 @@ fn drive_batch(
         health.heartbeat(params.thread);
         let pushed = std::panic::catch_unwind(AssertUnwindSafe(|| chain.push_batch(batch, from)));
         match pushed {
-            Ok(PushOutcome::Done) => return Ok(()),
+            Ok(PushOutcome::Done) => {
+                bp.on_push_done();
+                return Ok(());
+            }
             Ok(PushOutcome::Blocked { resume_at, reason }) => {
                 debug_assert!(resume_at >= from, "resume cursor must not go backwards");
                 from = resume_at;
@@ -741,7 +754,7 @@ fn drive_batch(
                 // Only sink pressure engages the backpressure controller; a
                 // not-ready wait is counted by the chain and retried.
                 if reason == BlockReason::Capacity {
-                    bp.on_send_rejected();
+                    bp.on_queue_rejected(budget);
                     let queues_low = || queues_below_low(queues, params.queue_low_ratio);
                     if let Some(t) = bp.tick(budget, queues_low) {
                         apply_transition(t, owned(), events, bp_metrics, pause_started);
@@ -806,11 +819,16 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
 /// A flush still blocked at the deadline is abandoned. The terminal
 /// stage's Drop contract fails any parked acknowledgments, so abandoned
 /// data replays instead of being committed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint driver-state borrows"
+)]
 fn flush_until(
     chain: &mut dyn RunnableChain,
     deadline: Instant,
     stop_clock: &dyn Clock,
     bp: &mut WatermarkController,
+    budget: &InflightBudget,
     events: &crossbeam_channel::Sender<DriverEvent>,
     health: &HealthState,
     thread: usize,
@@ -818,9 +836,12 @@ fn flush_until(
     loop {
         health.heartbeat(thread);
         match chain.flush() {
-            PushOutcome::Done => return,
+            PushOutcome::Done => {
+                bp.on_push_done();
+                return;
+            }
             PushOutcome::Blocked { .. } => {
-                bp.on_send_rejected();
+                bp.on_queue_rejected(budget);
                 if stop_clock.now() >= deadline {
                     tracing::error!(
                         thread,
@@ -841,12 +862,17 @@ fn flush_until(
 
 /// Flush partial terminal state once per data lull, once `quiet_for` since
 /// the last data reaches `after`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint driver-state borrows"
+)]
 fn idle_flush(
     chain: &mut dyn RunnableChain,
     quiet_for: Duration,
     flushed_since_data: &mut bool,
     after: Duration,
     bp: &mut WatermarkController,
+    budget: &InflightBudget,
     events: &crossbeam_channel::Sender<DriverEvent>,
     thread: usize,
 ) {
@@ -854,11 +880,14 @@ fn idle_flush(
         return;
     }
     match chain.flush() {
-        PushOutcome::Done => *flushed_since_data = true,
+        PushOutcome::Done => {
+            *flushed_since_data = true;
+            bp.on_push_done();
+        }
         PushOutcome::Blocked { .. } => {
-            // Full queues while idle: note the rejection; the main-loop tick
-            // raises the pause request and the flush retries next lull.
-            bp.on_send_rejected();
+            // Full queues while idle: record the rejection for the main-loop
+            // tick, and retry the flush on the next pass.
+            bp.on_queue_rejected(budget);
         }
         PushOutcome::Fatal(error) => {
             let _ = events.send(DriverEvent::Fatal { thread, error });

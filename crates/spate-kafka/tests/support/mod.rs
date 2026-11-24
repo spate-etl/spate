@@ -1092,3 +1092,19 @@ pub(crate) fn await_lag_series(
         |series| series.len() == partitions,
     )
 }
+
+/// A cluster holding one record, `one`, on partition 0 of a one-partition
+/// `topic`, whose next Fetch is refused, and its bootstrap servers. The
+/// refusal reaches a poll as an error, and the client fetches again after its
+/// fetch backoff.
+pub(crate) fn refused_fetch(topic: &str) -> (MockKafka, String) {
+    let cluster = MockKafka::new();
+    let brokers = cluster.bootstrap_servers();
+    cluster.create_topic(topic, 1, 1).expect("create topic");
+    produce_payload(&brokers, topic, 0, b"one");
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::Fetch,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
+    );
+    (cluster, brokers)
+}

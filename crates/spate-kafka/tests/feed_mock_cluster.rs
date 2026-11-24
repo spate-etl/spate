@@ -720,7 +720,7 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
     publish(&a.feed, Unit::new("u1", b"x".to_vec()));
     let _ = a.take("the first delivery");
     cluster.request_errors(
-        rdkafka::types::RDKafkaApiKey::OffsetFetch,
+        RDKafkaApiKey::OffsetFetch,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 200],
     );
     // A second member forces a rebalance, so A looks up its offsets again.
@@ -1848,7 +1848,7 @@ fn a_feed_fenced_on_its_stop_commit_still_drops() {
 /// returns the record the next Fetch brings.
 #[test]
 fn a_read_the_broker_refuses_once_is_read_again() {
-    let (_cluster, brokers) = support::mock::refused_fetch(WORK);
+    let (_cluster, brokers) = support::refused_fetch(WORK);
     let read = read_topic(&brokers, WORK, 1);
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].payload.as_deref(), Some(&b"one"[..]));

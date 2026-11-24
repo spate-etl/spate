@@ -721,7 +721,7 @@ fn a_full_queue_backs_off_from_10ms_to_250ms_for_each_message() {
 /// returns the record the next Fetch brings.
 #[test]
 fn a_consume_the_broker_refuses_once_is_read_again() {
-    let (_cluster, brokers) = support::mock::refused_fetch("refused");
+    let (_cluster, brokers) = support::refused_fetch("refused");
     let group = spate_test::unique_name("refused");
     let read = consume(&brokers, "refused", &group, 1, |message| {
         Some(Read::of(message))

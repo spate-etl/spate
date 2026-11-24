@@ -1,9 +1,8 @@
 //! What a test does to a broker through a Kafka client: create topics and
 //! wait until the broker lists them, produce records, and read a group's
 //! committed offsets, a partition's high watermark, a topic's partition count
-//! or a topic from its start. Each offset, watermark and partition-count
-//! reader has a `_once` form that makes one call, for a caller whose own wait
-//! reads again.
+//! or a topic from its start. A reader named `_once` makes one call, for a
+//! caller whose own wait reads again.
 
 use std::time::{Duration, Instant};
 
@@ -20,8 +19,8 @@ use rdkafka::{Offset, TopicPartitionList};
 pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The longest one offset or watermark request waits before it is sent
-/// again, and the bound of a `_once` read. A broker can drop a request while
-/// a coordinator or leader moves.
+/// again, and the bound of a `_once` offset or watermark read. A broker can
+/// drop a request while a coordinator or leader moves.
 const READ_EVERY: Duration = Duration::from_secs(10);
 
 /// How long [`send`] serves delivery reports before it asks a full queue

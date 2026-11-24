@@ -12,10 +12,11 @@ builds OpenSSL from vendored sources, which adds to the
 [toolchain requirements](../01-getting-started/01-installation.mdx#toolchain-requirements).
 Once enabled,
 every security property is set through the connector's raw `rdkafka:`
-passthrough; these keys are **not** on the denylist, and the configuration is
-identical for every Kafka connector. A private CA can also go in the typed
-`tls.root_ca` key. Setting any security property or `tls.root_ca`
-**without** the feature fails fast at config load with an actionable
+passthrough, and the configuration is identical for every Kafka connector. A
+private CA can also go in the typed `tls.root_ca` key. The security keys are
+**not** on the denylist, except the four CA keys listed below, which are
+refused while `tls.root_ca` is set. Setting any security property or
+`tls.root_ca` **without** the feature fails fast at config load with an actionable
 message rather than an obscure runtime error. Every `rdkafka:` value renders
 `<redacted>` in the config's `Debug` output; the keys stay visible.
 
@@ -142,7 +143,9 @@ of:
 
 - a broker certificate the client fails to verify. The reason reads
   `certificate verify failed` whether the CA is untrusted, the name does not
-  match or the certificate has expired by the client's clock.
+  match or the certificate has expired by the client's clock. librdkafka's
+  text then says to check `ssl.ca.location`. With `tls.root_ca` set, add the
+  issuing CA to that file or to the system trust store instead.
 - a TLS alert listed in `spate::error::TLS_REJECTION_ALERTS`, with which the
   broker rejects the handshake. The reason carries the alert's name and
   number, such as `handshake failure` (`SSL alert number 40`), which a TLS 1.2

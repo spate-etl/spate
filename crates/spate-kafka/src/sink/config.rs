@@ -503,6 +503,9 @@ impl KafkaSink {
     /// creation, so a passthrough that conflicts with the forced durability
     /// settings fails at startup here rather than on the first batch.
     ///
+    /// With `tls.root_ca` set, it first reads the system trust store and the
+    /// file, on the calling thread.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -516,8 +519,9 @@ impl KafkaSink {
     /// # Errors
     ///
     /// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a
-    /// configuration rule, or when librdkafka refuses to create the producer or
-    /// the probe producer.
+    /// configuration rule, when `tls.root_ca` cannot be read or holds no
+    /// certificate, or when librdkafka refuses to create the producer or the
+    /// probe producer.
     pub fn new(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         build_on(
             cfg,

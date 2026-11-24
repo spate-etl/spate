@@ -65,7 +65,7 @@ impl KafkaFeedPublisher {
     ///
     /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), less the
     /// failure to start the feed's own threads: [`ConnectError::Config`] for a section the feed
-    /// cannot read, [`ConnectError::Refused`] for a client configuration
+    /// cannot read or a `tls.root_ca` it cannot read, [`ConnectError::Refused`] for a client configuration
     /// librdkafka refuses, a rejected credential or TLS handshake, a refused
     /// topic read and topics the feed cannot run on, and
     /// [`ConnectError::Unavailable`] when a read of the topics fails

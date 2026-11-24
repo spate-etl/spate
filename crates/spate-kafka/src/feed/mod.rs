@@ -605,11 +605,13 @@ impl KafkaFeed {
     /// retry or dead-letter topic, an attempt topic that is not compacted
     /// only, or a work topic not stamped with `LogAppendTime`, fails here. The
     /// checks take at most 30 seconds. The feed itself runs on threads of its
-    /// own.
+    /// own. With `tls.root_ca` set, connecting first reads the system trust
+    /// store and the file, on the calling thread.
     ///
     /// # Errors
     ///
-    /// [`ConnectError::Config`] for a section the feed cannot read.
+    /// [`ConnectError::Config`] for a section the feed cannot read, and for a
+    /// `tls.root_ca` that cannot be read or holds no certificate.
     /// [`ConnectError::Refused`] when librdkafka refuses the client
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the

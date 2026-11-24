@@ -1,5 +1,6 @@
-//! Pipeline runtime: pinned driver threads, the source controller, and
-//! process assembly.
+//! Pipeline runtime: driver threads, the source controller, and process
+//! assembly. Driver threads run unpinned unless `pipeline.pinning` is
+//! [`compact`](crate::config::PinningMode::Compact).
 //!
 //! Thread anatomy:
 //!

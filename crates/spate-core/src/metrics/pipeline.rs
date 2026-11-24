@@ -107,7 +107,7 @@ impl PipelineMetrics {
         });
     }
 
-    /// Publish the pinned pipeline thread count.
+    /// Publish the pipeline thread count.
     pub fn set_threads(&self, threads: usize) {
         self.threads.set(threads as f64);
     }

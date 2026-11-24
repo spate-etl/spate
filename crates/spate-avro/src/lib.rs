@@ -15,7 +15,7 @@
 //! yet reports "not ready": the operator chain holds the batch (the
 //! source is paused by backpressure if needed) and replays the payload
 //! once the fetch lands. Records are never dropped or duplicated, and
-//! the CPU-pinned pipeline threads never perform I/O. Ids the registry
+//! the pipeline threads never perform I/O. Ids the registry
 //! cannot serve are negatively cached (with a TTL) and handled by the
 //! deserializer's `ErrorPolicy` like any other poison payload. The cache
 //! holds at most 1,024 compiled schemas and an estimated 64 MiB of them, and

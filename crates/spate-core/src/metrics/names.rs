@@ -234,7 +234,7 @@ metric_names! {
         PIPELINE_INFO = "spate_pipeline_info",
         /// 1 for the current state, 0 otherwise, by [`L_STATE`].
         PIPELINE_STATE = "spate_pipeline_state",
-        /// Pinned pipeline thread count.
+        /// Pipeline thread count.
         PIPELINE_THREADS = "spate_pipeline_threads",
         /// Mean busy fraction of the I/O runtime's async workers over the
         /// trailing 5 minutes (since start while shorter), 0 to 1.

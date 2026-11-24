@@ -360,7 +360,7 @@ struct Shared {
 /// `Arc` under one brief read lock. Hot-path callers go one step further and
 /// hold a [`CacheSnapshot`] memo (see [`SchemaCache::lookup`]) so a repeated,
 /// already-`Ready` id costs *zero* shared-lock acquisitions. A read lock per
-/// payload would ping-pong the lock's cache line across pinned pipeline
+/// payload would ping-pong the lock's cache line across pipeline
 /// threads. Kept std-only on purpose (no
 /// `arc-swap` dependency): a plain `RwLock<Arc<..>>` is enough because
 /// writes are rare and the memo removes reads from the shared path.

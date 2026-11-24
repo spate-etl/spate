@@ -174,7 +174,7 @@ pub struct PipelineConfig {
 pub struct PipelineSection {
     /// Pipeline name; the `pipeline` label on every metric.
     pub name: String,
-    /// Pinned pipeline thread count. `None` derives it at startup from
+    /// Pipeline thread count. `None` derives it at startup from
     /// `available_parallelism`, minus one core for every two `io_threads`
     /// (rounded up) and one for the controller, at least 1.
     #[serde(default)]

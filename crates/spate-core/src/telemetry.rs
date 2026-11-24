@@ -21,8 +21,8 @@
 //!
 //! # Rate limiting on the hot path
 //!
-//! A poison-message storm that logs per record will destroy the pinned
-//! pipeline threads. Hot-path warnings must go through a [`RateLimit`],
+//! A poison-message storm that logs per record will destroy the pipeline
+//! threads. Hot-path warnings must go through a [`RateLimit`],
 //! most conveniently via [`rate_limited_warn!`](crate::rate_limited_warn):
 //!
 //! ```
@@ -182,8 +182,8 @@ struct RateLimitState {
 ///
 /// `const`-constructible, so a call site can hold one in a `static`. A
 /// component on an injected clock owns one instead and passes its readings
-/// to [`check_at`](Self::check_at). Under a poison storm every pinned
-/// pipeline thread hits the *same* limiter once per failing record,
+/// to [`check_at`](Self::check_at). Under a poison storm every pipeline
+/// thread hits the *same* limiter once per failing record,
 /// so the exact-accounting mutex is contended. To keep steady-state
 /// suppression off the shared lock, a relaxed-atomic fast path
 /// short-circuits while the window stays saturated: a single relaxed load

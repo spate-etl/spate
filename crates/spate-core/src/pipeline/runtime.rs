@@ -1060,7 +1060,7 @@ fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
 /// Set the shutdown flag, tell every driver thread to stop within a bounded
 /// drain barrier, and join them. Shared by the startup-error paths and the
 /// controller-death path so an early failure or a controller panic never
-/// leaves running pinned pipeline threads behind (`run` is a library API).
+/// leaves running pipeline threads behind (`run` is a library API).
 ///
 /// Joining bounds this. A driver observes the shutdown flag (abandoning any
 /// blocked batch) and the `Shutdown` control message (flushing within

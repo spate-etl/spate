@@ -135,7 +135,7 @@ pub struct EncodedChunk {
 }
 
 /// The CPU half of a sink connector: encodes one record into the sink's
-/// wire format. Runs on pinned pipeline threads inside the chain's
+/// wire format. Runs on pipeline threads inside the chain's
 /// terminal stage; must not perform I/O. Family-generic and dyn-compatible,
 /// like [`Deserializer`](crate::deser::Deserializer).
 pub trait RowEncoder<F: RecFamily>: Send {
@@ -439,7 +439,7 @@ impl ShardRouter for KeyHashRouter {
 
 /// Routes records to shards with access to the full record, the
 /// **record-aware tier** of sink routing. Pure and cheap; called once per
-/// record on pinned pipeline threads, strictly before encoding. It must
+/// record on pipeline threads, strictly before encoding. It must
 /// not perform I/O, block, or allocate per call. Family-generic and
 /// dyn-compatible, like [`RowEncoder`].
 ///

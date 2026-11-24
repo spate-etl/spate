@@ -130,7 +130,7 @@ impl KafkaMessage {
 }
 
 /// The record→message seam of the Kafka sink: produce exactly one message
-/// into `msg` per record. Runs on pinned pipeline threads inside
+/// into `msg` per record. Runs on pipeline threads inside
 /// [`KafkaEncoder`]. No I/O, no blocking.
 ///
 /// Errors are record-level unless the encoder itself is broken: return

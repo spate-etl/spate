@@ -168,10 +168,14 @@ Sustained `spate_backpressure_paused == 1` means the sink can't keep up (a
 capacity problem: add replicas or shards, or tune batching), the budget is
 undersized as above, or a shard's queue is too shallow for the rate it takes
 (`spate_queue_full_events_total` climbing while `spate_sink_inflight_batches`
-stays below the cap, see [Queues](../05-deployment/tuning.mdx#queues)). Paused
-lanes translate into a growing backlog at the source, visible as
-`sum(spate_source_lag_records)` for sources that publish lag. That is the
-correct, bounded failure mode: data waits at the source, not in process memory.
+stays below the cap, see [Queues](../05-deployment/tuning.mdx#queues)). A sink
+that holds every permit while it keeps up on average has a slow-write tail,
+which a deeper queue absorbs;
+[Queues](../05-deployment/tuning.mdx#find-what-fills-the-queue) tells it apart
+from a capacity problem. Paused lanes translate into a growing backlog at the
+source, visible as `sum(spate_source_lag_records)` for sources that publish lag.
+That is the correct, bounded failure mode: data waits at the source, not in
+process memory.
 
 ## Further reading
 

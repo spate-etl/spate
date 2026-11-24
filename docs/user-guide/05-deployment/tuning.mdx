@@ -362,8 +362,9 @@ and 2 in-flight writes per shard. `rate(spate_sink_bytes_total[5m])` reads about
 400 MB/s per shard while the source is not pausing, and the write p99 falls in
 the 50–100 ms bucket. 400 MB/s × 0.1 s is about 38 MiB, so `queue.max_bytes`
 goes between 38 and 76 MiB: 64 MiB. The budget rule then needs a low watermark
-of 2 × (2 × 2 × 128 MiB + 2 × 64 MiB) = 1,280 MiB, which at the default
-`low_ratio` of 0.5 is a 2,560 MiB budget:
+of twice, for the rule's headroom, the pending writes (2 shards × 2 writes × 128
+MiB = 512 MiB) plus the queues (2 shards × 64 MiB = 128 MiB): 1,280 MiB, which
+at the default `low_ratio` of 0.5 is a 2,560 MiB budget:
 
 ```yaml
 sink:

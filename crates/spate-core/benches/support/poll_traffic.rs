@@ -65,7 +65,7 @@ const STEP: Duration = Duration::from_secs(1);
 /// The value cannot move the count on its own in any case. `tick` compares
 /// against it (`duration_since(since) >= min_pause`), so what a different
 /// floor changes is which arm the comparison selects, not the work the
-/// comparison does, and the three profiles put every arm under measurement
+/// comparison does, and the four profiles put every arm under measurement
 /// regardless.
 const MIN_PAUSE: Duration = Duration::from_secs(10);
 
@@ -77,6 +77,20 @@ const PHASE: usize = 16;
 
 /// Iterations between rejections in the congested script.
 const REJECT_EVERY: usize = 64;
+
+/// Iterations in one cycle of the contended script.
+const CONTENDED_CYCLE: usize = 64;
+
+/// Queue rejections in the contended script's short run, which spans less
+/// than [`MIN_PAUSE`] and so never pauses.
+const SHORT_RUN: usize = 4;
+
+/// Queue rejections in the contended script's long run, which spans
+/// [`MIN_PAUSE`] and so pauses.
+const LONG_RUN: usize = 12;
+
+/// Where the long run starts in each contended cycle.
+const LONG_RUN_AT: usize = 32;
 
 /// Injected clock. The controller reads time through a
 /// [`Clock`](spate_core::clock::Clock) so it can be driven without sleeping,
@@ -117,13 +131,28 @@ impl Clock for BenchClock {
 }
 
 /// One poll iteration's traffic: what the terminal stage handed the budget,
-/// what the sink workers gave back, whether a `try_send` bounced, and what
-/// the driver saw of its queues.
+/// what the sink workers gave back, how its `try_send` went, and what the
+/// driver saw of its queues.
 struct Step {
     add: usize,
     sub: usize,
-    reject: bool,
+    send: Send,
     queues_below_low: bool,
+}
+
+/// How one iteration's `try_send` went. The discriminant is the corpus byte,
+/// so the profiles from before the queue rejection keep their bytes.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum Send {
+    /// Nothing for the controller to record.
+    Clear = 0,
+    /// Rejected under sink pressure, through `on_send_rejected`.
+    Pressure = 1,
+    /// Rejected by a shard queue, through `on_queue_rejected`.
+    Queue = 2,
+    /// A push completed, through `on_push_done`.
+    Done = 3,
 }
 
 /// Which pressure a script puts the controller under.
@@ -144,6 +173,11 @@ pub(crate) enum Profile {
     /// a resume. Both arms run, and the controller transitions as often as
     /// its hysteresis allows.
     Flapping,
+    /// Usage rides as in [`Profile::Quiet`] while shard queues reject with no
+    /// shard waiting for a permit. Each cycle has a short run of rejections
+    /// that a completed push ends before it spans the minimum pause, and a
+    /// long run that spans it, pauses, and resumes once the queues drain.
+    Contended,
 }
 
 impl Profile {
@@ -153,7 +187,7 @@ impl Profile {
             // A plateau a megabyte up, climbing a chunk at a time for fifteen
             // iterations, then dropping the whole run back. Always far below
             // the low watermark, so no tick has a reason to pause.
-            Profile::Quiet => 1024 * 1024 + (i % 16) * CHUNK,
+            Profile::Quiet | Profile::Contended => 1024 * 1024 + (i % 16) * CHUNK,
             Profile::Congested => params.high_bytes + (i % 8 + 1) * CHUNK,
             Profile::Flapping => {
                 if high_phase(i) {
@@ -168,18 +202,26 @@ impl Profile {
     /// Whether the driver saw every queue below its low-watermark fill.
     fn queues_below_low(self, i: usize) -> bool {
         match self {
-            Profile::Quiet => true,
+            Profile::Quiet | Profile::Contended => true,
             Profile::Congested => false,
             Profile::Flapping => !high_phase(i),
         }
     }
 
-    /// Whether a `try_send` bounced during iteration `i`.
-    fn reject(self, i: usize) -> bool {
+    /// How the `try_send` of iteration `i` went.
+    fn send(self, i: usize) -> Send {
+        let pressure = |bounced: bool| if bounced { Send::Pressure } else { Send::Clear };
         match self {
-            Profile::Quiet => false,
-            Profile::Congested => i.is_multiple_of(REJECT_EVERY),
-            Profile::Flapping => high_phase(i) && i.is_multiple_of(PHASE),
+            Profile::Quiet => Send::Clear,
+            Profile::Congested => pressure(i.is_multiple_of(REJECT_EVERY)),
+            Profile::Flapping => pressure(high_phase(i) && i.is_multiple_of(PHASE)),
+            Profile::Contended => match i % CONTENDED_CYCLE {
+                at if at < SHORT_RUN => Send::Queue,
+                SHORT_RUN => Send::Done,
+                at if (LONG_RUN_AT..LONG_RUN_AT + LONG_RUN).contains(&at) => Send::Queue,
+                at if at == LONG_RUN_AT + LONG_RUN => Send::Done,
+                _ => Send::Clear,
+            },
         }
     }
 }
@@ -215,7 +257,7 @@ impl Rig {
         for step in &self.script {
             out.extend_from_slice(&(step.add as u64).to_le_bytes());
             out.extend_from_slice(&(step.sub as u64).to_le_bytes());
-            out.push(u8::from(step.reject));
+            out.push(step.send as u8);
             out.push(u8::from(step.queues_below_low));
         }
         out
@@ -280,8 +322,11 @@ impl Rig {
         for step in script.iter() {
             budget.add(step.add);
             budget.sub(step.sub);
-            if step.reject {
-                controller.on_send_rejected();
+            match step.send {
+                Send::Clear => {}
+                Send::Pressure => controller.on_send_rejected(),
+                Send::Queue => controller.on_queue_rejected(budget),
+                Send::Done => controller.on_push_done(),
             }
             clock.advance(STEP);
             if controller.tick(budget, || step.queues_below_low).is_some() {
@@ -307,7 +352,7 @@ impl Rig {
 /// profile instead. A script that stopped crossing could not produce it.
 fn assert_in_band(profile: Profile, params: &BackpressureParams, level: usize) {
     match profile {
-        Profile::Quiet => assert!(
+        Profile::Quiet | Profile::Contended => assert!(
             level < params.low_bytes,
             "the quiet script reached {level} bytes, at or above the low \
              watermark of {}, so it is no longer the profile that never has a \
@@ -350,7 +395,7 @@ pub(crate) fn rig(profile: Profile, expect_transitions: usize) -> Rig {
             Step {
                 add,
                 sub,
-                reject: profile.reject(i),
+                send: profile.send(i),
                 queues_below_low: profile.queues_below_low(i),
             }
         })

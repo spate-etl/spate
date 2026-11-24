@@ -47,12 +47,19 @@
 //!   profile. Read against `quiet_traffic`, whose iteration count and script
 //!   length it shares exactly, the difference is what taking a transition
 //!   costs over declining one.
+//! - `contended_traffic` — usage and queues as in `quiet_traffic`, while shard
+//!   queues reject with no shard waiting for a permit, through
+//!   `on_queue_rejected`. In each sixty-four-iteration cycle a run of four
+//!   rejections ends at a completed push before it spans the pause floor, and
+//!   a run of twelve spans it, pauses and resumes. Read against
+//!   `quiet_traffic`, the difference is what tracking a run of rejections
+//!   costs.
 //!
 //! The watermark ratios and the pause floor are comparisons against a field
 //! (`usage() >= high_bytes`, `duration_since(since) >= min_pause`), so their
 //! *values* cannot change the instruction count, only which arm the
-//! comparison selects, and the three profiles already put every arm under
-//! measurement. There are three cases rather than a matrix because callgrind
+//! comparison selects, and the four profiles already put every arm under
+//! measurement. There are four cases rather than a matrix because callgrind
 //! runs the workload under emulation.
 //!
 //! The controller reads time through its injected
@@ -83,10 +90,12 @@ use poll_traffic::{Profile, Rig, rig};
 /// state machine would agree with itself however the machine changed. A quiet
 /// pipeline never transitions; a congested one pauses once and never finds a
 /// reason to resume; the adversary takes a pause and a resume in every
-/// thirty-two-iteration cycle.
+/// thirty-two-iteration cycle; a contended one takes a pause and a resume in
+/// every sixty-four-iteration cycle.
 const QUIET_TRANSITIONS: usize = 0;
 const CONGESTED_TRANSITIONS: usize = 1;
 const FLAPPING_TRANSITIONS: usize = 2048;
+const CONTENDED_TRANSITIONS: usize = 1024;
 
 /// The whole script, one poll iteration at a time.
 ///
@@ -120,6 +129,7 @@ fn drive(rig: &mut Rig) -> usize {
 #[bench::quiet_traffic(rig(Profile::Quiet, QUIET_TRANSITIONS))]
 #[bench::congested_traffic(rig(Profile::Congested, CONGESTED_TRANSITIONS))]
 #[bench::flapping_traffic(rig(Profile::Flapping, FLAPPING_TRANSITIONS))]
+#[bench::contended_traffic(rig(Profile::Contended, CONTENDED_TRANSITIONS))]
 fn poll_iterations(mut rig: Rig) -> Rig {
     let transitions = black_box(drive(&mut rig));
     assert_eq!(

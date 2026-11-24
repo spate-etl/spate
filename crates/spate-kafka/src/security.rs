@@ -415,6 +415,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// Without the `tls` feature there is no bundle, whatever the section
+    /// names, and no file is read.
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn no_bundle_without_the_tls_feature() {
+        let mut section = TlsSection::default();
+        assert_eq!(ca_bundle(&section), Ok(None));
+        section.root_ca = Some("/nonexistent/private-ca.pem".into());
+        assert_eq!(ca_bundle(&section), Ok(None));
+    }
+
     /// The bundle holds the system roots, then the certificates in
     /// `root_ca`. Without `root_ca` there is none, and the system store is
     /// left unread. An unreadable `root_ca` is refused with core's reason.

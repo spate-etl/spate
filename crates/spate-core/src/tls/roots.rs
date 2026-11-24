@@ -594,6 +594,28 @@ mod tests {
         );
     }
 
+    /// `load` returns the certificates in the file `SSL_CERT_FILE` names. It
+    /// runs in a child process, so the variable reaches no other test.
+    #[test]
+    fn load_reads_the_file_ssl_cert_file_names() {
+        const NAME: &str = "tls::roots::tests::load_reads_the_file_ssl_cert_file_names";
+        if std::env::var_os("SPATE_TEST_SYSTEM_ROOTS").is_some() {
+            let file = std::env::var_os("SSL_CERT_FILE").unwrap();
+            let system = SystemRoots::load();
+            assert_eq!(system.certs, read_root_ca(Path::new(&file)).unwrap());
+            assert_eq!(system.errors, Vec::<String>::new());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = TestCa::new("system").write(dir.path());
+        spate_test_support::run_in_child(NAME, |child| {
+            child
+                .env_remove("SSL_CERT_DIR")
+                .env("SSL_CERT_FILE", &file)
+                .env("SPATE_TEST_SYSTEM_ROOTS", "1")
+        });
+    }
+
     /// A system trust store the client must leave unread.
     const UNREAD: fn() -> SystemRoots = || panic!("this client reads no system root");
 

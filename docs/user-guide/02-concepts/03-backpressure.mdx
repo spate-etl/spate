@@ -194,7 +194,8 @@ A queue that fills while `spate_sink_inflight_batches` stays below the cap does
 not hold the lanes paused. `spate_queue_full_events_total` climbs instead, and
 [Queues](../05-deployment/tuning.mdx#queues) covers it.
 
-Paused lanes translate into a growing backlog at the source, visible as `sum(spate_source_lag_records)` for sources that publish lag.
+Paused lanes translate into a growing backlog at the source, visible as
+`sum(spate_source_lag_records)` for sources that publish lag.
 That is the correct, bounded failure mode: data waits at the source, not in
 process memory.
 

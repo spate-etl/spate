@@ -54,8 +54,8 @@
 //! many. A check reconciles the orders that were captured, not all of them.
 //!
 //! No lane reads another lane's state, so nothing is shared on the record
-//! path and the whole property survives the CPU-pinned fan-out. The payload
-//! key carries the order id, so
+//! path and the whole property survives the fan-out across pipeline threads.
+//! The payload key carries the order id, so
 //! [`KeyHashRouter`](spate_core::sink::KeyHashRouter) colocates an order and
 //! its payment in one sink shard.
 //!

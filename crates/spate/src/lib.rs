@@ -38,7 +38,7 @@
 //!
 //! ```text
 //!                     ┌───────────────────────────────────────────────┐
-//!  pinned std thread  │ lane.poll → deserialize (borrowed) → operator │──try_send──▶ per-shard
+//!  std thread         │ lane.poll → deserialize (borrowed) → operator │──try_send──▶ per-shard
 //!  (× N)              │ chain (map/filter/flat_map, monomorphized)    │             bounded queues
 //!                     └───────────────────────────────────────────────┘                  │
 //!                          ▲          full? pause lanes, keep polling                    ▼
@@ -119,7 +119,7 @@
 //! - [`source`] / [`sink`] — the connector traits ([`source::Source`],
 //!   [`source::SourceLane`], [`sink::RowEncoder`], [`sink::ShardWriter`])
 //!   and the framework-owned sink pool.
-//! - [`pipeline`] — the runtime: pinned threads, controller, shutdown.
+//! - [`pipeline`] — the runtime: pipeline threads, controller, shutdown.
 //! - [`checkpoint`] / [`backpressure`] — acknowledgments and flow control.
 //! - [`config`] — YAML with `${VAR:-default}` interpolation and opaque
 //!   per-connector sections.

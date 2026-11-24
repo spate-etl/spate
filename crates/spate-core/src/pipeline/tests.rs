@@ -3090,7 +3090,7 @@ fn the_source_drops_before_the_io_runtime_stops() {
 
 /// A fallible startup step after the driver threads are spawned (here, the
 /// admin bind, forced to fail by occupying its port) must stop the drivers
-/// and return the error promptly, never leaking the running pinned threads.
+/// and return the error promptly, never leaking the running driver threads.
 #[test]
 fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe port");

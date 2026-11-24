@@ -4050,9 +4050,13 @@ mod tests {
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .build()
                 .expect("probe");
-            probe
-                .fetch_watermarks("t", 0, Duration::from_secs(10))
-                .expect("watermarks")
+            spate_test::wait_for_value(
+                spate_test::HANG,
+                "a watermark read of t/0",
+                || probe.fetch_watermarks("t", 0, Duration::from_secs(10)),
+                Result::is_ok,
+            )
+            .expect("the wait ends on a read")
         }
 
         /// Serve `source` and poll `lane`, writing one record to partition 0 on

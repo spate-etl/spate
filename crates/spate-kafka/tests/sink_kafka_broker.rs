@@ -18,7 +18,7 @@ use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::sink::KeyHashRouter;
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSink, KafkaSource, KafkaSourceConfig};
-use spate_test::{HANG, PipelineRun, wait_until};
+use spate_test::{HANG, PipelineRun};
 use spate_test_support::SingleBroker;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -141,9 +141,13 @@ fn kafka_to_kafka_split_round_trip() {
     // The source group commits the full input once both destinations have
     // durably written (worst-status ack merge across the split).
     let probe = support::probe(&brokers, GROUP);
-    wait_until(HANG, "source group committed all", || {
-        support::committed(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)]
-    });
+    spate_test::wait_for_value(
+        HANG,
+        "source group committed all",
+        || support::committed_once(&probe, IN_TOPIC, 1),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(TOTAL as i64)]),
+    )
+    .expect("the wait ends on a read");
 
     shutdown.trigger();
     let report = run

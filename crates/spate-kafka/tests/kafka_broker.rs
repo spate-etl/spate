@@ -141,6 +141,8 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     // Run the revocation choreography: store the drained watermark for the
     // partition being revoked, then poll so `unassign` runs.
     let mut stored = false;
+    // The event below comes once, so its read takes what is left of the wait.
+    let deadline = Instant::now() + HANG;
     spate_test::wait_until(HANG, "the revocation", || {
         if let SourceEvent::LanesRevoked {
             lanes: ids,
@@ -152,8 +154,9 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
             // The next poll calls `unassign`, which commits what is stored, so
             // the flush's own commit is only visible here.
+            let left = deadline.saturating_duration_since(Instant::now());
             assert_eq!(
-                support::committed(&probe, TOPIC, 1),
+                support::committed_within(&probe, TOPIC, 1, left),
                 [rdkafka::Offset::Offset(50)]
             );
             stored = true;
@@ -164,9 +167,13 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     let _ = source.poll_events(Duration::ZERO);
 
     // The drained watermark is committed for the revoked partition.
-    spate_test::wait_until(HANG, "revoked partition committed offset 50", || {
-        support::committed(&probe, TOPIC, 1) == [rdkafka::Offset::Offset(50)]
-    });
+    spate_test::wait_for_value(
+        HANG,
+        "revoked partition committed offset 50",
+        || support::committed_once(&probe, TOPIC, 1),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(50)]),
+    )
+    .expect("the wait ends on a read");
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
@@ -504,9 +511,13 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
     spate_test::wait_until(HANG, "the last record reaches the sink", || {
         delivered().last() == Some(&last)
     });
-    spate_test::wait_until(HANG, "the group commits the log's end", || {
-        support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)]
-    });
+    spate_test::wait_for_value(
+        HANG,
+        "the group commits the log's end",
+        || support::committed_by_once(&brokers, &group, TOPIC, 1),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(end)]),
+    )
+    .expect("the wait ends on a read");
     shutdown.trigger();
     let exit = run.wait_exit(HANG).expect("the pipeline exits");
     assert!(exit.is_ok(), "{exit:?}");

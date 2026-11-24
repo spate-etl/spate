@@ -3,7 +3,10 @@
 //! its control. The caller creates the topic, since the mock broker takes no
 //! admin request: two partitions, or one for a removed consumer.
 
-use super::{assert_no_gap, await_assignment, committed_by, delete_records_below, produce_to};
+use super::{
+    assert_no_gap, await_assignment, committed_by, committed_by_once, delete_records_below,
+    produce_once, produce_to,
+};
 use rdkafka::Offset;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::config::PipelineConfig;
@@ -15,7 +18,8 @@ use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{
     BytesPassthrough, CaptureSink, HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder,
-    WriteOutcome, capture_sink, decode_rows, passthrough_runtime, unique_name, wait_until,
+    WriteOutcome, capture_sink, decode_rows, passthrough_runtime, unique_name, wait_for_value,
+    wait_until,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -193,15 +197,20 @@ impl Run {
 /// Produce to `partition` from `next` until `run` has handed one of its records
 /// to the sink, which shows the run's start is settled and it reads.
 fn await_reading(run: &Run, brokers: &str, topic: &str, partition: i32, next: &mut i64) {
-    let mut tick = 0;
-    wait_until(HANG, "the run to read", || {
-        if tick % 40 == 0 {
-            produce_to(brokers, topic, partition, *next..*next + 1);
-            *next += 1;
-        }
-        tick += 1;
-        run.attempted(partition)
-    });
+    let (mut tick, mut failed) = (0, None);
+    wait_for_value(
+        HANG,
+        "the run to read",
+        || {
+            if tick % 40 == 0 {
+                failed = produce_once(brokers, topic, partition, *next).err();
+                *next += 1;
+            }
+            tick += 1;
+            (run.attempted(partition), failed.clone())
+        },
+        |(read, _)| *read,
+    );
 }
 
 fn offset_of(offset: Offset) -> Option<i64> {
@@ -220,13 +229,20 @@ fn await_commit(
     partition: i32,
     upto: i64,
 ) -> i64 {
-    let mut at = None;
-    wait_until(HANG, "the group's commit to reach the produced end", || {
-        let committed = committed_by(brokers, group, topic, partitions);
-        at = offset_of(committed[usize::try_from(partition).expect("partition")]);
-        at.is_some_and(|at| at >= upto)
-    });
-    at.expect("a commit")
+    let at = wait_for_value(
+        HANG,
+        "the group's commit to reach the produced end",
+        || {
+            committed_by_once(brokers, group, topic, partitions).map(|committed| {
+                offset_of(committed[usize::try_from(partition).expect("partition")])
+            })
+        },
+        |read| {
+            read.as_ref()
+                .is_ok_and(|at| at.is_some_and(|at| at >= upto))
+        },
+    );
+    at.expect("the wait ends on a read").expect("a commit")
 }
 
 /// Route: a quiet partition, a clean restart, records written while it is down.
@@ -272,16 +288,22 @@ pub(crate) fn a_commit_below_the_log_start_across_a_restart(
     await_reading(&second, brokers, topic, 1, &mut sentinel);
     // Producing until the commit moves lets a start at the end commit too, so
     // it fails on the gap and not on the deadline.
-    let (mut next, mut tick, mut upto) = (3 * ROUND, 0, 0);
-    wait_until(HANG, "the commit to pass the retained records", || {
-        if tick % 40 == 0 {
-            produce_to(brokers, topic, 0, next..next + 1);
-            next += 1;
-        }
-        tick += 1;
-        upto = offset_of(committed_by(brokers, &group, topic, 2)[0]).unwrap_or(0);
-        upto > 3 * ROUND
-    });
+    let (mut next, mut tick) = (3 * ROUND, 0);
+    let upto = wait_for_value(
+        HANG,
+        "the commit to pass the retained records",
+        || {
+            if tick % 40 == 0 {
+                produce_once(brokers, topic, 0, next)?;
+                next += 1;
+            }
+            tick += 1;
+            committed_by_once(brokers, &group, topic, 2)
+                .map(|committed| offset_of(committed[0]).unwrap_or(0))
+        },
+        |read| read.as_ref().is_ok_and(|&at| at > 3 * ROUND),
+    )
+    .expect("the wait ends on a read");
     let written = second.written(0);
     second.stop();
     assert_no_gap(0, 2 * ROUND, upto, &written);

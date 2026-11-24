@@ -80,7 +80,7 @@ mod retried_reassign {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_test::{HANG, unique_name, wait_until};
     use support::latest::{Run, config};
-    use support::{committed_by, produce_to};
+    use support::{committed_by_once, produce_to};
 
     const TOPIC: &str = "orders";
     const PARTITIONS: i32 = 4;
@@ -117,11 +117,16 @@ mod retried_reassign {
 
         // The first consumer's start commit shows it was accepted alone. The next
         // lookup is the reassign's, once the second consumer's offer arrives.
-        wait_until(HANG, "the first accept", || {
-            committed_by(&brokers, &group, TOPIC, PARTITIONS)
-                .iter()
-                .any(|o| matches!(o, Offset::Offset(_)))
-        });
+        spate_test::wait_for_value(
+            HANG,
+            "the first accept",
+            || committed_by_once(&brokers, &group, TOPIC, PARTITIONS),
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|offsets| offsets.iter().any(|o| matches!(o, Offset::Offset(_))))
+            },
+        )
+        .expect("the wait ends on a read");
         cluster.request_errors(
             RDKafkaApiKey::OffsetFetch,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],

@@ -3,13 +3,10 @@
 //! readers of committed offsets and of the retry, dead-letter and attempt
 //! topics.
 
-use super::Raw as _;
-use super::{Read, from_start};
+use super::{Read, Take, from_start, read_kept};
 use rdkafka::Offset;
-use rdkafka::admin::AdminClient;
-use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::BaseConsumer;
-use rdkafka::message::{BorrowedMessage, Header, Message, OwnedHeaders};
+use rdkafka::message::{Header, Message, OwnedHeaders};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
@@ -86,22 +83,31 @@ impl FeedClock {
         });
     }
 
-    /// Wait until `done` holds, making a periodic commit due after each
-    /// consumer pass. Panics past ten advances.
-    pub(crate) fn advance_until(&self, what: &str, mut done: impl FnMut() -> bool) {
+    /// Read until `done` holds for the value `read` returns, making a
+    /// periodic commit due after each consumer pass, and return that value.
+    /// Panics past ten advances, or with the last value read on a hang.
+    pub(crate) fn advance_until<T: std::fmt::Debug>(
+        &self,
+        what: &str,
+        mut read: impl FnMut() -> T,
+        done: impl Fn(&T) -> bool,
+    ) -> T {
         let mut sample = self.reads();
         let mut advances = 0;
-        wait_until(HANG, what, || {
-            if done() {
-                return true;
-            }
-            if self.reads() >= sample + PASS_READS {
-                advances += 1;
-                assert!(advances <= 10, "{what}: not after ten commit intervals");
-                sample = self.advance(COMMIT_INTERVAL);
-            }
-            false
-        });
+        spate_test::wait_for_value(
+            HANG,
+            what,
+            || {
+                let value = read();
+                if !done(&value) && self.reads() >= sample + PASS_READS {
+                    advances += 1;
+                    assert!(advances <= 10, "{what}: not after ten commit intervals");
+                    sample = self.advance(COMMIT_INTERVAL);
+                }
+                value
+            },
+            |value| done(value),
+        )
     }
 }
 
@@ -239,18 +245,33 @@ pub(crate) fn publish(feed: &KafkaFeed, unit: Unit) {
 
 /// The offset `group` has committed for partition 0 of `topic`, if any.
 pub(crate) fn committed(brokers: &str, group: &str, topic: &str) -> Option<i64> {
-    match super::committed_by(brokers, group, topic, 1)[0] {
+    first_offset(&super::committed_by(brokers, group, topic, 1))
+}
+
+/// [`committed`] as one client call, for a caller whose own wait reads again.
+pub(crate) fn committed_once(
+    brokers: &str,
+    group: &str,
+    topic: &str,
+) -> Result<Option<i64>, String> {
+    super::committed_by_once(brokers, group, topic, 1).map(|offsets| first_offset(&offsets))
+}
+
+/// Partition 0's committed offset in `offsets`, if any.
+fn first_offset(offsets: &[Offset]) -> Option<i64> {
+    match offsets[0] {
         Offset::Offset(offset) => Some(offset),
         _ => None,
     }
 }
 
-/// The first `n` messages of partition 0 of `topic`, read from its start.
+/// At least `n` messages of partition 0 of `topic`, read from its start, and
+/// any more already ready.
 pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
     let consumer = from_start(brokers, topic, 1, &[]);
     read_kept(
         &consumer,
-        n,
+        Take::AtLeast(n),
         &format!("{n} messages on {topic}"),
         |message| Some(Read::of(message)),
     )
@@ -260,42 +281,29 @@ pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
 /// `None` for a tombstone.
 pub(crate) type AttemptRecord = (i32, String, Option<u32>);
 
-/// The first `n` attempt records of the attempt topic's `partitions`
-/// partitions, read from their start, in offset order within each
+/// At least `n` attempt records of the attempt topic's `partitions`
+/// partitions, read from their start, and any more already ready, in offset order within each
 /// partition. A record whose key is not a publish identity, which always
 /// holds a `/`, is the gate's fence and is skipped.
 pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
     let consumer = from_start(brokers, ATTEMPT, partitions, &[]);
-    read_kept(&consumer, n, &format!("{n} attempt records"), |message| {
-        let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
-        if !key.contains('/') {
-            return None;
-        }
-        let count = message.payload().map(|value| {
-            let record: serde_json::Value = serde_json::from_slice(value).unwrap();
-            assert_eq!(record["v"], 1, "{record}");
-            u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
-        });
-        Some((message.partition(), key, count))
-    })
-}
-
-/// What `keep` returns for the messages `consumer` reads, once it has
-/// returned at least `n` values; `what` names them in a hang.
-fn read_kept<T>(
-    consumer: &BaseConsumer,
-    n: usize,
-    what: &str,
-    mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
-) -> Vec<T> {
-    let mut got = Vec::new();
-    wait_until(HANG, what, || {
-        while let Some(message) = consumer.poll(Duration::from_millis(100)) {
-            got.extend(keep(&message.expect("read")));
-        }
-        got.len() >= n
-    });
-    got
+    read_kept(
+        &consumer,
+        Take::AtLeast(n),
+        &format!("{n} attempt records"),
+        |message| {
+            let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
+            if !key.contains('/') {
+                return None;
+            }
+            let count = message.payload().map(|value| {
+                let record: serde_json::Value = serde_json::from_slice(value).unwrap();
+                assert_eq!(record["v"], 1, "{record}");
+                u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
+            });
+            Some((message.partition(), key, count))
+        },
+    )
 }
 
 /// How many messages partition 0 of `topic` holds, read at the default
@@ -307,7 +315,7 @@ pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
 /// How many messages the first `partitions` partitions of `topic` hold
 /// between them. One `HANG` bounds every read.
 pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i64 {
-    let reader = spate_test_support::consumer(brokers, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let reader = reader(brokers);
     let deadline = Instant::now() + HANG;
     (0..partitions)
         .map(|partition| {
@@ -316,6 +324,21 @@ pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i6
                 .unwrap_or_else(|e| panic!("{e}"))
         })
         .sum()
+}
+
+/// How many messages `partition` of `topic` holds, as one client call, for a
+/// caller whose own wait reads again.
+pub(crate) fn high_watermark_once(
+    brokers: &str,
+    topic: &str,
+    partition: i32,
+) -> Result<i64, String> {
+    spate_test_support::high_watermark_once(&reader(brokers), topic, partition)
+}
+
+/// A reader of `brokers` at the default `read_committed`.
+fn reader(brokers: &str) -> BaseConsumer {
+    spate_test_support::consumer(brokers, &[]).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// A publish-only handle connected as on the MockCluster, with the runtime
@@ -472,19 +495,14 @@ impl Direct {
 /// Whether `topic` exists on the cluster at `brokers`, read with
 /// auto-creation off so the read cannot create it.
 pub(crate) fn exists(brokers: &str, topic: &str) -> bool {
-    let probe: AdminClient<DefaultClientContext> = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("allow.auto.create.topics", "false")
-        .build()
-        .expect("admin client");
-    let metadata = probe
-        .inner()
-        .fetch_metadata(None, Duration::from_secs(10))
-        .expect("metadata");
-    metadata
-        .topics()
-        .iter()
-        .any(|t| t.name() == topic && t.error().is_none() && !t.partitions().is_empty())
+    let probe = reader(brokers);
+    let partitions = spate_test::wait_for_value(
+        HANG,
+        &format!("a metadata read of {topic}"),
+        || spate_test_support::topic_partitions_once(&probe, topic),
+        Result::is_ok,
+    );
+    matches!(partitions, Ok(Some(n)) if n > 0)
 }
 
 /// The `feed:` section of a bounded job for `group` on `brokers`, at a
@@ -558,6 +576,12 @@ impl BoundedJob {
     /// The group's committed offset on partition 0 of `topic`.
     pub(crate) fn committed(&self, topic: &str) -> Option<i64> {
         committed(&self.brokers, &self.group, topic)
+    }
+
+    /// [`Self::committed`] as one client call, for a caller whose own wait
+    /// reads again.
+    pub(crate) fn committed_once(&self, topic: &str) -> Result<Option<i64>, String> {
+        committed_once(&self.brokers, &self.group, topic)
     }
 }
 
@@ -639,9 +663,13 @@ impl HeldUnit {
         wait_until(HANG, "B holds the unit's first write", || {
             b.script.held_writes() == 1
         });
-        wait_until(HANG, "the group commits the held unit's offset", || {
-            committed(brokers, &group, WORK) == Some(0)
-        });
+        spate_test::wait_for_value(
+            HANG,
+            "the group commits the held unit's offset",
+            || committed_once(brokers, &group, WORK),
+            |read| *read == Ok(Some(0)),
+        )
+        .expect("the wait ends on a read");
         assert_eq!(b.recording.deliveries(), [1], "B took the unit");
         HeldUnit {
             brokers: brokers.to_owned(),

@@ -672,10 +672,19 @@ mod tests {
         )
         .with_step(Duration::from_millis(1));
         for _ in 0..20 {
-            gate.lister
-                .client()
-                .fetch_watermarks("units-attempts", 0, HANG)
-                .unwrap();
+            spate_test::wait_for_value(
+                HANG,
+                "a watermark read of units-attempts/0",
+                || {
+                    gate.lister.client().fetch_watermarks(
+                        "units-attempts",
+                        0,
+                        Duration::from_secs(10),
+                    )
+                },
+                Result::is_ok,
+            )
+            .expect("the wait ends on a read");
         }
         let before = crate::client::queued_events(&gate.lister);
         gate.pass();

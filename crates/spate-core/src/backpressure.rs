@@ -276,6 +276,7 @@ impl<C: Clock> WatermarkController<C> {
     /// the worker has not reached its queue yet, and the rejection starts or
     /// extends a run that pauses only once it spans
     /// [`BackpressureParams::min_pause`]. [`Self::on_push_done`] ends the run.
+    /// While paused, any rejection restarts the minimum-pause timer.
     pub fn on_queue_rejected(&mut self, budget: &InflightBudget) {
         if budget.gated_shards() > 0 || self.is_paused() {
             self.on_send_rejected();

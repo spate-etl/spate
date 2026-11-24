@@ -6,7 +6,8 @@ description: "The tls section type sits outside spate-core's tls-roots gate, so 
 
 - **Status:** accepted
 - **Date:** 2026-11-24
-- **Supersedes:** [ADR-0105](0105-connectors-share-one-trust-root-loader-in-core.md)
+- **Supersedes:**
+  [ADR-0105](0105-connectors-share-one-trust-root-loader-in-core.md)
   (in part: the whole `spate_core::tls` module behind `tls-roots`, and a
   Kafka-only build compiling none of it)
 - **Superseded by:** —

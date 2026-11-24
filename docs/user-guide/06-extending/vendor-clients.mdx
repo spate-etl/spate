@@ -58,13 +58,13 @@ promise ([ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)).
 
 ## Trust roots
 
-Load the roots a TLS client verifies servers against with `spate::tls`, which
-the `tls-roots` feature enables. `SystemRoots::load` reads the system trust
-store. It blocks on file reads, or on the keychain on macOS, so call it from a
-blocking thread in async code. `TrustRoots::load` keeps the system
-certificates rustls accepts and adds the certificates in a `root_ca` file. Give
-the result to the client as DER certificates with `TrustRoots::certs`, or as
-one PEM bundle with `TrustRoots::to_pem`.
+Load the roots a TLS client verifies servers against with the loader in
+`spate::tls`, which the `tls-roots` feature enables. `SystemRoots::load`
+reads the system trust store. It blocks on file reads, or on the keychain on
+macOS, so call it from a blocking thread in async code. `TrustRoots::load`
+keeps the system certificates rustls accepts and adds the certificates in a
+`root_ca` file. Give the result to the client as DER certificates with
+`TrustRoots::certs`, or as one PEM bundle with `TrustRoots::to_pem`.
 
 When an endpoint the connector reaches is `https://`, call
 `TrustRoots::require_any`, and put the `root_ca` key around its error. An empty
@@ -91,7 +91,8 @@ On Android, `client_roots` refuses a `root_ca` file, because the platform
 verifier there takes no added roots. Put the key around its error.
 
 A config key that names a private CA adds its certificates to the system
-roots. Take its section from `spate::tls::TlsSection`. `TrustRoots::load`
+roots. Take its section from `spate::tls::TlsSection`, which builds without
+`tls-roots`. `TrustRoots::load`
 fails when the file cannot be read, holds no certificate, or holds one that is
 not a trust anchor; put the key around its error. When no endpoint the
 connector reaches is `https://`, refuse the key.

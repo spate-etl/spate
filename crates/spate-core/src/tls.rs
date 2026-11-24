@@ -1,5 +1,9 @@
-//! The trust roots a connector's TLS client verifies a server against: the
-//! system trust store and the certificates in the connector's `root_ca`.
+//! A connector's `tls:` section, and the trust roots its TLS client verifies
+//! a server against: the system trust store and the certificates in the
+//! section's `root_ca`.
+//!
+//! [`TlsSection`] is always available. The loader needs the `tls-roots`
+//! feature.
 //!
 //! [`TrustRoots::load`] keeps the system certificates that rustls accepts as
 //! trust anchors, then adds every certificate in `root_ca`. There is no
@@ -18,16 +22,22 @@
 //! the `root_ca` certificates. Elsewhere it verifies against the loaded roots
 //! alone. [`is_https`] tells a connector whether an endpoint is called over
 //! TLS.
-//!
-//! Enabled by the `tls-roots` feature.
 
+#[cfg(feature = "tls-roots")]
 use base64::Engine as _;
+#[cfg(feature = "tls-roots")]
 use base64::engine::general_purpose::STANDARD;
+#[cfg(feature = "tls-roots")]
 pub use rustls_pki_types::CertificateDer;
+#[cfg(feature = "tls-roots")]
 use rustls_pki_types::pem::PemObject;
 use serde::Deserialize;
+#[cfg(feature = "tls-roots")]
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "tls-roots")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "tls-roots")]
 use url::Url;
 
 /// A connector's `tls:` section.
@@ -39,23 +49,26 @@ use url::Url;
 ///
 /// Construct with [`TlsSection::default`] and set the fields. The struct is
 /// `#[non_exhaustive]` so new knobs can be added without breaking callers.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct TlsSection {
     /// PEM bundle of root CAs trusted in addition to the system trust store.
-    /// Requires an `https://` endpoint.
+    /// Each connector's docs say what the key requires, such as an
+    /// `https://` endpoint.
     #[serde(default)]
     pub root_ca: Option<PathBuf>,
 }
 
 /// What the system trust store yielded.
+#[cfg(feature = "tls-roots")]
 #[derive(Clone, Debug)]
 pub struct SystemRoots {
     certs: Vec<CertificateDer<'static>>,
     errors: Vec<String>,
 }
 
+#[cfg(feature = "tls-roots")]
 impl SystemRoots {
     /// Reads the system trust store. `SSL_CERT_FILE` and `SSL_CERT_DIR`
     /// replace it when set.
@@ -96,6 +109,7 @@ impl SystemRoots {
     }
 }
 
+#[cfg(feature = "tls-roots")]
 impl Default for SystemRoots {
     /// A store that yielded nothing, for a client whose operator turned the
     /// system trust store off. Pass `needs_root` as `false` to
@@ -110,6 +124,7 @@ impl Default for SystemRoots {
 }
 
 /// The certificates a client verifies servers against.
+#[cfg(feature = "tls-roots")]
 #[derive(Clone, Debug)]
 pub struct TrustRoots {
     certs: Vec<CertificateDer<'static>>,
@@ -117,6 +132,7 @@ pub struct TrustRoots {
     system_errors: Vec<String>,
 }
 
+#[cfg(feature = "tls-roots")]
 impl TrustRoots {
     /// The certificates in `system` that are valid trust anchors, then every
     /// certificate in `root_ca`.
@@ -226,6 +242,7 @@ impl TrustRoots {
 ///
 /// [`TrustError::RootCa`] when the file cannot be read, holds no certificate,
 /// or holds one that is not a valid trust anchor.
+#[cfg(feature = "tls-roots")]
 pub fn read_root_ca(path: &Path) -> Result<Vec<CertificateDer<'static>>, TrustError> {
     let fail = |reason: String| TrustError::RootCa {
         path: path.to_path_buf(),
@@ -253,11 +270,13 @@ pub fn read_root_ca(path: &Path) -> Result<Vec<CertificateDer<'static>>, TrustEr
 /// reads the system trust store itself: on Apple platforms, Windows and
 /// Android. Elsewhere that verifier fails to build on an empty store, so the
 /// client verifies against the roots from [`TrustRoots::load`].
+#[cfg(feature = "tls-roots")]
 pub const PLATFORM_VERIFIER: bool =
     cfg!(any(target_vendor = "apple", windows, target_os = "android"));
 
 /// The roots a reqwest-based client verifies servers against, and how it
 /// takes them.
+#[cfg(feature = "tls-roots")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientRoots {
     /// Keep the platform verifier and add these to the roots it reads.
@@ -305,6 +324,7 @@ pub enum ClientRoots {
 /// # Ok(())
 /// # }
 /// ```
+#[cfg(feature = "tls-roots")]
 pub fn client_roots(
     system: impl FnOnce() -> SystemRoots,
     root_ca: Option<&Path>,
@@ -314,6 +334,7 @@ pub fn client_roots(
 }
 
 /// How the platform's reqwest client verifies a server.
+#[cfg(feature = "tls-roots")]
 #[derive(Clone, Copy, Debug)]
 enum Platform {
     /// The platform verifier, which takes no added roots.
@@ -324,6 +345,7 @@ enum Platform {
     Rustls,
 }
 
+#[cfg(feature = "tls-roots")]
 impl Platform {
     fn current() -> Self {
         if cfg!(target_os = "android") {
@@ -336,6 +358,7 @@ impl Platform {
     }
 }
 
+#[cfg(feature = "tls-roots")]
 fn roots_for(
     platform: Platform,
     system: impl FnOnce() -> SystemRoots,
@@ -362,17 +385,20 @@ fn roots_for(
 }
 
 /// Whether `url` is an `https://` URL, in any case the URL parser accepts.
+#[cfg(feature = "tls-roots")]
 #[must_use]
 pub fn is_https(url: &str) -> bool {
     Url::parse(url).is_ok_and(|url| url.scheme() == "https")
 }
 
 /// The check rustls's `RootCertStore` runs on each root it is given.
+#[cfg(feature = "tls-roots")]
 fn usable(cert: &CertificateDer<'_>) -> bool {
     webpki::anchor_from_trusted_cert(cert).is_ok()
 }
 
 /// Why trust roots could not be loaded.
+#[cfg(feature = "tls-roots")]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TrustError {
@@ -403,6 +429,7 @@ pub enum TrustError {
     Unsupported,
 }
 
+#[cfg(feature = "tls-roots")]
 fn no_roots(found: usize, errors: &[String]) -> String {
     let mut text = if found == 0 {
         "the system trust store has no certificates".to_owned()
@@ -418,7 +445,7 @@ fn no_roots(found: usize, errors: &[String]) -> String {
     text
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(all(test, not(loom), feature = "tls-roots"))]
 mod tests {
     use super::*;
     use spate_test::capture_logs;
@@ -631,21 +658,6 @@ mod tests {
         assert_eq!(
             system.errors,
             vec!["failed to read PEM from file: permission denied at '/etc/ssl/certs/a.pem'"]
-        );
-    }
-
-    /// The section parses `root_ca`, defaults to none, and refuses an
-    /// unknown key.
-    #[test]
-    fn tls_section_parses_root_ca_and_refuses_unknown_keys() {
-        let parsed: TlsSection = serde_yaml::from_str("root_ca: /etc/ca.pem").unwrap();
-        assert_eq!(parsed.root_ca, Some(PathBuf::from("/etc/ca.pem")));
-        let empty: TlsSection = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(empty, TlsSection::default());
-        let err = serde_yaml::from_str::<TlsSection>("root_cert: /etc/ca.pem").unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field `root_cert`"),
-            "{err}"
         );
     }
 

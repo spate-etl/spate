@@ -430,7 +430,10 @@ Configured on the exporter, by name suffix or full name:
   pending. A healthy pipeline at low volume reads up to `checkpoint.interval`
   plus the longest sink `batch.linger` plus the write, so keep the threshold
   above that.
-- `spate_backpressure_paused == 1` sustained — sink capacity problem.
+- `spate_backpressure_paused == 1` sustained — the sink cannot keep up, or a
+  shard queue is too shallow for its rate. `spate_queue_full_events_total`
+  rising with `spate_sink_inflight_batches` below the cap points at the queue
+  ([Queues](user-guide/05-deployment/tuning.mdx#queues)).
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before
   reading it as a slow sink. The pipeline also logs one warning when a full

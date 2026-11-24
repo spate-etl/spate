@@ -435,7 +435,8 @@ Configured on the exporter, by name suffix or full name:
 - `spate_backpressure_paused == 1` sustained — the sink cannot keep up, or a
   shard queue is too shallow to ride out slow writes. Pauses with
   `spate_queue_full_events_total` rising and `spate_sink_inflight_batches`
-  below the cap point at a shard worker that has stopped taking chunks
+  below the cap on every shard point at a shard worker that has stopped taking
+  chunks, or at a queue too shallow for the threads that fill it
   ([Queues](user-guide/05-deployment/tuning.mdx#queues)).
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before

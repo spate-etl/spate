@@ -59,8 +59,8 @@ const Y6 = Y5 + ROW;
 const H = Y6 + R_STEP + M;
 
 /**
- * The pipeline thread never blocks on a full queue: it asks the controller to pause its lanes, and
- * the controller keeps calling `poll_events` while they are paused (INV-2).
+ * The pipeline thread never blocks on a full queue: it retries the push or asks the controller to
+ * pause its lanes, and the controller keeps calling `poll_events` while they are paused (INV-2).
  */
 function draw(id: string): React.ReactNode {
   const qx = M + QUEUE_W / 2;

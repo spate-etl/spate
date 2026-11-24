@@ -58,8 +58,8 @@ passes. A rejection in that state is retried: the pipeline thread tries the push
 again a few milliseconds later, and keeps polling its lanes between completed
 pushes. (A push hands the records of one polled batch to the queues.) These
 rejections pause the lanes only once they have lasted `backpressure.min_pause`
-with no push or flush completing, which happens when a worker stops taking
-chunks.
+with no push or flush completing. A worker that has stopped taking chunks
+causes that, and so can a queue that the other pipeline threads keep full.
 
 Either way the rejection counts in `spate_queue_full_events_total`, so the
 counter climbs while a queue is busy even when nothing pauses.

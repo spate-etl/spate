@@ -180,9 +180,10 @@ of [Metrics](../../METRICS.md).
   rejects a chunk while one of its shards waits for a write permit. Either the
   sink cannot keep up, the budget is undersized for the batch settings, or a
   queue is too shallow to ride out slow writes. Pauses with
-  `spate_sink_inflight_batches` below the cap and
+  `spate_sink_inflight_batches` below the cap on every shard and
   `spate_queue_full_events_total` rising point at a shard worker that has
-  stopped taking chunks. Tuning covers both the
+  stopped taking chunks, or at a queue too shallow for the threads that fill
+  it. Tuning covers both the
   [budget sizing rule](tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes)
   and [queue sizing](tuning.mdx#queues).
 - **A shard asleep between retries** — `spate_sink_retry_backoff_seconds`

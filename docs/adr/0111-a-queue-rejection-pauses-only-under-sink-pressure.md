@@ -132,8 +132,8 @@ windows per leg, base against the landed code. Process CPU is
   500 ms: the source was paused 96% to 98% of thread time before and 94% to
   96% after.
 - `spate_queue_full_events_total` rose from about 25,000 to 236,000–287,000
-  per window on the first arm, and from 27,000–33,000 to 152,000–184,000 on
-  the third.
+  per window on the first arm, from about 2,500 to 362,000–393,000 on the
+  second, and from 27,000–33,000 to 152,000–184,000 on the third.
 - Instructions retired per settled row stayed at most 1% above base on every
   arm.
   Cycles per row rose 1% to 31%, because instructions
@@ -145,6 +145,14 @@ windows per leg, base against the landed code. Process CPU is
 - A prototype of the per-shard reading, measured beside a prototype of the
   count on the third arm, paused 141 to 426 times per window against 443 to
   1,075 for the count's prototype, and neither changed the rate.
+- On a pair of cloud hosts with one core type, 48 pipeline threads read
+  compressed JSON lines from object storage into one ClickHouse shard, with
+  512 KiB queues and 64 write permits. ClickHouse kept a third or more of its
+  cores idle on every run. At `min_pause` 500 ms the change carried 22.5M to
+  24.2M events/s against 17.9M to 19.1M before, and paused about half as
+  often. At `min_pause` 50 ms both carried 22.6M to 23.6M events/s. Pipeline
+  CPU per event was 8% to 14% higher with the change at 500 ms, and the same
+  as base at 50 ms, so the cost follows from threads running unpaused.
 
 ## More information
 

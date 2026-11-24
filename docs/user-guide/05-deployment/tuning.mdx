@@ -293,9 +293,9 @@ the queue depends on whether `queue.max_bytes` is set:
 - With `queue.max_bytes` unset, each queue holds 8 chunks, so a larger chunk
   also queues more bytes.
 - With `queue.max_bytes` set, a larger chunk leaves fewer slots in the same
-  bytes, and a shallow queue with fewer slots pauses more often.
+  bytes, and a shallow queue with fewer slots fills more often.
 
-Backpressure pauses while the sink itself is idle are diagnosed under
+A queue that fills while the sink itself is idle is diagnosed under
 [Queues](#queues).
 
 Leave the chunk size alone for latency-sensitive pipelines: throughput and flush
@@ -407,13 +407,15 @@ full queue has three causes, and they read differently:
   near zero. The shard worker is not taking chunks off the queue as fast as
   bursts arrive. The pipeline threads retry the rejected chunks, so the source
   keeps reading while the counter climbs. Raise `queue.max_bytes` to cut the
-  retries; at high rates across many threads, 128 to 256 MiB stopped the
-  rejections in the same measurements. When `spate_pipeline_io_busy_ratio`
+  retries; at high rates across many threads, 256 MiB stopped the rejections
+  in the same measurements. When `spate_pipeline_io_busy_ratio`
   stays above 0.9, raise `pipeline.io_threads` first, as the
   [starting alerts](../../METRICS.md#alerting-starting-points) say. If the
-  source also pauses here, a worker has stopped taking chunks, since a retried
-  rejection pauses only after `backpressure.min_pause` with no push
-  completing.
+  source also pauses here, look for another shard, in this sink or another,
+  whose in-flight batches sit at the cap: one shard waiting for a permit makes
+  every rejection pause at once. Otherwise a thread's pushes stayed rejected
+  for `backpressure.min_pause`, because a worker has stopped taking chunks or
+  the queue is too shallow for this many threads.
 - **Permits busy, store keeping up on average.** In-flight batches sit at the
   cap and permit wait rises. Yet the shard's rate stays well below
   `inflight.max_per_shard` times the mean batch size (`spate_sink_batch_bytes`)

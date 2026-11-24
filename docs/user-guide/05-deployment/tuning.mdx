@@ -20,8 +20,8 @@ and scaling out before you reach that limit multiplies the wrong thing.
 
 The loop is:
 
-1. **Find which side binds.** A pipeline is either source-bound, chain-bound, or
-   sink-bound at any moment, and the metrics say which. See
+1. **Find which side binds.** A pipeline is source-bound, chain-bound,
+   queue-bound or sink-bound at any moment, and the metrics say which. See
    [Which side binds](./monitoring.mdx#which-side-binds). Guessing here is the
    most common way tuning time gets wasted.
 2. **Raise the binding side** using that component's knobs.
@@ -329,57 +329,20 @@ the budget has room.
 
 The default stays at 8 chunks because a shallow queue fails in the direction
 that is easier to diagnose: it under-uses a fast sink, where a deep queue can
-hide a slow sink behind a buffer. It is a defensive choice, and it costs
-throughput. Spate does not derive the size from pipeline threads or shards, so a
-pipeline that needs a deeper queue sets `queue.max_bytes` itself.
+hide a slow sink behind a buffer. Spate does not derive the size from pipeline
+threads or shards, so a pipeline that needs a deeper queue sets
+`queue.max_bytes` itself.
 
-### What depth buys and costs
-
-Two earlier sweeps against a ClickHouse sink, both at 64 KiB chunks, measured
-depth as a trade whose **price depends on whether your sink is the
-constraint.** Depth raised throughput in every regime measured, by 46% to 92%;
-what differs is the cost:
-
-| Your sink | Throughput from depth | Flush p99 cost |
-|---|---|---|
-| **Saturated** — it is the bottleneck | +46% at 64 MiB per shard | ~10× |
-| **Has headroom** — something upstream limits you | +86% by 4 MiB per shard | none measured |
-
-The headroom sweep's records carry no chunk size. Its rig recorded the chunk
-size only when it differed from the 64 KiB default, so the 4 MiB is read from
-the rig.
-
-The flush p99 in that table is `spate_sink_flush_duration_seconds`, seal to
-settle. That is the right family for this question, because what depth costs
-you is the extra time a batch spends waiting before it is durable. It is the
-wrong family for "did my sink get slower": these arms were recorded before the
-split families existed, so the 10× is a seal-to-settle figure and nothing here
-decomposes it into queueing versus write time.
-
-Against a saturated sink the curve is **not** smooth, so choose an end of it
-rather than a middle: the first step up costs nearly all of the latency for
-almost none of the throughput, while the deepest settings recover the throughput
-for comparatively little more. Where the sink has headroom there is no such
-trade. Flush p99 held flat from 512 KiB to 32 MiB per shard, because the queue
-never filled deeply enough to add any, and the shallow default was throttling a
-server with room to spare.
+Depth buys throughput, and what it costs depends on the sink. Against a sink
+with headroom, a deeper queue raised throughput with no measured rise in flush
+latency. Against a saturated sink it also raised throughput, at about ten times
+the flush p99 (measured against ClickHouse, by a rig this repository no longer
+carries).
 
 ### Size a queue that does not pause the source
 
-A later sweep, run on AWS with a rig this repository does not carry, measured
-the smallest queue at which a sink never paused the source. The sink wrote to a
-modeled store: each write cost a fixed latency plus its bytes over a bandwidth,
-and one write in 20 took four times as long. The sweep held
-`inflight.max_per_shard` at its default of 2 and the batch at its defaults. It
-ran one shard fed by 2 or 32 pipeline threads and 8 shards fed by 32, and raised
-the in-flight budget to hold every queue.
-
-The smallest pause-free queue ranged from 2 MiB to 1 GiB per shard. It followed
-the bytes offered to each shard per second times the slow write time. In 47 of
-54 settings it was at most that product, and none needed more than 1.74 times
-it. With batches of 62,500 rows, it needed up to 3 times the product.
-
-To size a queue from that rule:
+A queue that never pauses the source needs to hold about the bytes the shard
+receives during one slow write:
 
 1. Take the bytes per second the source offers each shard.
    `rate(spate_sink_bytes_total[5m])` per `shard` gives it while the pipeline
@@ -388,24 +351,19 @@ To size a queue from that rule:
 2. Take the slow write time from the p99 of
    `spate_sink_write_duration_seconds{outcome="ok"}`. Its buckets are two to
    three times apart, so use the upper bound of the bucket the p99 falls in.
-3. Set `queue.max_bytes` to between that product and twice it.
+3. Set `queue.max_bytes` to between that product and twice it. With batches
+   much smaller than the default, allow up to three times it.
 4. Raise `backpressure.max_inflight_bytes` so that its low watermark holds
    `shards × queue.max_bytes` beside the pending writes, by the
    [budget sizing rule](../02-concepts/03-backpressure.mdx#sizing-the-budget).
 
-The rule is measured at the default `inflight.max_per_shard` of 2 only.
+The rule was measured at the default `inflight.max_per_shard` of 2 only, by a
+rig this repository does not carry. A deeper queue adds little latency while the
+sink has capacity to spare, and adds it when the sink is at its limit.
 
-Below the sink's capacity, a deeper queue barely changed p99 delivery latency in
-most settings of that sweep. Against a store held at its limit it raised it: on
-one shard fed by two threads, p99 from poll to settle rose from 1.17 s at
-512 KiB to 1.82 s at 256 MiB.
-
-Above a few MiB, queued bytes decide how often a queue fills, and the chunk size
-makes little difference. In that sweep, at 8 and 32 MiB, queues of 256 KiB
-chunks paused within about 25% as often as queues of 64 KiB chunks. At 2 MiB
-with a 50 ms `backpressure.min_pause`, the 256 KiB chunks, a quarter of the
-slots, paused 2.3 to 5.6 times as often. With the default 500 ms the counts
-stayed close at every size. To deepen a queue, raise `queue.max_bytes`.
+Queued bytes decide how often a queue fills. Above a few MiB the chunk size
+makes little difference, while on a shallow queue larger chunks leave fewer
+slots and fill it sooner. To deepen a queue, raise `queue.max_bytes`.
 
 ### Find what fills the queue
 
@@ -418,26 +376,24 @@ full queue has three causes, and they read differently:
   `inflight.max_per_shard` and `spate_sink_permit_wait_duration_seconds` stays
   near zero. The shard worker is not taking chunks off the queue as fast as
   bursts arrive, so the sink waits for work while the source pauses. Raise
-  `queue.max_bytes`. In the sweep, 8 shards fed by 32 threads at 1 ms writes
-  paused about as often at 32 MiB as at 512 KiB, and stopped pausing at 128 to
-  256 MiB. More I/O threads did not help in the one case tested, a single shard
-  with `spate_pipeline_io_busy_ratio` under 0.1. When that ratio stays above
-  0.9, raise `pipeline.io_threads` first, as the
+  `queue.max_bytes`; at high rates across many threads the same measurements
+  needed 128 to 256 MiB. When `spate_pipeline_io_busy_ratio` stays above 0.9,
+  raise `pipeline.io_threads` first, as the
   [starting alerts](../../METRICS.md#alerting-starting-points) say.
 - **Permits busy, store keeping up on average.** In-flight batches sit at the
   cap and permit wait rises. Yet the shard's rate stays well below
-  `inflight.max_per_shard × batch.max_bytes` divided by the mean write time, and
-  write p99 is several times the median. A few slow writes hold every permit
-  while rows keep arriving. Size the queue by the rule above. More permits
-  would also absorb a slow write, but no measurement here says by how much.
-  First check that the permits are writing: a batch asleep in retry backoff
-  (`spate_sink_retry_backoff_seconds`) or parked on a quarantined shard
-  (`spate_sink_shard_healthy == 0`) holds its permit too. The
+  `inflight.max_per_shard` times the mean batch size (`spate_sink_batch_bytes`)
+  divided by the mean write time, and write p99 is several times the median. A
+  few slow writes hold every permit while rows keep arriving. Size the queue by
+  the rule above. More permits would also absorb a slow write, but the rule
+  does not cover them. First check that the permits are writing: a batch asleep
+  in retry backoff (`spate_sink_retry_backoff_seconds`) or parked on a
+  quarantined shard (`spate_sink_shard_healthy == 0`) holds its permit too. The
   [starting alerts](../../METRICS.md#alerting-starting-points) cover both.
 - **Rate near capacity.** In-flight batches sit at the cap and the shard's rate
   is close to that capacity, so the sink is behind. Add shards or
   `inflight.max_per_shard`. A deeper queue buys throughput here only by adding
-  latency, as the saturated row above shows.
+  latency.
 
 Read write latency from `spate_sink_write_duration_seconds{outcome="ok"}`, the
 per-attempt write. `spate_sink_flush_duration_seconds` spans seal to settle and

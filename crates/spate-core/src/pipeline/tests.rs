@@ -477,6 +477,9 @@ fn blocked_chain_pauses_then_resumes() {
         mode: ChainMode::BlockOnce(AtomicBool::new(false)),
         batches_seen: 0,
     });
+    // The fake chain blocks with no queue behind it. A shard counted as waiting
+    // for a permit makes that block sink pressure, which pauses at once.
+    h.budget.gate_shard();
     assign_one_lane(&h, &[0..10, 10..20]);
     wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
@@ -506,6 +509,8 @@ fn a_mid_batch_pause_names_every_lane_of_the_thread() {
         mode: ChainMode::BlockOnce(AtomicBool::new(false)),
         batches_seen: 0,
     });
+    // Sink pressure, as in `blocked_chain_pauses_then_resumes`.
+    h.budget.gate_shard();
     h.script.lock().unwrap().push_back(Script::Assign(vec![
         lane(0, 0, &[]),
         lane(1, 0, std::slice::from_ref(&(0..10))),

@@ -59,8 +59,8 @@ const Y6 = Y5 + ROW;
 const H = Y6 + R_STEP + M;
 
 /**
- * The pipeline thread never blocks on a full queue: it asks the controller to pause its lanes, and
- * the controller keeps calling `poll_events` while they are paused (INV-2).
+ * The pipeline thread never blocks on a full queue: it retries the push or asks the controller to
+ * pause its lanes, and the controller keeps calling `poll_events` while they are paused (INV-2).
  */
 function draw(id: string): React.ReactNode {
   const qx = M + QUEUE_W / 2;
@@ -115,8 +115,9 @@ export default function BackpressureDiagram(): React.JSX.Element {
       draw={draw}
       steps={[
         <>
-          A full shard queue refuses <code>try_send</code>, or the in-flight byte budget crosses its
-          high watermark.
+          A full shard queue refuses <code>try_send</code> while a shard waits for a write permit, or the
+          in-flight byte budget crosses its high watermark. A queue refused while every shard can take
+          work is retried, and counts here only once refusals have lasted <code>min_pause</code>.
         </>,
         <>The pipeline thread sends a pause request for its lanes to the controller. It never blocks on a channel send.</>,
         <>

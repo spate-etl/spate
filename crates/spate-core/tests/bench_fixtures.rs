@@ -84,6 +84,7 @@ fn expected_transitions(profile: Profile) -> usize {
         Profile::Quiet => 0,
         Profile::Congested => 1,
         Profile::Flapping => 2048,
+        Profile::Contended => 1024,
     }
 }
 
@@ -120,7 +121,12 @@ fn the_corpora_are_reproducible() {
     for order in [Order::Issued, Order::Scrambled] {
         assert_eq!(ack_schedule(256, order), ack_schedule(256, order));
     }
-    for profile in [Profile::Quiet, Profile::Congested, Profile::Flapping] {
+    for profile in [
+        Profile::Quiet,
+        Profile::Congested,
+        Profile::Flapping,
+        Profile::Contended,
+    ] {
         assert_eq!(poll_script(profile), poll_script(profile));
     }
 }
@@ -186,6 +192,11 @@ fn the_corpora_are_pinned_across_revisions() {
         POLL_FLAPPING_PIN,
         "poll flapping script"
     );
+    assert_eq!(
+        pin(&poll_script(Profile::Contended)),
+        POLL_CONTENDED_PIN,
+        "poll contended script"
+    );
 }
 
 /// The control-plane corpora's pins, named rather than written inline because
@@ -196,6 +207,7 @@ const ACK_SCHEDULE_PIN: (usize, u64) = (98_304, 0x573d_473f_d145_a605);
 const POLL_QUIET_PIN: (usize, u64) = (589_824, 0xeece_ff27_400e_e502);
 const POLL_CONGESTED_PIN: (usize, u64) = (589_824, 0xa183_0e3b_66f3_72c5);
 const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xb5c4_64f3_9e0d_2545);
+const POLL_CONTENDED_PIN: (usize, u64) = (589_824, 0x45de_1615_ec43_0502);
 
 /// Each corpus is the length its own constants imply.
 ///
@@ -216,10 +228,11 @@ fn each_corpus_is_the_length_its_constants_imply() {
     assert_eq!(
         POLL_QUIET_PIN.0,
         ITERATIONS * (8 + 8 + 1 + 1),
-        "the script is one add, sub, rejection and queue reading per iteration"
+        "the script is one add, sub, send outcome and queue reading per iteration"
     );
     assert_eq!(POLL_QUIET_PIN.0, POLL_CONGESTED_PIN.0);
     assert_eq!(POLL_QUIET_PIN.0, POLL_FLAPPING_PIN.0);
+    assert_eq!(POLL_QUIET_PIN.0, POLL_CONTENDED_PIN.0);
 }
 
 /// Neither the tick width nor the driver changes which batches are issued.
@@ -404,7 +417,12 @@ fn a_second_drive_is_the_same_work_as_the_first() {
         }
     }
 
-    for profile in [Profile::Quiet, Profile::Congested, Profile::Flapping] {
+    for profile in [
+        Profile::Quiet,
+        Profile::Congested,
+        Profile::Flapping,
+        Profile::Contended,
+    ] {
         let expect = expected_transitions(profile);
         let mut rig = poll_traffic::rig(profile, expect);
         let mut settled = Vec::new();

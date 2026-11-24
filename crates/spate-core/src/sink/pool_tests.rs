@@ -1019,6 +1019,154 @@ async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     assert_eq!(f.budget.usage(), 0);
 }
 
+/// One sealed batch with no permit free counts the shard on the budget, and
+/// launching it takes the count back.
+#[tokio::test(start_paused = true)]
+async fn a_batch_waiting_for_a_permit_counts_its_shard_as_gated() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer
+        .script(0, 0, [Outcome::Write(Duration::from_secs(10))]);
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    // A: seals on max_bytes and holds the only permit for 10 s.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        f.budget.gated_shards(),
+        0,
+        "a write in flight, none waiting"
+    );
+    // B: seals with no permit free and waits.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(f.budget.gated_shards(), 1, "B waits for a permit");
+    // A returns and B launches.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert_eq!(f.writer.calls().len(), 2, "B launched");
+    assert_eq!(f.budget.gated_shards(), 0, "nothing waits once B launched");
+    drop(ack);
+    drop(f.queues);
+
+    let report = f.pool.drain(Duration::from_secs(1)).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 2,
+            abandoned: 0
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}
+
+/// Writes in flight with permits to spare leave the shard uncounted.
+#[tokio::test(start_paused = true)]
+async fn writes_with_permits_to_spare_leave_the_shard_ungated() {
+    let mut cfg = small_batches();
+    cfg.inflight.max_per_shard = 4;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer
+        .set_default(Outcome::Write(Duration::from_secs(10)));
+
+    let (ack, _ack_rx) = AckRef::test_pair();
+    for sent in 1..=3 {
+        f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+        f.budget.add(8);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(f.writer.calls().len(), sent, "each batch launches");
+        assert_eq!(f.budget.gated_shards(), 0, "{sent} writes, 4 permits");
+    }
+    drop(ack);
+    drop(f.queues);
+    let _ = f.pool.drain(Duration::from_secs(60)).await;
+}
+
+/// Leaving intake for the drain takes the shard out of the count while the
+/// worker is still alive, so a rejection during the drain is not read as sink
+/// pressure.
+#[tokio::test(start_paused = true)]
+async fn the_drain_takes_a_gated_shard_out_of_the_count() {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 32,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture(1, 1, cfg, 16);
+    f.writer.set_default(Outcome::Hang);
+
+    let (ack, _ack_rx) = AckRef::test_pair();
+    // A takes the only permit and hangs; B waits for it.
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    f.queues.try_send(0, chunk(4, 8, &ack)).unwrap();
+    f.budget.add(32);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(f.budget.gated_shards(), 1);
+    drop(ack);
+    drop(f.queues);
+
+    // The deadline breaks the worker out of intake, and the hung write holds
+    // it in the drain phase until the deadline passes.
+    let budget = Arc::clone(&f.budget);
+    let drain = tokio::spawn(f.pool.drain(Duration::from_secs(60)));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!drain.is_finished(), "the worker is still draining");
+    assert_eq!(budget.gated_shards(), 0, "draining, so not gated");
+
+    let report = drain.await.expect("drain");
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 2
+        }
+    );
+}
+
+/// A worker dropped while gated, here by tearing its runtime down, takes its
+/// shard out of the count.
+#[test]
+fn a_worker_dropped_while_gated_leaves_the_shard_ungated() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (ack, _ack_rx) = AckRef::test_pair();
+    let fx = rt.block_on(async {
+        let mut cfg = small_batches();
+        cfg.inflight.max_per_shard = 1;
+        let fx = fixture(1, 1, cfg, 8);
+        fx.writer.set_default(Outcome::Hang);
+        fx.queues.try_send(0, chunk(1, 8, &ack)).expect("send");
+        fx.queues.try_send(0, chunk(1, 8, &ack)).expect("send");
+        wait_until(spate_test::HANG, "the shard is gated", || {
+            fx.budget.gated_shards() == 1
+        });
+        fx
+    });
+    // Dropping the runtime drops the worker's future where it stands, in the
+    // intake loop.
+    drop(rt);
+    assert_eq!(fx.budget.gated_shards(), 0);
+    drop(ack);
+}
+
 /// A sink outage reaches the wedge in
 /// `a_held_permit_does_not_wedge_dispatch_at_shutdown` without a hung write.
 /// The default `retry.max_attempts` is 0 (unbounded), so every write task

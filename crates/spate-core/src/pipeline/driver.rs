@@ -267,6 +267,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                             deadline,
                             &*stop_clock,
                             &mut bp,
+                            &budget,
                             &events,
                             &health,
                             params.thread,
@@ -283,8 +284,11 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     // instead of waiting out a full `idle_flush` lull. Held
                     // acks pin partition watermarks under sustained load.
                     match chain.flush() {
-                        PushOutcome::Done => flushed_since_data = true,
-                        PushOutcome::Blocked { .. } => bp.on_send_rejected(),
+                        PushOutcome::Done => {
+                            flushed_since_data = true;
+                            bp.on_push_done();
+                        }
+                        PushOutcome::Blocked { .. } => bp.on_queue_rejected(&budget),
                         PushOutcome::Fatal(error) => {
                             let _ = events.send(DriverEvent::Fatal {
                                 thread: params.thread,
@@ -307,6 +311,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         deadline,
                         &*stop_clock,
                         &mut bp,
+                        &budget,
                         &events,
                         &health,
                         params.thread,
@@ -346,6 +351,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                 &mut flushed_since_data,
                 params.idle_flush,
                 &mut bp,
+                &budget,
                 &events,
                 params.thread,
             );
@@ -417,6 +423,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     &mut flushed_since_data,
                     params.idle_flush,
                     &mut bp,
+                    &budget,
                     &events,
                     params.thread,
                 );
@@ -486,6 +493,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         &mut flushed_since_data,
                         params.idle_flush,
                         &mut bp,
+                        &budget,
                         &events,
                         params.thread,
                     );
@@ -689,8 +697,10 @@ fn park_until_shutdown<L: SourceLane>(
 /// resume cursor until the batch completes.
 ///
 /// The batch borrows the lane's buffers, so the retry loop must hold it.
-/// While blocked, the loop keeps ticking the backpressure controller (raising
-/// a pause request the first time), heartbeats, and sleeps briefly. The
+/// While blocked, the loop records each rejection with the backpressure
+/// controller and ticks it, heartbeats, and sleeps briefly. A rejection
+/// raises a pause request at once while a shard worker waits for a write
+/// permit, and otherwise once rejections have lasted `min_pause`. The
 /// never-block invariant is about channel sends; deferring this thread's
 /// *next* poll is what backpressure does.
 #[expect(
@@ -719,7 +729,10 @@ fn drive_batch(
         health.heartbeat(params.thread);
         let pushed = std::panic::catch_unwind(AssertUnwindSafe(|| chain.push_batch(batch, from)));
         match pushed {
-            Ok(PushOutcome::Done) => return Ok(()),
+            Ok(PushOutcome::Done) => {
+                bp.on_push_done();
+                return Ok(());
+            }
             Ok(PushOutcome::Blocked { resume_at, reason }) => {
                 debug_assert!(resume_at >= from, "resume cursor must not go backwards");
                 from = resume_at;
@@ -741,7 +754,7 @@ fn drive_batch(
                 // Only sink pressure engages the backpressure controller; a
                 // not-ready wait is counted by the chain and retried.
                 if reason == BlockReason::Capacity {
-                    bp.on_send_rejected();
+                    bp.on_queue_rejected(budget);
                     let queues_low = || queues_below_low(queues, params.queue_low_ratio);
                     if let Some(t) = bp.tick(budget, queues_low) {
                         apply_transition(t, owned(), events, bp_metrics, pause_started);
@@ -806,11 +819,16 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
 /// A flush still blocked at the deadline is abandoned. The terminal
 /// stage's Drop contract fails any parked acknowledgments, so abandoned
 /// data replays instead of being committed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint driver-state borrows"
+)]
 fn flush_until(
     chain: &mut dyn RunnableChain,
     deadline: Instant,
     stop_clock: &dyn Clock,
     bp: &mut WatermarkController,
+    budget: &InflightBudget,
     events: &crossbeam_channel::Sender<DriverEvent>,
     health: &HealthState,
     thread: usize,
@@ -818,9 +836,12 @@ fn flush_until(
     loop {
         health.heartbeat(thread);
         match chain.flush() {
-            PushOutcome::Done => return,
+            PushOutcome::Done => {
+                bp.on_push_done();
+                return;
+            }
             PushOutcome::Blocked { .. } => {
-                bp.on_send_rejected();
+                bp.on_queue_rejected(budget);
                 if stop_clock.now() >= deadline {
                     tracing::error!(
                         thread,
@@ -841,12 +862,17 @@ fn flush_until(
 
 /// Flush partial terminal state once per data lull, once `quiet_for` since
 /// the last data reaches `after`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "free function over disjoint driver-state borrows"
+)]
 fn idle_flush(
     chain: &mut dyn RunnableChain,
     quiet_for: Duration,
     flushed_since_data: &mut bool,
     after: Duration,
     bp: &mut WatermarkController,
+    budget: &InflightBudget,
     events: &crossbeam_channel::Sender<DriverEvent>,
     thread: usize,
 ) {
@@ -854,11 +880,14 @@ fn idle_flush(
         return;
     }
     match chain.flush() {
-        PushOutcome::Done => *flushed_since_data = true,
+        PushOutcome::Done => {
+            *flushed_since_data = true;
+            bp.on_push_done();
+        }
         PushOutcome::Blocked { .. } => {
-            // Full queues while idle: note the rejection; the main-loop tick
-            // raises the pause request and the flush retries next lull.
-            bp.on_send_rejected();
+            // Full queues while idle: record the rejection for the main-loop
+            // tick, and retry the flush on the next pass.
+            bp.on_queue_rejected(budget);
         }
         PushOutcome::Fatal(error) => {
             let _ = events.send(DriverEvent::Fatal { thread, error });
@@ -1034,6 +1063,408 @@ mod tests {
             std::panic::resume_unwind(panic);
         }
         assert_eq!(exit, DriverExit::Completed);
+    }
+
+    /// A lane whose first `batches` polls each return one payload.
+    struct BatchLane {
+        batches: usize,
+        ack: crate::checkpoint::AckRef,
+    }
+
+    struct OnePayload<'a> {
+        ack: &'a crate::checkpoint::AckRef,
+        taken: bool,
+    }
+
+    impl<'a> PayloadBatch<'a> for OnePayload<'a> {
+        fn next_payload(&mut self) -> Option<crate::record::RawPayload<'a>> {
+            if std::mem::replace(&mut self.taken, true) {
+                return None;
+            }
+            Some(crate::record::RawPayload {
+                bytes: b"x",
+                key: None,
+                partition: PartitionId(0),
+                offset: 0,
+                timestamp_ms: 0,
+            })
+        }
+
+        fn ack(&self) -> &crate::checkpoint::AckRef {
+            self.ack
+        }
+    }
+
+    impl SourceLane for BatchLane {
+        type Batch<'a> = OnePayload<'a>;
+
+        fn id(&self) -> LaneId {
+            LaneId(0)
+        }
+
+        fn partition(&self) -> PartitionId {
+            PartitionId(0)
+        }
+
+        fn poll(
+            &mut self,
+            _max_records: usize,
+            _timeout: Duration,
+        ) -> Result<Option<OnePayload<'_>>, crate::error::SourceError> {
+            if self.batches == 0 {
+                return Ok(None);
+            }
+            self.batches -= 1;
+            Ok(Some(OnePayload {
+                ack: &self.ack,
+                taken: false,
+            }))
+        }
+    }
+
+    /// What a [`with_driver`] check drives and reads.
+    struct Driving<'a> {
+        driver: &'a Detached<BatchLane>,
+        clock: &'a TestClock,
+        shared: &'a ChainShared,
+    }
+
+    impl Driving<'_> {
+        fn flushes(&self) -> usize {
+            self.shared.flushes.load(Ordering::Relaxed)
+        }
+
+        fn wait_for_flushes(&self, n: usize) {
+            wait_until(HANG, "the thread flushes", || self.flushes() >= n);
+        }
+
+        /// Return once a pass has started after this call. A heartbeat on the
+        /// moved clock comes from such a pass.
+        fn wait_for_a_later_pass(&self) {
+            self.clock
+                .advance(HealthThresholds::default().heartbeat_stale + Duration::from_millis(1));
+            wait_until(HANG, "the thread starts another pass", || {
+                self.driver.health.healthy()
+            });
+        }
+
+        /// Move the clock past the idle-flush lull. The thread reads the start
+        /// of its lull when it starts, so the clock moves only after a pass.
+        fn start_the_lull(&self) {
+            self.wait_for_a_later_pass();
+            self.clock.advance(IDLE);
+        }
+
+        fn paused(&self) -> bool {
+            match self.driver.events.try_recv() {
+                Ok(DriverEvent::PauseLanes { .. }) => true,
+                Ok(other) => panic!("unexpected event {other:?}"),
+                Err(_) => false,
+            }
+        }
+    }
+
+    /// Run driver thread 0 over `mode`, with `lane` batches when set, until
+    /// `check` returns, then shut it down.
+    fn with_driver(
+        mode: ChainMode,
+        min_pause: Duration,
+        idle_flush: Duration,
+        lane: Option<usize>,
+        check: impl FnOnce(&Driving<'_>),
+    ) {
+        let clock = TestClock::frozen();
+        let options = RuntimeOptions {
+            poll_timeout: Duration::from_millis(1),
+            idle_flush,
+            blocked_retry: Duration::from_millis(1),
+            ..RuntimeOptions::default()
+        };
+        let backpressure = BackpressureSection {
+            min_pause,
+            ..BackpressureSection::default()
+        };
+        let (queues, _receivers) = crate::sink::shard_queues(1, 4);
+        let shared = Arc::new(ChainShared::default());
+        let chain = FakeChain {
+            shared: Arc::clone(&shared),
+            log: Arc::new(Mutex::new(SourceLog::default())),
+            mode,
+            batches_seen: 0,
+        };
+        let (ctx, driver) = DriverContext::<BatchLane>::detached(
+            &options,
+            &backpressure,
+            &CheckpointSection::default(),
+            Box::new(chain),
+            vec![queues],
+            &ComponentLabels::new("test", spate_test::unique_name("driver"), "driver"),
+            clock.clone(),
+        );
+        let (ack, _acks) = crate::checkpoint::AckRef::test_pair();
+        if let Some(batches) = lane {
+            driver
+                .control
+                .send(ThreadControl::AddLane {
+                    lane: BatchLane { batches, ack },
+                    gate: None,
+                })
+                .unwrap();
+        }
+        let thread = crate::task::spawn_thread("driver-test", move || run_driver(ctx)).unwrap();
+        let checked = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            check(&Driving {
+                driver: &driver,
+                clock: &clock,
+                shared: &shared,
+            });
+        }));
+        driver
+            .control
+            .send(ThreadControl::Shutdown {
+                barrier: DrainBarrier::new(1),
+                deadline: clock.now(),
+            })
+            .unwrap();
+        let exit = thread.join().unwrap();
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
+        assert_eq!(exit, DriverExit::Completed);
+    }
+
+    const AN_HOUR: Duration = Duration::from_secs(3600);
+
+    /// The lull after which a thread with no lanes flushes, on the test clock.
+    const IDLE: Duration = Duration::from_millis(10);
+
+    #[derive(Clone, Copy)]
+    enum Site {
+        DriveBatch,
+        FlushNow,
+        FlushUntil,
+        IdleFlush,
+    }
+
+    /// Reject one push or flush at `site`, with `min_pause` an hour and a shard
+    /// counted as waiting for a permit when `gated`, and report whether the
+    /// thread asked for a pause.
+    fn one_rejection_pauses(site: Site, gated: bool) -> bool {
+        let (mode, idle_flush, lane) = match site {
+            Site::DriveBatch => (
+                ChainMode::BlockOnce(AtomicBool::new(false)),
+                AN_HOUR,
+                Some(1),
+            ),
+            Site::FlushNow => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                AN_HOUR,
+                None,
+            ),
+            Site::FlushUntil => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                AN_HOUR,
+                Some(0),
+            ),
+            Site::IdleFlush => (
+                ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+                IDLE,
+                None,
+            ),
+        };
+        let mut paused = false;
+        with_driver(mode, AN_HOUR, idle_flush, lane, |d| {
+            if gated {
+                d.driver.budget.gate_shard();
+            }
+            match site {
+                // The push ticks the controller before it retries, so a
+                // consumed payload follows that tick.
+                Site::DriveBatch => wait_until(HANG, "the batch is taken", || {
+                    d.shared.consumed.load(Ordering::Relaxed) == 1
+                }),
+                // The flush is served before the tick of its pass.
+                Site::FlushNow => {
+                    d.driver.control.send(ThreadControl::FlushNow).unwrap();
+                    d.wait_for_flushes(1);
+                    d.wait_for_a_later_pass();
+                }
+                // A blocked flush, then a completed one, before the tick of
+                // the pass that served the stop.
+                Site::FlushUntil => {
+                    d.driver
+                        .control
+                        .send(ThreadControl::StopLanes {
+                            lanes: vec![LaneId(0)],
+                            barrier: DrainBarrier::new(1),
+                            deadline: d.clock.now() + AN_HOUR,
+                        })
+                        .unwrap();
+                    d.wait_for_flushes(2);
+                    d.wait_for_a_later_pass();
+                }
+                // The idle flush runs after the tick of its pass, so the tick
+                // that reads it is in the pass after.
+                Site::IdleFlush => {
+                    d.start_the_lull();
+                    d.wait_for_flushes(1);
+                    d.wait_for_a_later_pass();
+                    d.wait_for_a_later_pass();
+                }
+            }
+            paused = d.paused();
+            if gated {
+                d.driver.budget.ungate_shard();
+            }
+        });
+        paused
+    }
+
+    #[test]
+    fn a_blocked_push_with_no_shard_gated_does_not_pause() {
+        assert!(!one_rejection_pauses(Site::DriveBatch, false));
+    }
+
+    #[test]
+    fn a_blocked_push_with_a_shard_gated_pauses() {
+        assert!(one_rejection_pauses(Site::DriveBatch, true));
+    }
+
+    #[test]
+    fn a_blocked_flush_now_with_no_shard_gated_does_not_pause() {
+        assert!(!one_rejection_pauses(Site::FlushNow, false));
+    }
+
+    #[test]
+    fn a_blocked_flush_now_with_a_shard_gated_pauses() {
+        assert!(one_rejection_pauses(Site::FlushNow, true));
+    }
+
+    #[test]
+    fn a_blocked_stop_flush_with_no_shard_gated_does_not_pause() {
+        assert!(!one_rejection_pauses(Site::FlushUntil, false));
+    }
+
+    #[test]
+    fn a_blocked_stop_flush_with_a_shard_gated_pauses() {
+        assert!(one_rejection_pauses(Site::FlushUntil, true));
+    }
+
+    #[test]
+    fn a_blocked_idle_flush_with_no_shard_gated_does_not_pause() {
+        assert!(!one_rejection_pauses(Site::IdleFlush, false));
+    }
+
+    #[test]
+    fn a_blocked_idle_flush_with_a_shard_gated_pauses() {
+        assert!(one_rejection_pauses(Site::IdleFlush, true));
+    }
+
+    const MIN_PAUSE: Duration = Duration::from_millis(5);
+
+    /// Batches that are each rejected once and then taken, for longer than
+    /// `min_pause`, never pause: each completed push ends the run.
+    #[test]
+    fn completed_pushes_between_rejections_do_not_pause() {
+        with_driver(
+            ChainMode::BlockEveryOtherPush(AtomicBool::new(false)),
+            MIN_PAUSE,
+            AN_HOUR,
+            Some(usize::MAX),
+            |d| {
+                let start = std::time::Instant::now();
+                wait_until(HANG, "batches over four minimum pauses", || {
+                    start.elapsed() >= MIN_PAUSE * 4
+                        && d.shared.consumed.load(Ordering::Relaxed) >= 4
+                });
+                assert!(!d.paused());
+            },
+        );
+    }
+
+    /// A flush at `site` is rejected and then completes, and a `FlushNow` is
+    /// rejected more than `min_pause` after the first rejection. The completed
+    /// flush ended the first run, so the thread does not pause.
+    fn a_completed_flush_ends_the_run(site: Site) {
+        let idle_flush = if matches!(site, Site::IdleFlush) {
+            IDLE
+        } else {
+            AN_HOUR
+        };
+        let lane = matches!(site, Site::FlushUntil).then_some(0);
+        with_driver(
+            ChainMode::BlockEveryOtherFlush(AtomicBool::new(false)),
+            MIN_PAUSE,
+            idle_flush,
+            lane,
+            |d| {
+                match site {
+                    Site::FlushNow => {
+                        d.driver.control.send(ThreadControl::FlushNow).unwrap();
+                        d.wait_for_flushes(1);
+                        d.driver.control.send(ThreadControl::FlushNow).unwrap();
+                    }
+                    Site::FlushUntil => {
+                        d.driver
+                            .control
+                            .send(ThreadControl::StopLanes {
+                                lanes: vec![LaneId(0)],
+                                barrier: DrainBarrier::new(1),
+                                deadline: d.clock.now() + AN_HOUR,
+                            })
+                            .unwrap();
+                    }
+                    // The next pass's idle flush completes.
+                    Site::IdleFlush => d.start_the_lull(),
+                    Site::DriveBatch => unreachable!("pushes have their own test"),
+                }
+                d.wait_for_flushes(2);
+                let start = std::time::Instant::now();
+                wait_until(HANG, "two minimum pauses pass", || {
+                    start.elapsed() >= MIN_PAUSE * 2
+                });
+                d.driver.control.send(ThreadControl::FlushNow).unwrap();
+                d.wait_for_flushes(3);
+                d.wait_for_a_later_pass();
+                assert!(!d.paused());
+            },
+        );
+    }
+
+    #[test]
+    fn a_completed_flush_now_ends_the_run() {
+        a_completed_flush_ends_the_run(Site::FlushNow);
+    }
+
+    #[test]
+    fn a_completed_stop_flush_ends_the_run() {
+        a_completed_flush_ends_the_run(Site::FlushUntil);
+    }
+
+    #[test]
+    fn a_completed_idle_flush_ends_the_run() {
+        a_completed_flush_ends_the_run(Site::IdleFlush);
+    }
+
+    /// A push that stays blocked with no shard gated pauses once its rejections
+    /// span `min_pause`.
+    #[test]
+    fn a_push_that_stays_blocked_pauses() {
+        let open = Arc::new(AtomicBool::new(false));
+        with_driver(
+            ChainMode::BlockUntil(Arc::clone(&open)),
+            Duration::from_millis(10),
+            AN_HOUR,
+            Some(1),
+            |d| {
+                assert!(matches!(
+                    d.driver.events.recv_timeout(HANG),
+                    Ok(DriverEvent::PauseLanes { .. })
+                ));
+                // Let the batch through so the thread can serve the shutdown.
+                open.store(true, Ordering::Relaxed);
+            },
+        );
     }
 
     /// The reading is true only when every queue of every sink is at or below

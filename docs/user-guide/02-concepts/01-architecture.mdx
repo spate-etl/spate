@@ -41,8 +41,10 @@ sink's wire format (encoding is CPU work, so it happens
 *on the pipeline thread*), then hands the chunk to that shard's bounded queue
 with `try_send`, never a blocking send. When the sink supplies a frame codec,
 such as a compressor, the pipeline thread also runs it on each chunk as the
-chunk seals. When a queue is full, the pipeline thread asks the controller to
-pause its lanes, and the controller keeps calling `poll_events`; see
+chunk seals. When a queue is full because its sink is the limit, the pipeline
+thread asks the controller to pause its lanes, and the controller keeps calling
+`poll_events`. When the queue's worker simply has not reached it yet, the
+pipeline thread retries the chunk instead; see
 [Backpressure](03-backpressure.mdx).
 
 <BackpressureDiagram />

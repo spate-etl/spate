@@ -1,10 +1,12 @@
 //! Backpressure: the global in-flight byte budget and the watermark
 //! pause/resume controller with hysteresis.
 //!
-//! Invariant (INV-2): source threads never block on sends. When a
-//! `try_send` is rejected or the in-flight budget crosses its high
-//! watermark, the poll loop pauses its source lanes and
-//! *keeps polling*; it resumes only under hysteresis (usage back below the
+//! Invariant (INV-2): source threads never block on sends. The poll loop
+//! pauses its source lanes and *keeps polling* when the in-flight budget
+//! crosses its high watermark, or when a `try_send` is rejected while a shard
+//! worker waits for a write permit. A rejection while every worker can take
+//! work pauses only once rejections have lasted `min_pause` with no push
+//! completing. The loop resumes only under hysteresis (usage back below the
 //! low watermark, downstream queues drained, and a minimum pause elapsed),
 //! so pause/resume cannot flap faster than once per `min_pause`.
 //!
@@ -36,8 +38,10 @@
 //!
 //! // Inside the poll loop:
 //! // - when a try_send to a shard queue is rejected:
-//! //     controller.on_send_rejected();
+//! //     controller.on_queue_rejected(&budget);
 //! //     (stash the undeliverable record; NEVER block)
+//! // - when a push completes with nothing left stashed:
+//! //     controller.on_push_done();
 //! // - once per iteration, with a reading of whether every shard queue is
 //! //   at or below 50% full, which the controller calls only when it decides:
 //! let queues_below_low = || true;
@@ -69,9 +73,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// [`InflightBudget::usage`], which the hysteresis absorbs. Both directions
 /// saturate. `sub` cannot underflow past zero even if an acknowledgment
 /// races ahead of the bookkeeping that added its bytes.
+///
+/// The budget also counts the shards whose worker holds a sealed batch with
+/// no free write permit. [`WatermarkController::on_queue_rejected`] reads that
+/// count to tell sink pressure from a queue the worker has not reached yet.
 #[derive(Debug, Default)]
 pub struct InflightBudget {
     bytes: AtomicUsize,
+    /// Shards whose worker holds a sealed batch with no free write permit.
+    gated: AtomicUsize,
 }
 
 impl InflightBudget {
@@ -80,6 +90,7 @@ impl InflightBudget {
     pub fn new() -> Self {
         Self {
             bytes: AtomicUsize::new(0),
+            gated: AtomicUsize::new(0),
         }
     }
 
@@ -111,6 +122,23 @@ impl InflightBudget {
     pub fn usage(&self) -> usize {
         self.bytes.load(Ordering::Relaxed)
     }
+
+    /// Count one more shard whose worker holds a sealed batch with no free
+    /// write permit. Each call is paired with one [`Self::ungate_shard`].
+    pub(crate) fn gate_shard(&self) {
+        self.gated.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Take back one shard counted by [`Self::gate_shard`].
+    pub(crate) fn ungate_shard(&self) {
+        let before = self.gated.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(before > 0, "ungate_shard without a matching gate_shard");
+    }
+
+    /// How many shards wait for a write permit (possibly slightly stale).
+    pub(crate) fn gated_shards(&self) -> usize {
+        self.gated.load(Ordering::Relaxed)
+    }
 }
 
 /// Hysteresis parameters for one pipeline's watermark controller.
@@ -128,6 +156,10 @@ pub struct BackpressureParams {
     /// amortizes the prefetch purge that pausing a source implies (a paused
     /// Kafka partition drops its prefetched messages and refetches on
     /// resume).
+    ///
+    /// Also how long queue rejections must last, with no push completing,
+    /// before they pause the source while no shard worker waits for a permit
+    /// (see [`WatermarkController::on_queue_rejected`]).
     pub min_pause: Duration,
 }
 
@@ -194,8 +226,11 @@ enum State {
 pub struct WatermarkController<C: Clock = SystemClock> {
     params: BackpressureParams,
     state: State,
-    /// A `try_send` rejection observed since the last `tick`.
+    /// A rejection under sink pressure observed since the last `tick`.
     rejected: bool,
+    /// The first and latest rejection of the current run of rejections while
+    /// no shard worker waits for a permit. A completed push ends the run.
+    contended: Option<(Instant, Instant)>,
     clock: C,
 }
 
@@ -215,18 +250,47 @@ impl<C: Clock> WatermarkController<C> {
             params,
             state: State::Normal,
             rejected: false,
+            contended: None,
             clock,
         }
     }
 
-    /// Record that a `try_send` to a downstream queue was rejected. Cheap;
-    /// call from the poll loop's rejection path. While paused this restarts
-    /// the minimum-pause timer.
+    /// Record a rejection under sink pressure: the next `tick` pauses, and
+    /// while paused this restarts the minimum-pause timer.
+    ///
+    /// A poll loop with an [`InflightBudget`] calls
+    /// [`Self::on_queue_rejected`] instead, which calls this only when a shard
+    /// worker waits for a write permit.
     pub fn on_send_rejected(&mut self) {
         self.rejected = true;
         if let State::Paused { since } = &mut self.state {
             *since = self.clock.now();
         }
+    }
+
+    /// Record that a `try_send` to a shard queue was rejected. Cheap; call
+    /// from the poll loop's rejection path.
+    ///
+    /// While `budget` counts a shard whose worker waits for a write permit,
+    /// the sink is the limit and this is [`Self::on_send_rejected`]. Otherwise
+    /// the worker has not reached its queue yet, and the rejection starts or
+    /// extends a run that pauses only once it spans
+    /// [`BackpressureParams::min_pause`]. [`Self::on_push_done`] ends the run.
+    /// While paused, any rejection restarts the minimum-pause timer.
+    pub fn on_queue_rejected(&mut self, budget: &InflightBudget) {
+        if budget.gated_shards() > 0 || self.is_paused() {
+            self.on_send_rejected();
+            return;
+        }
+        let now = self.clock.now();
+        let first = self.contended.map_or(now, |(first, _)| first);
+        self.contended = Some((first, now));
+    }
+
+    /// Record that a push or flush completed with nothing left parked, which
+    /// ends a run of rejections recorded by [`Self::on_queue_rejected`].
+    pub fn on_push_done(&mut self) {
+        self.contended = None;
     }
 
     /// Evaluate the state machine once per poll iteration.
@@ -243,8 +307,14 @@ impl<C: Clock> WatermarkController<C> {
     ) -> Option<Transition> {
         match self.state {
             State::Normal => {
-                if self.rejected || budget.usage() >= self.params.high_bytes {
+                // A span, so a lone rejection followed by a quiet source does
+                // not pause the thread long after.
+                let contended = self.contended.is_some_and(|(first, last)| {
+                    last.duration_since(first) >= self.params.min_pause
+                });
+                if self.rejected || contended || budget.usage() >= self.params.high_bytes {
                     self.rejected = false;
+                    self.contended = None;
                     self.state = State::Paused {
                         since: self.clock.now(),
                     };
@@ -418,6 +488,103 @@ mod tests {
         assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
     }
 
+    /// Rejections while no shard waits for a permit pause only once their run
+    /// spans `min_pause`: 1 ms short does not pause, exactly `min_pause` does.
+    #[test]
+    fn a_contended_run_pauses_once_it_spans_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "one rejection");
+        clock.advance(MIN_PAUSE - Duration::from_millis(1));
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "1 ms short of min_pause");
+        clock.advance(Duration::from_millis(1));
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+    }
+
+    /// The run is measured between rejections, so a lone rejection followed by
+    /// a quiet source never pauses.
+    #[test]
+    fn a_lone_contended_rejection_never_pauses() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None);
+        clock.advance(MIN_PAUSE * 100);
+        assert_eq!(ctl.tick(&budget, || true), None);
+        assert!(!ctl.is_paused());
+    }
+
+    #[test]
+    fn a_completed_push_ends_a_contended_run() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        ctl.on_push_done();
+        clock.advance(MIN_PAUSE);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None);
+    }
+
+    /// A shard waiting for a permit makes a queue rejection sink pressure,
+    /// which pauses on the next tick as `on_send_rejected` does.
+    #[test]
+    fn a_rejection_while_a_shard_is_gated_pauses_on_next_tick() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+    }
+
+    /// With no minimum pause, any queue rejection pauses on the next tick.
+    #[test]
+    fn a_contended_rejection_pauses_at_once_with_zero_min_pause() {
+        let clock = TestClock::frozen();
+        let mut ctl = WatermarkController::with_clock(
+            BackpressureParams {
+                min_pause: Duration::ZERO,
+                ..params()
+            },
+            &*clock,
+        );
+        let budget = InflightBudget::new();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+    }
+
+    #[test]
+    fn a_contended_rejection_while_paused_restarts_the_timer() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_send_rejected();
+        ctl.tick(&budget, || true);
+        clock.advance(MIN_PAUSE - Duration::from_millis(1));
+        ctl.on_queue_rejected(&budget);
+        clock.advance(Duration::from_millis(2)); // past original deadline
+        assert_eq!(ctl.tick(&budget, || true), None);
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A pause ends the run that raised it, so resuming does not pause again
+    /// on the run's old span.
+    #[test]
+    fn a_pause_ends_the_contended_run_that_raised_it() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        clock.advance(MIN_PAUSE);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+        assert_eq!(ctl.tick(&budget, || true), None);
+    }
+
     #[test]
     fn transitions_strictly_alternate_and_cycles_respect_min_pause() {
         // Adversary: rejects the instant we resume, drains immediately
@@ -483,6 +650,10 @@ mod tests {
             Add(usize),
             Sub(usize),
             Reject,
+            QueueReject,
+            PushDone,
+            Gate,
+            Ungate,
             Advance(u64),
             Tick,
         }
@@ -492,6 +663,10 @@ mod tests {
                 (0usize..2000).prop_map(Op::Add),
                 (0usize..2000).prop_map(Op::Sub),
                 Just(Op::Reject),
+                Just(Op::QueueReject),
+                Just(Op::PushDone),
+                Just(Op::Gate),
+                Just(Op::Ungate),
                 (1u64..400).prop_map(Op::Advance),
                 Just(Op::Tick),
             ]
@@ -505,12 +680,17 @@ mod tests {
                 let clock = TestClock::frozen();
                 let (mut ctl, budget) = setup(&clock);
                 let mut model: usize = 0;
+                let mut gated: usize = 0;
                 let mut transitions = Vec::new();
                 for op in ops {
                     match op {
                         Op::Add(n) => { budget.add(n); model = model.saturating_add(n); }
                         Op::Sub(n) => { budget.sub(n); model = model.saturating_sub(n); }
                         Op::Reject => ctl.on_send_rejected(),
+                        Op::QueueReject => ctl.on_queue_rejected(&budget),
+                        Op::PushDone => ctl.on_push_done(),
+                        Op::Gate => { budget.gate_shard(); gated += 1; }
+                        Op::Ungate => if gated > 0 { budget.ungate_shard(); gated -= 1; },
                         Op::Advance(ms) => clock.advance(Duration::from_millis(ms)),
                         Op::Tick => {
                             if let Some(t) = ctl.tick(&budget, || true) {
@@ -519,6 +699,7 @@ mod tests {
                         }
                     }
                     prop_assert_eq!(budget.usage(), model);
+                    prop_assert_eq!(budget.gated_shards(), gated);
                 }
                 for (i, t) in transitions.iter().enumerate() {
                     let expected = if i % 2 == 0 { Transition::Pause } else { Transition::Resume };
@@ -532,18 +713,25 @@ mod tests {
             fn eventually_resumes_after_drain(ops in proptest::collection::vec(op_strategy(), 1..200)) {
                 let clock = TestClock::frozen();
                 let (mut ctl, budget) = setup(&clock);
+                let mut gated: usize = 0;
                 for op in ops {
                     match op {
                         Op::Add(n) => budget.add(n),
                         Op::Sub(n) => budget.sub(n),
                         Op::Reject => ctl.on_send_rejected(),
+                        Op::QueueReject => ctl.on_queue_rejected(&budget),
+                        Op::PushDone => ctl.on_push_done(),
+                        Op::Gate => { budget.gate_shard(); gated += 1; }
+                        Op::Ungate => if gated > 0 { budget.ungate_shard(); gated -= 1; },
                         Op::Advance(ms) => clock.advance(Duration::from_millis(ms)),
                         Op::Tick => { let _ = ctl.tick(&budget, || true); }
                     }
                 }
                 // Drain the world and go quiet.
                 budget.sub(budget.usage());
-                let _ = ctl.tick(&budget, || true); // consume any pending rejection
+                // Consume any pending rejection, or pause on a run that already
+                // spans min_pause.
+                let _ = ctl.tick(&budget, || true);
                 clock.advance(MIN_PAUSE * 2);
                 let _ = ctl.tick(&budget, || true);
                 prop_assert!(!ctl.is_paused(), "controller wedged in Paused");
@@ -580,6 +768,30 @@ mod loom_tests {
                 h.join().unwrap();
             }
             assert_eq!(budget.usage(), 0);
+        });
+    }
+
+    /// Shard workers gating and ungating while a pipeline thread reads the
+    /// count leave it at zero once every worker has taken back its share.
+    #[test]
+    fn balanced_gates_converge_to_zero() {
+        loom::model(|| {
+            let budget = Arc::new(InflightBudget::new());
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let b = Arc::clone(&budget);
+                    thread::spawn(move || {
+                        b.gate_shard();
+                        let _ = b.gated_shards(); // reader interleaves freely
+                        b.ungate_shard();
+                    })
+                })
+                .collect();
+            let _ = budget.gated_shards();
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(budget.gated_shards(), 0);
         });
     }
 

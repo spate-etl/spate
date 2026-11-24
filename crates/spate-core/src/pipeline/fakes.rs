@@ -667,6 +667,11 @@ pub(crate) enum ChainMode {
     /// Take every batch, and report every flush blocked, as a terminal whose
     /// sink queue stays full does. A drain's flush then runs to its deadline.
     FlushBlocked,
+    /// Block every other push, starting with the first, so each batch is
+    /// rejected once and then taken.
+    BlockEveryOtherPush(AtomicBool),
+    /// Take every batch, and block every other flush, starting with the first.
+    BlockEveryOtherFlush(AtomicBool),
 }
 
 pub(crate) struct FakeChain {
@@ -695,6 +700,14 @@ impl RunnableChain for FakeChain {
                 };
             }
             ChainMode::BlockUntil(open) if !open.load(Ordering::Relaxed) => {
+                return PushOutcome::Blocked {
+                    resume_at: from,
+                    reason: BlockReason::Capacity,
+                };
+            }
+            ChainMode::BlockEveryOtherPush(blocked)
+                if !blocked.fetch_xor(true, Ordering::Relaxed) =>
+            {
                 return PushOutcome::Blocked {
                     resume_at: from,
                     reason: BlockReason::Capacity,
@@ -734,7 +747,8 @@ impl RunnableChain for FakeChain {
     fn flush(&mut self) -> PushOutcome {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
-        if matches!(self.mode, ChainMode::FlushBlocked) {
+        let every_other = matches!(&self.mode, ChainMode::BlockEveryOtherFlush(blocked) if !blocked.fetch_xor(true, Ordering::Relaxed));
+        if every_other || matches!(self.mode, ChainMode::FlushBlocked) {
             return PushOutcome::Blocked {
                 resume_at: 0,
                 reason: BlockReason::Capacity,

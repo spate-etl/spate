@@ -336,8 +336,7 @@ threads or shards, so a pipeline that needs a deeper queue sets
 Depth buys throughput, and what it costs depends on the sink. Against a sink
 with headroom, a deeper queue raised throughput with no measured rise in flush
 latency. Against a saturated sink it also raised throughput, at about ten times
-the flush p99 (measured against ClickHouse, by a rig this repository no longer
-carries).
+the flush p99 (measured by a rig this repository no longer carries).
 
 ### Size a queue that does not pause the source
 
@@ -345,9 +344,10 @@ A queue that never pauses the source needs to hold about the bytes the shard
 receives during one slow write:
 
 1. Take the bytes per second the source offers each shard.
-   `rate(spate_sink_bytes_total[5m])` per `shard` gives it while the pipeline
-   is not pausing. While the source pauses, that rate reads below what the
-   source offers.
+   `rate(spate_sink_bytes_total[5m])` per `shard` gives it while the pipeline is
+   not pausing. While the source pauses, that rate reads below what the source
+   offers, so a queue sized from it is a floor: set it, then repeat the reading
+   until the pauses stop.
 2. Take the slow write time from the p99 of
    `spate_sink_write_duration_seconds{outcome="ok"}`. Its buckets are two to
    three times apart, so use the upper bound of the bucket the p99 falls in.

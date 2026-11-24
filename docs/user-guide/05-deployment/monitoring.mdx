@@ -168,13 +168,13 @@ of [Metrics](../../METRICS.md).
   breakdown on `spate_sink_errors_total{error_type}` before reaching for
   sink liveness. A dropped target table, revoked credentials or a schema
   mismatch abandons in steady state with no drain in sight.
-- **Sustained backpressure** — `spate_backpressure_paused == 1` sustained
-  (e.g. `avg_over_time(spate_backpressure_paused[10m]) > 0.9`). The source
-  pauses when the in-flight budget is above its high watermark or when a sink's
-  queue rejects a chunk. Either the sink cannot keep up, the budget is
-  undersized for the batch settings, or a queue is too shallow for the rate it
-  takes. `spate_queue_full_events_total` rising points at the queue. Tuning
-  covers both the
+- **Sustained backpressure** — `spate_backpressure_paused == 1` sustained (e.g.
+  `avg_over_time(spate_backpressure_paused[10m]) > 0.9`). The source pauses when
+  the in-flight budget is above its high watermark or when a sink's queue
+  rejects a chunk. Either the sink cannot keep up, the budget is undersized for
+  the batch settings, or a queue is too shallow for the rate it takes.
+  `spate_queue_full_events_total` rising with `spate_sink_inflight_batches`
+  below the cap points at the queue. Tuning covers both the
   [budget sizing rule](tuning.mdx#the-backpressure-budget-backpressuremax_inflight_bytes)
   and [queue sizing](tuning.mdx#queues).
 - **A shard asleep between retries** — `spate_sink_retry_backoff_seconds`

@@ -13,7 +13,7 @@ use spate_core::metrics::names;
 use spate_core::record::{NO_EVENT_TIME_MS, PartitionId};
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
-use spate_test::{HANG, metric_series, wait_until};
+use spate_test::{HANG, metric_series, wait_for_value, wait_until};
 use spate_test_support::assert_returns;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -890,14 +890,14 @@ fn a_backlogged_consumer_publishes_its_lag() {
 fn drain_main_queue(consumer: &BaseConsumer, cluster: &MockKafka) -> usize {
     let fetched = cluster.received(RDKafkaApiKey::Fetch);
     let mut delivered = 0usize;
-    let mut count = |result: Option<rdkafka::error::KafkaResult<_>>| {
-        if let Some(result) = result {
-            result.expect("main queue message");
+    // A failed poll is no delivery, and the drain goes on past it.
+    let mut count = |result: Option<rdkafka::error::KafkaResult<_>>| match result {
+        Some(Ok(_)) => {
             delivered += 1;
             true
-        } else {
-            false
         }
+        Some(Err(_)) => true,
+        None => false,
     };
     wait_until(
         HANG,
@@ -923,10 +923,7 @@ fn the_main_queue_delivers_a_partition_that_was_never_split() {
 
     let consumer = Arc::new(support::from_start(&brokers, TOPIC, 1, &[]));
     wait_until(HANG, "a delivery for the unsplit partition", || {
-        consumer
-            .poll(Duration::from_millis(100))
-            .map(|result| result.expect("main queue message"))
-            .is_some()
+        matches!(consumer.poll(Duration::from_millis(100)), Some(Ok(_)))
     });
 }
 
@@ -950,10 +947,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
     // the split queue has to deliver before the drain below means anything.
     wait_until(HANG, "a delivery on the split queue", || {
         let _ = consumer.poll(Duration::from_millis(100));
-        queue
-            .poll(Duration::from_millis(100))
-            .map(|result| result.expect("split queue message"))
-            .is_some()
+        matches!(queue.poll(Duration::from_millis(100)), Some(Ok(_)))
     });
 
     drop(queue);
@@ -974,8 +968,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
     let mut resplit_offset = None;
     wait_until(HANG, "a delivery on the re-split queue", || {
         let _ = consumer.poll(Duration::from_millis(100));
-        if let Some(result) = requeued.poll(Duration::from_millis(100)) {
-            let msg = result.expect("re-split queue message");
+        if let Some(Ok(msg)) = requeued.poll(Duration::from_millis(100)) {
             resplit_offset = Some(rdkafka::Message::offset(&msg));
         }
         resplit_offset.is_some()
@@ -1493,6 +1486,15 @@ fn watched_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceCo
 /// Committed offsets of `group` on partitions `0..partitions`.
 fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset> {
     support::committed_by(brokers, group, TOPIC, partitions)
+}
+
+/// [`committed`] as one client call, for a caller whose own wait reads again.
+fn committed_once(
+    brokers: &str,
+    group: &str,
+    partitions: i32,
+) -> Result<Vec<rdkafka::Offset>, String> {
+    support::committed_by_once(brokers, group, TOPIC, partitions)
 }
 
 /// Two consumers' assignments reach the runtime as one lane set: every
@@ -2290,7 +2292,7 @@ fn the_mock_serves_a_control_batch_as_a_marker() {
 
         let mut delivered = 0;
         wait_until(HANG, "the position passes the marker", || {
-            if queue.poll(Duration::from_millis(100)).is_some() {
+            if matches!(queue.poll(Duration::from_millis(100)), Some(Ok(_))) {
                 delivered += 1;
             }
             consumer.position().expect("position").elements()[0].offset()
@@ -2700,14 +2702,20 @@ fn two_consumers_each_advance_past_their_own_marker() {
     driver.settle_group(2, 2);
     driver.read(1);
 
-    wait_until(HANG, "both partitions pass their marker", || {
-        driver.step(Duration::from_millis(50));
-        for lane in &mut driver.lanes {
-            let _ = lane.poll(64, Duration::from_millis(50)).expect("lane poll");
-        }
-        driver.commit();
-        support::committed_by(&brokers, &group, TOPIC, 2) == [rdkafka::Offset::Offset(2); 2]
-    });
+    wait_for_value(
+        HANG,
+        "both partitions pass their marker",
+        || {
+            driver.step(Duration::from_millis(50));
+            for lane in &mut driver.lanes {
+                let _ = lane.poll(64, Duration::from_millis(50)).expect("lane poll");
+            }
+            driver.commit();
+            support::committed_by_once(&brokers, &group, TOPIC, 2)
+        },
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(2); 2]),
+    )
+    .expect("the wait ends on a read");
 }
 
 /// A gap with no record and no marker leaves no position change, so it stays in
@@ -2896,9 +2904,13 @@ fn markers_behind_a_stalled_head_leave_the_lane_polling() {
             script.enqueue_global(held);
         },
     );
-    wait_until(HANG, "the first record commits", || {
-        support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(1)]
-    });
+    wait_for_value(
+        HANG,
+        "the first record commits",
+        || support::committed_by_once(&brokers, &group, TOPIC, 1),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(1)]),
+    )
+    .expect("the wait ends on a read");
 
     produce(&brokers, TOPIC, 1, 1, "head");
     for _ in 0..LATER_MARKERS {
@@ -2922,9 +2934,13 @@ fn markers_behind_a_stalled_head_leave_the_lane_polling() {
     });
 
     script.release_held();
-    wait_until(HANG, "the head and the markers commit", || {
-        support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)]
-    });
+    wait_for_value(
+        HANG,
+        "the head and the markers commit",
+        || support::committed_by_once(&brokers, &group, TOPIC, 1),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(end)]),
+    )
+    .expect("the wait ends on a read");
     shutdown.trigger();
     run.wait_exit(HANG)
         .expect("the pipeline exits")
@@ -3142,9 +3158,16 @@ mod latest_start {
                 source.open(SourceCtx::new(cp.handle())).expect("open");
                 let mut scripted = false;
                 let mut lanes = None;
+                // The branch below runs once, so its read takes what is left of the wait.
+                let deadline = std::time::Instant::now() + HANG;
                 wait_until(HANG, "lanes after the discard", || {
                     if !scripted && discards() == 1 {
-                        assert_eq!(committed(&brokers, group, 1), [rdkafka::Offset::Invalid]);
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        let probe = support::probe(&brokers, group);
+                        assert_eq!(
+                            support::committed_within(&probe, TOPIC, 1, left),
+                            [rdkafka::Offset::Invalid]
+                        );
                         cluster.request_errors(RDKafkaApiKey::Heartbeat, &[code]);
                         scripted = true;
                     }
@@ -3810,10 +3833,19 @@ mod latest_start {
         driver.cp.drain();
         let watermarks = driver.cp.take_watermarks();
         driver.source.commit(&watermarks).expect("store");
-        wait_until(HANG, "partition 1's commit", || {
-            let _ = driver.source.poll_events(Duration::from_millis(10));
-            committed(&brokers, "interval", 2)[1] == rdkafka::Offset::Offset(5)
-        });
+        wait_for_value(
+            HANG,
+            "partition 1's commit",
+            || {
+                let _ = driver.source.poll_events(Duration::from_millis(10));
+                committed_once(&brokers, "interval", 2)
+            },
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|offsets| offsets[1] == rdkafka::Offset::Offset(5))
+            },
+        )
+        .expect("the wait ends on a read");
         assert_eq!(
             committed(&brokers, "interval", 2)[0],
             rdkafka::Offset::Offset(3),

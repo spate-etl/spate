@@ -19,15 +19,15 @@ use spate_core::feed::{DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, 
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_core::task::spawn_thread;
-use spate_test::{HANG, WriteOutcome, wait_until};
+use spate_test::{HANG, WriteOutcome, wait_for_value, wait_until};
 use spate_test_s3_feed::{data_dir, recs, sorted, stage, written};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
-    bounded_section, committed, direct, direct_on, exists, feed_yaml, high_watermark,
-    high_watermarks, hold_open, launch, launch_bounded, launch_customized, launch_on,
-    launch_stopping, list_once, produce_copy, produce_raw, publish, publisher_on_mock,
+    bounded_section, committed, committed_once, direct, direct_on, exists, feed_yaml,
+    high_watermark, high_watermark_once, hold_open, launch, launch_bounded, launch_customized,
+    launch_on, launch_stopping, list_once, produce_copy, produce_raw, publish, publisher_on_mock,
     read_attempts, read_depth, read_topic, run_to_exit,
 };
 use support::{
@@ -93,9 +93,13 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
         "the group committed {at:?} while the unit's last write was held"
     );
     worker.script.release_held();
-    clock.advance_until("the unit's offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    clock
+        .advance_until(
+            "the unit's offset is committed",
+            || committed_once(&brokers, &group, WORK),
+            |read| *read == Ok(Some(1)),
+        )
+        .expect("the wait ends on a read");
     assert_eq!(written(&worker.script), sorted(rows));
     assert_eq!(worker.recording.deliveries().as_slice(), [1]);
     assert_eq!(worker.stop(), ExitState::Completed);
@@ -144,9 +148,13 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
         "the group committed {at:?} before the retry write was confirmed"
     );
     cluster.broker_up(2).unwrap();
-    clock.advance_until("the unit's offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    clock
+        .advance_until(
+            "the unit's offset is committed",
+            || committed_once(&brokers, &group, WORK),
+            |read| *read == Ok(Some(1)),
+        )
+        .expect("the wait ends on a read");
     assert_eq!(worker.stop(), ExitState::Completed);
 }
 
@@ -195,10 +203,18 @@ fn a_unit_that_reports_failure_reaches_the_dead_letter_topic_at_the_cap() {
     );
     assert_eq!(worker.recording.deliveries().as_slice(), [1, 2, 3]);
 
-    wait_until(HANG, "every offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-            && committed(&brokers, &group, RETRY) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "every offset is committed",
+        || {
+            Ok::<_, String>((
+                committed_once(&brokers, &group, WORK)?,
+                committed_once(&brokers, &group, RETRY)?,
+            ))
+        },
+        |read| *read == Ok((Some(1), Some(2))),
+    )
+    .expect("the wait ends on a read");
     // `units/0/0` hashes to partition 1 of 2.
     let id = "units/0/0".to_owned();
     assert_eq!(
@@ -244,9 +260,13 @@ fn a_completed_unit_read_again_counts_from_zero() {
     let delivery = a.take("A reads the unit");
     assert_eq!(delivery.deliveries, 1);
     a.feed.acknowledge(delivery.receipt).unwrap();
-    wait_until(HANG, "the unit's offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit's offset is committed",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
 
     let again = direct(&feed_yaml(
         &brokers,
@@ -330,9 +350,13 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
         "the group committed {at:?} before the dead-letter write was confirmed"
     );
     cluster.broker_up(2).unwrap();
-    clock.advance_until("the unit's offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    clock
+        .advance_until(
+            "the unit's offset is committed",
+            || committed_once(&brokers, &group, WORK),
+            |read| *read == Ok(Some(1)),
+        )
+        .expect("the wait ends on a read");
     let dead = read_topic(&brokers, DEAD, 1);
     assert_eq!(dead[0].key.as_deref(), Some(&b"capped"[..]));
     assert_eq!(dead[0].header("spate.origin"), Some("units/0/0"));
@@ -398,9 +422,13 @@ fn a_dead_lettered_unit_published_again_is_read() {
     publish(&worker.feed, Unit::new("u", b"first".to_vec()));
     let first = worker.take("the first publish");
     worker.feed.fail(first.receipt, "test").unwrap();
-    wait_until(HANG, "the first publish is dead-lettered", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the first publish is dead-lettered",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     publish(&worker.feed, Unit::new("u", b"second".to_vec()));
     let second = worker.take("the second publish");
     assert_eq!(second.unit.body, b"second");
@@ -453,9 +481,13 @@ fn a_message_with_no_unit_goes_to_the_dead_letter_topic_at_once() {
     let dead = read_topic(&brokers, DEAD, 1);
     assert_eq!(dead[0].key.as_deref(), Some(&[0xff, 0xfe][..]));
     assert_eq!(dead[0].payload.as_deref(), Some(&b"not utf-8"[..]));
-    wait_until(HANG, "its offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "its offset is committed",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(high_watermark(&brokers, RETRY), 0, "nothing was retried");
     assert!(worker.feed.receive(8).unwrap().is_empty());
 }
@@ -546,9 +578,13 @@ fn a_message_without_a_key_takes_its_position_as_its_id() {
     assert_eq!((empty.deliveries, keyless.deliveries), (1, 1));
     worker.feed.acknowledge(empty.receipt).unwrap();
     worker.feed.acknowledge(keyless.receipt).unwrap();
-    wait_until(HANG, "both offsets are committed", || {
-        committed(&brokers, &group, WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "both offsets are committed",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(2)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(
         high_watermark(&brokers, DEAD),
         0,
@@ -595,10 +631,18 @@ fn a_keyless_unit_keeps_its_position_through_retries() {
     assert_eq!(dead[0].key.as_deref(), Some(&b"units/0/1"[..]));
     assert_eq!(dead[0].header("spate.origin"), Some("units/0/1"));
     assert_eq!(dead[0].header("spate.deliveries"), Some("2"));
-    wait_until(HANG, "both topics' offsets are committed", || {
-        committed(&brokers, &group, WORK) == Some(2)
-            && committed(&brokers, &group, RETRY) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "both topics' offsets are committed",
+        || {
+            Ok::<_, String>((
+                committed_once(&brokers, &group, WORK)?,
+                committed_once(&brokers, &group, RETRY)?,
+            ))
+        },
+        |read| *read == Ok((Some(2), Some(1))),
+    )
+    .expect("the wait ends on a read");
     let counted: Vec<_> = read_attempts(&brokers, ATTEMPT_PARTITIONS, 5)
         .into_iter()
         .filter(|(_, id, _)| id == "units/0/1")
@@ -676,7 +720,7 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
     publish(&a.feed, Unit::new("u1", b"x".to_vec()));
     let _ = a.take("the first delivery");
     cluster.request_errors(
-        RDKafkaApiKey::OffsetFetch,
+        rdkafka::types::RDKafkaApiKey::OffsetFetch,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 200],
     );
     // A second member forces a rebalance, so A looks up its offsets again.
@@ -1070,12 +1114,24 @@ fn a_publish_only_handle_charges_no_attempt() {
         assert_eq!(delivery.deliveries, 1, "{}", delivery.unit.id);
         worker.feed.acknowledge(delivery.receipt).unwrap();
     }
-    wait_until(HANG, "every unit is committed", || {
-        committed(&brokers, &group, WORK) == Some(3)
-    });
-    wait_until(HANG, "a count and a tombstone per unit", || {
-        high_watermarks(&brokers, ATTEMPT, ATTEMPT_PARTITIONS) == 6
-    });
+    wait_for_value(
+        HANG,
+        "every unit is committed",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(3)),
+    )
+    .expect("the wait ends on a read");
+    wait_for_value(
+        HANG,
+        "a count and a tombstone per unit",
+        || {
+            (0..ATTEMPT_PARTITIONS)
+                .map(|partition| high_watermark_once(&brokers, ATTEMPT, partition))
+                .sum::<Result<i64, String>>()
+        },
+        |read| *read == Ok(6),
+    )
+    .expect("the wait ends on a read");
     drop(publisher);
 }
 
@@ -1175,10 +1231,22 @@ fn a_bounded_job_on_kafka_ends_completed() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
-    wait_until(HANG, "the unit is read and committed", || {
-        written(&worker.script) == sorted(rows.clone())
-            && committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit is read and committed",
+        || {
+            Ok::<_, String>((
+                written(&worker.script),
+                committed_once(&brokers, &group, WORK)?,
+            ))
+        },
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted(rows.clone()) && *at == Some(1)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     let report = run_to_exit(&worker, &clock);
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(report.exit_code(), 0);
@@ -1224,10 +1292,17 @@ fn a_commit_above_the_end_holds_a_bounded_job_until_a_member_reads() {
     hold_open(&worker, &clock);
     assert!(written(&worker.script).is_empty(), "the worker joined");
     cluster.clear_request_errors(rdkafka::types::RDKafkaApiKey::JoinGroup);
-    wait_until(HANG, "every unit is read and committed", || {
-        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
-            && job.committed(WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "every unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted([a.clone(), b.clone()].concat()) && *at == Some(2)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1250,9 +1325,18 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
-    wait_until(HANG, "the message is dead-lettered and committed", || {
-        high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the message is dead-lettered and committed",
+        || {
+            Ok::<_, String>((
+                high_watermark_once(&brokers, DEAD, 0)?,
+                committed_once(&brokers, &group, WORK)?,
+            ))
+        },
+        |read| *read == Ok((1, Some(1))),
+    )
+    .expect("the wait ends on a read");
     assert_stalled(&run_to_exit(&worker, &clock));
 }
 
@@ -1304,9 +1388,17 @@ fn a_marker_on_the_work_topic_ends_a_bounded_job() {
 
         let clock = TestClock::frozen();
         let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-        wait_until(HANG, "the unit and marker are committed", || {
-            written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(2)
-        });
+        wait_for_value(
+            HANG,
+            "the unit and marker are committed",
+            || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+            |read| {
+                read.as_ref().is_ok_and(|(rows_written, at)| {
+                    *rows_written == sorted(rows.clone()) && *at == Some(2)
+                })
+            },
+        )
+        .expect("the wait ends on a read");
         let report = run_to_exit(&worker, &clock);
         assert_eq!(report.state, ExitState::Completed, "{marker:?}");
         assert_eq!(report.exit_code(), 0, "{marker:?}");
@@ -1324,9 +1416,13 @@ fn a_marker_on_the_retry_topic_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(HANG, "the retry topic's marker is committed", || {
-        job.committed(RETRY) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the retry topic's marker is committed",
+        || job.committed_once(RETRY),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1356,10 +1452,13 @@ fn a_partition_holding_only_a_marker_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(HANG, "both partitions are committed", || {
-        support::committed_by(&brokers, &job.group, WORK, 2)
-            == [rdkafka::Offset::Offset(2), rdkafka::Offset::Offset(1)]
-    });
+    wait_for_value(
+        HANG,
+        "both partitions are committed",
+        || support::committed_by_once(&brokers, &job.group, WORK, 2),
+        |read| *read == Ok(vec![rdkafka::Offset::Offset(2), rdkafka::Offset::Offset(1)]),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1380,9 +1479,16 @@ fn each_partition_passes_its_own_marker() {
     wait_until(HANG, "the unit's write is held", || {
         worker.script.held_writes() == 1
     });
-    wait_until(HANG, "the marker alone is committed", || {
-        support::committed_by(&brokers, &job.group, WORK, 2)[1] == rdkafka::Offset::Offset(1)
-    });
+    wait_for_value(
+        HANG,
+        "the marker alone is committed",
+        || support::committed_by_once(&brokers, &job.group, WORK, 2),
+        |read| {
+            read.as_ref()
+                .is_ok_and(|offsets| offsets[1] == rdkafka::Offset::Offset(1))
+        },
+    )
+    .expect("the wait ends on a read");
     assert!(
         matches!(
             support::committed_by(&brokers, &job.group, WORK, 2)[0],
@@ -1405,13 +1511,21 @@ fn a_marker_written_after_the_last_commit_ends_the_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(HANG, "the unit is committed", || {
-        job.committed(WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit is committed",
+        || job.committed_once(WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     write_marker(&brokers, WORK, 0, Marker::Commit);
-    wait_until(HANG, "the marker is committed", || {
-        job.committed(WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "the marker is committed",
+        || job.committed_once(WORK),
+        |read| *read == Ok(Some(2)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1426,9 +1540,13 @@ fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(HANG, "the unit is committed", || {
-        job.committed(WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit is committed",
+        || job.committed_once(WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     cluster.broker_down(1).unwrap();
     cluster.broker_up(1).unwrap();
     let marker = support::control_batch(Marker::Commit);
@@ -1436,9 +1554,18 @@ fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
         try_produce_batch(&brokers, WORK, 0, &marker).is_ok_and(|code| code == 0)
     });
     // Read back: a write whose reply was lost is sent again, and takes an offset.
-    wait_until(HANG, "the marker is committed", || {
-        job.committed(WORK) == Some(high_watermark(&brokers, WORK))
-    });
+    wait_for_value(
+        HANG,
+        "the marker is committed",
+        || {
+            Ok::<_, String>((
+                job.committed_once(WORK)?,
+                high_watermark_once(&brokers, WORK, 0)?,
+            ))
+        },
+        |read| read.as_ref().is_ok_and(|&(at, end)| at == Some(end)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1458,9 +1585,13 @@ fn a_failed_commit_past_a_marker_lands_on_a_later_pass() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(HANG, "the marker is committed", || {
-        job.committed(WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the marker is committed",
+        || job.committed_once(WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -1710,5 +1841,41 @@ fn a_feed_fenced_on_its_stop_commit_still_drops() {
             .iter()
             .any(|line| line.contains("the feed's consumer has not closed")),
         "{lines:#?}"
+    );
+}
+
+/// Pins that a topic read counts a refused Fetch as nothing read yet, and
+/// returns the record the next Fetch brings.
+#[test]
+fn a_read_the_broker_refuses_once_is_read_again() {
+    let (_cluster, brokers) = support::mock::refused_fetch(WORK);
+    let read = read_topic(&brokers, WORK, 1);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].payload.as_deref(), Some(&b"one"[..]));
+}
+
+/// Pins that a committed-offset read inside a wait makes one call: a refused
+/// OffsetFetch comes back as its error, and the next call reads the commit.
+#[test]
+fn a_committed_read_inside_a_wait_returns_the_refusal() {
+    let cluster = MockKafka::new();
+    let brokers = cluster.bootstrap_servers();
+    cluster.create_topic(WORK, 1, 1).expect("create topic");
+    let group = spate_test::unique_name("once");
+    support::commit_at(&brokers, &group, WORK, 3);
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::OffsetFetch,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+    );
+    let refused = support::feed::committed_once(&brokers, &group, WORK);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.starts_with(&format!("a committed-offset read of {WORK}"))),
+        "{refused:?}"
+    );
+    assert_eq!(
+        support::feed::committed_once(&brokers, &group, WORK),
+        Ok(Some(3))
     );
 }

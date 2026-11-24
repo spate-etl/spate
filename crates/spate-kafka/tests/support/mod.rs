@@ -310,23 +310,49 @@ pub(crate) fn log_end(brokers: &str, topic: &str, partition: i32) -> i64 {
     high_watermark(brokers, topic, partition, "read_uncommitted")
 }
 
+/// [`log_end`] as one client call, for a caller whose own wait reads again.
+pub(crate) fn log_end_once(brokers: &str, topic: &str, partition: i32) -> Result<i64, String> {
+    high_watermark_once(brokers, topic, partition, "read_uncommitted")
+}
+
 /// The end of `partition`'s log once no transaction on it is open, so the
 /// marker of each ended transaction is in it. A producer's commit or abort
 /// returns before the broker writes the markers.
 pub(crate) fn settled_end(brokers: &str, topic: &str, partition: i32) -> i64 {
-    let mut end = 0;
-    spate_test::wait_until(HANG, "the transaction markers", || {
-        end = log_end(brokers, topic, partition);
-        high_watermark(brokers, topic, partition, "read_committed") == end
-    });
+    let ends = spate_test::wait_for_value(
+        HANG,
+        "the transaction markers",
+        || {
+            Ok::<_, String>((
+                log_end_once(brokers, topic, partition)?,
+                high_watermark_once(brokers, topic, partition, "read_committed")?,
+            ))
+        },
+        |read| read.as_ref().is_ok_and(|(end, stable)| end == stable),
+    );
+    let (end, _) = ends.expect("the wait ends on a read");
     end
 }
 
 /// The high watermark of `partition` as a client at `isolation` reads it.
 fn high_watermark(brokers: &str, topic: &str, partition: i32, isolation: &str) -> i64 {
-    let reader = spate_test_support::consumer(brokers, &[("isolation.level", isolation)])
-        .unwrap_or_else(|e| panic!("{e}"));
-    spate_test_support::high_watermark(&reader, topic, partition, HANG)
+    spate_test_support::high_watermark(&isolated(brokers, isolation), topic, partition, HANG)
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`high_watermark`] as one client call.
+fn high_watermark_once(
+    brokers: &str,
+    topic: &str,
+    partition: i32,
+    isolation: &str,
+) -> Result<i64, String> {
+    spate_test_support::high_watermark_once(&isolated(brokers, isolation), topic, partition)
+}
+
+/// A reader of `brokers` at `isolation`.
+fn isolated(brokers: &str, isolation: &str) -> BaseConsumer {
+    spate_test_support::consumer(brokers, &[("isolation.level", isolation)])
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -410,8 +436,28 @@ pub(crate) fn delete_records_below(brokers: &str, topic: &str, partition: i32, b
 /// What `probe`'s group has committed on `topic`'s partitions `0..partitions`,
 /// read again while the broker refuses. No commit reads as `Offset::Invalid`.
 pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<Offset> {
-    spate_test_support::committed_offsets(probe, topic, partitions, HANG)
+    committed_within(probe, topic, partitions, HANG)
+}
+
+/// [`committed`], reading again for at most `bound`, for a read that cannot
+/// wait a whole [`HANG`].
+pub(crate) fn committed_within(
+    probe: &BaseConsumer,
+    topic: &str,
+    partitions: i32,
+    bound: Duration,
+) -> Vec<Offset> {
+    spate_test_support::committed_offsets(probe, topic, partitions, bound)
         .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`committed`] as one client call, for a caller whose own wait reads again.
+pub(crate) fn committed_once(
+    probe: &BaseConsumer,
+    topic: &str,
+    partitions: i32,
+) -> Result<Vec<Offset>, String> {
+    spate_test_support::committed_offsets_once(probe, topic, partitions)
 }
 
 /// [`committed`] through a new [`probe`] in `group`.
@@ -422,6 +468,17 @@ pub(crate) fn committed_by(
     partitions: i32,
 ) -> Vec<Offset> {
     committed(&probe(brokers, group), topic, partitions)
+}
+
+/// [`committed_by`] as one client call, for a caller whose own wait reads
+/// again.
+pub(crate) fn committed_by_once(
+    brokers: &str,
+    group: &str,
+    topic: &str,
+    partitions: i32,
+) -> Result<Vec<Offset>, String> {
+    committed_once(&probe(brokers, group), topic, partitions)
 }
 
 /// One group as the broker's group listing shows it.
@@ -768,7 +825,7 @@ pub(crate) fn consume<T>(
     topic: &str,
     group: &str,
     n: usize,
-    mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
+    keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
 ) -> Vec<T> {
     let consumer: BaseConsumer = raw_config()
         .set("bootstrap.servers", brokers)
@@ -778,19 +835,48 @@ pub(crate) fn consume<T>(
         .build()
         .expect("consumer");
     consumer.subscribe(&[topic]).expect("subscribe");
-    let mut out = Vec::new();
+    read_kept(
+        &consumer,
+        n,
+        &format!("{n} messages kept from {topic}"),
+        keep,
+    )
+}
+
+/// The first `n` values `keep` returns for the messages `consumer` reads;
+/// `what` names them in a hang. A failed poll counts as nothing read yet, and
+/// a hang prints the last one.
+pub(crate) fn read_kept<T>(
+    consumer: &BaseConsumer,
+    n: usize,
+    what: &str,
+    mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
+) -> Vec<T> {
+    let mut got = Vec::new();
+    let mut failed = None;
     spate_test::wait_for_value(
         HANG,
-        &format!("{n} messages kept from {topic}"),
+        what,
         || {
-            if let Some(message) = consumer.poll(Duration::from_millis(250)) {
-                out.extend(keep(&message.expect("message")));
+            while got.len() < n {
+                match consumer.poll(Duration::from_millis(100)) {
+                    Some(Ok(message)) => {
+                        failed = None;
+                        got.extend(keep(&message));
+                    }
+                    // Ends the turn, so error events cannot hold it open.
+                    Some(Err(e)) => {
+                        failed = Some(e.to_string());
+                        break;
+                    }
+                    None => break,
+                }
             }
-            out.len()
+            (got.len(), failed.clone())
         },
-        |kept| *kept >= n,
+        |(kept, _)| *kept >= n,
     );
-    out
+    got
 }
 
 /// One message as read back from a topic: key, value and headers.

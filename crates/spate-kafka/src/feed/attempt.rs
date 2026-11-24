@@ -948,12 +948,10 @@ mod tests {
             fn caught_up(&self, ledger: &SharedLedger) {
                 wait_until(HANG, "the follower reaches the high watermarks", || {
                     (0..2).all(|p| {
-                        let (lwm, hwm) = self
-                            .producer
+                        self.producer
                             .client()
                             .fetch_watermarks(ATTEMPTS, p, Duration::from_secs(10))
-                            .unwrap();
-                        lock(ledger).caught_up(p, lwm, hwm)
+                            .is_ok_and(|(lwm, hwm)| lock(ledger).caught_up(p, lwm, hwm))
                     })
                 });
             }

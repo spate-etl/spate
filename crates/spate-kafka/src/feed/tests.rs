@@ -2370,11 +2370,44 @@ mod cluster {
 
     /// The offset `group` has committed for the work topic's partition.
     pub(super) fn committed(brokers: &str, group: &str) -> Option<i64> {
-        let reader = spate_test_support::consumer(brokers, &[("group.id", group)])
-            .unwrap_or_else(|e| panic!("{e}"));
-        match spate_test_support::committed_offsets(&reader, "units", 1, HANG)
-            .unwrap_or_else(|e| panic!("{e}"))[0]
-        {
+        let offsets =
+            spate_test_support::committed_offsets(&in_group(brokers, group), "units", 1, HANG)
+                .unwrap_or_else(|e| panic!("{e}"));
+        first_committed(&offsets)
+    }
+
+    /// [`committed`] as one client call, for a caller whose own wait reads
+    /// again.
+    pub(super) fn committed_once(brokers: &str, group: &str) -> Result<Option<i64>, String> {
+        spate_test_support::committed_offsets_once(&in_group(brokers, group), "units", 1)
+            .map(|offsets| first_committed(&offsets))
+    }
+
+    /// Read the attempt topic's metadata through `client`, again while the
+    /// broker refuses, so a new client has met a broker.
+    fn meet_a_broker<C: rdkafka::client::ClientContext>(client: &rdkafka::client::Client<C>) {
+        spate_test::wait_for_value(
+            HANG,
+            "a metadata read of the attempt topic",
+            || {
+                client
+                    .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+                    .map(drop)
+            },
+            Result::is_ok,
+        )
+        .expect("the wait ends on a read");
+    }
+
+    /// A reader of `brokers` in `group` that joins nothing.
+    fn in_group(brokers: &str, group: &str) -> BaseConsumer {
+        spate_test_support::consumer(brokers, &[("group.id", group)])
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Partition 0's committed offset in `offsets`, if any.
+    fn first_committed(offsets: &[Offset]) -> Option<i64> {
+        match offsets[0] {
             Offset::Offset(offset) => Some(offset),
             _ => None,
         }
@@ -2787,12 +2820,16 @@ mod cluster {
         acknowledge_first(&d);
         d.core.latch("a test latch");
         let thread = std::thread::spawn(move || consumer::run(d));
-        let mut at = None;
-        wait_until(HANG, "the thread ends or commits", || {
-            at = committed(&brokers, &group);
-            at.is_some() || thread.is_finished()
-        });
-        assert_eq!(at, None, "the latched feed committed");
+        let (at, _) = spate_test::wait_for_value(
+            HANG,
+            "the thread ends or commits",
+            || (committed_once(&brokers, &group), thread.is_finished()),
+            |(at, finished)| matches!(at, Ok(Some(_))) || *finished,
+        );
+        assert!(
+            !matches!(at, Ok(Some(_))),
+            "the latched feed committed: {at:?}"
+        );
         thread.join().unwrap();
         assert_eq!(committed(&brokers, &group), None);
         admission.stop();
@@ -3154,10 +3191,7 @@ mod cluster {
         }
         // A new producer's first watermark read can fail before it has met a
         // broker, which would end the pass before the timeout.
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         let bound = Duration::from_secs(3600);
         let gate = Gate::new(
             Arc::clone(&core),
@@ -3230,10 +3264,7 @@ mod cluster {
         }
         // A new producer's first watermark read can fail before it has met a
         // broker, which is retryable and would end the pass without a latch.
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         let gate = Gate::new(
             Arc::clone(&core),
             producer,
@@ -3306,10 +3337,7 @@ mod cluster {
                 });
             }
         }
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         // Partition 0 holds a record the ledger has read, so its read takes
         // its two requests and it is caught up; partition 1's is refused.
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
@@ -3356,10 +3384,7 @@ mod cluster {
                 .unwrap()
         };
         let (on0, on1) = (on(0), on(1));
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
         wait_until(HANG, "partition 1 reports no leader", || {
             producer
@@ -3504,10 +3529,7 @@ mod cluster {
                 identity: super::identity(&core, 0),
             });
         }
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         let bound = Duration::from_secs(3600);
         let gate = Gate::new(
             Arc::clone(&core),
@@ -3569,10 +3591,7 @@ mod cluster {
                 identity: super::identity(&core, 0),
             });
         }
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
@@ -6278,10 +6297,7 @@ mod cluster {
                 });
             }
         }
-        producer
-            .client()
-            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
-            .unwrap();
+        meet_a_broker(producer.client());
         let gate = Gate::new(
             Arc::clone(&core),
             producer,
@@ -6340,8 +6356,7 @@ mod cluster {
                     false
                 }
                 Some(Err(KafkaError::PartitionEOF(_))) => true,
-                Some(Err(e)) => panic!("{e}"),
-                Some(Ok(_)) | None => false,
+                Some(Ok(_) | Err(_)) | None => false,
             });
             fences
         }
@@ -6690,10 +6705,9 @@ mod docker {
             .build()
             .unwrap();
         wait_until(HANG, "the follower reaches the high watermark", || {
-            let (lwm, hwm) = reader
+            reader
                 .fetch_watermarks(topic, 0, Duration::from_secs(5))
-                .unwrap();
-            attempt::lock(&core.ledger).caught_up(0, lwm, hwm)
+                .is_ok_and(|(lwm, hwm)| attempt::lock(&core.ledger).caught_up(0, lwm, hwm))
         });
         gate_admits(&config, &core);
         crate::feed::stop(&core);
@@ -6837,10 +6851,9 @@ mod docker {
         let group = spate_test::unique_name("first");
         let consumer =
             spate_test_support::from_start(brokers, topic, &[0], &[("group.id", &group)]).unwrap();
-        (0..50).find_map(|_| {
-            consumer
-                .poll(Duration::from_millis(100))
-                .map(|m| m.unwrap().offset())
+        (0..50).find_map(|_| match consumer.poll(Duration::from_millis(100)) {
+            Some(Ok(m)) => Some(m.offset()),
+            Some(Err(_)) | None => None,
         })
     }
 

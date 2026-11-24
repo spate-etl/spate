@@ -420,12 +420,19 @@ async fn the_probe_does_not_create_a_missing_topic() {
         .set("bootstrap.servers", &brokers)
         .build()
         .expect("consumer");
-    let metadata = rdkafka::consumer::Consumer::fetch_metadata(
-        &consumer,
-        Some(TOPIC),
-        Duration::from_secs(10),
+    let metadata = spate_test::wait_for_value(
+        spate_test::HANG,
+        "a metadata read of the topic",
+        || {
+            rdkafka::consumer::Consumer::fetch_metadata(
+                &consumer,
+                Some(TOPIC),
+                Duration::from_secs(10),
+            )
+        },
+        Result::is_ok,
     )
-    .expect("metadata");
+    .expect("the wait ends on a read");
     let topic = &metadata.topics()[0];
     assert_eq!(
         topic.error(),
@@ -708,4 +715,17 @@ fn a_full_queue_backs_off_from_10ms_to_250ms_for_each_message() {
         "no wait of 10 ms among the {} after the second message's first seven",
         gaps.len() - schedule.len()
     );
+}
+
+/// Pins that a group read counts a refused Fetch as nothing read yet, and
+/// returns the record the next Fetch brings.
+#[test]
+fn a_consume_the_broker_refuses_once_is_read_again() {
+    let (_cluster, brokers) = support::mock::refused_fetch("refused");
+    let group = spate_test::unique_name("refused");
+    let read = consume(&brokers, "refused", &group, 1, |message| {
+        Some(Read::of(message))
+    });
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].payload.as_deref(), Some(&b"one"[..]));
 }

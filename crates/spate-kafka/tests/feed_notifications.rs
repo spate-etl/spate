@@ -16,13 +16,13 @@ use object_store::{Attribute, ObjectStore as _, ObjectStoreExt as _, PutOptions,
 use serde_json::Value;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeed;
-use spate_test::{HANG, wait_until};
+use spate_test::{HANG, wait_for_value, wait_until};
 use spate_test_s3_feed::{recs, written};
 use spate_test_support::{KAFKA_PORT, RGW_OPAQUE_DATA, S3Store, SingleBroker, Store};
 use support::broker;
 use support::feed::{
-    DEAD, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark, launch_source,
-    read_topic,
+    DEAD, RETRY, WORK, Worker, committed_once, create_topics, feed_yaml, high_watermark,
+    high_watermark_once, launch_source, read_topic,
 };
 use testcontainers::ImageExt;
 use testcontainers::core::IntoContainerPort;
@@ -54,9 +54,13 @@ fn a_key_with_reserved_and_non_ascii_bytes_reads_its_object() {
         "every record of the notified object is written",
         || written(&worker.script) == want,
     );
-    wait_until(HANG, "the notification's offset is committed", || {
-        committed(&n.brokers, &worker.group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the notification's offset is committed",
+        || committed_once(&n.brokers, &worker.group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(worker.stop(), ExitState::Completed);
 }
 
@@ -76,9 +80,13 @@ fn an_object_overwritten_before_its_read_is_read_at_its_new_etag() {
     let path = Path::parse("dir/over+written c%25.ndjson").unwrap();
     n.put(&path, &first, PutOptions::default());
     n.put(&path, &second, PutOptions::default());
-    wait_until(HANG, "both notifications reach the work topic", || {
-        high_watermark(&n.brokers, WORK) == 2
-    });
+    wait_for_value(
+        HANG,
+        "both notifications reach the work topic",
+        || high_watermark_once(&n.brokers, WORK, 0),
+        |read| *read == Ok(2),
+    )
+    .expect("the wait ends on a read");
 
     let worker = n.worker("overwritten");
     let mut want: Vec<String> = second.iter().chain(&second).cloned().collect();
@@ -88,11 +96,13 @@ fn an_object_overwritten_before_its_read_is_read_at_its_new_etag() {
         "the second version is written once per unit naming it",
         || written(&worker.script) == want,
     );
-    wait_until(
+    wait_for_value(
         HANG,
         "the notifications and the re-enqueue are committed",
-        || committed(&n.brokers, &worker.group, WORK) == Some(3),
-    );
+        || committed_once(&n.brokers, &worker.group, WORK),
+        |read| *read == Ok(Some(3)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(written(&worker.script), want);
     assert_eq!(high_watermark(&n.brokers, WORK), 3);
 
@@ -175,9 +185,13 @@ fn every_notified_key_reads_its_own_object() {
     assert_eq!(listed, written_keys, "the store holds each key as written");
 
     let total = keys.len();
-    wait_until(HANG, "every notification reaches the work topic", || {
-        high_watermark(&n.brokers, WORK) == i64::try_from(total).unwrap()
-    });
+    wait_for_value(
+        HANG,
+        "every notification reaches the work topic",
+        || high_watermark_once(&n.brokers, WORK, 0),
+        |read| *read == Ok(i64::try_from(total).unwrap()),
+    )
+    .expect("the wait ends on a read");
     let store = n.s3.store();
     let messages = read_topic(&n.brokers, WORK, total);
     for key in keys {
@@ -208,9 +222,13 @@ fn every_notified_key_reads_its_own_object() {
     wait_until(HANG, "every object's rows are written once", || {
         written(&worker.script) == want
     });
-    wait_until(HANG, "every notification is committed", || {
-        committed(&n.brokers, &worker.group, WORK) == Some(i64::try_from(total).unwrap())
-    });
+    wait_for_value(
+        HANG,
+        "every notification is committed",
+        || committed_once(&n.brokers, &worker.group, WORK),
+        |read| *read == Ok(Some(i64::try_from(total).unwrap())),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(
         high_watermark(&n.brokers, WORK),
         i64::try_from(total).unwrap(),
@@ -260,9 +278,13 @@ fn a_multipart_object_is_announced_at_its_stored_size_and_read() {
         .expect("complete the upload");
     let stored = n.io.block_on(n.client.head(&path)).expect("head").size;
 
-    wait_until(HANG, "the notification reaches the work topic", || {
-        high_watermark(&n.brokers, WORK) >= 1
-    });
+    wait_for_value(
+        HANG,
+        "the notification reaches the work topic",
+        || high_watermark_once(&n.brokers, WORK, 0),
+        |read| read.as_ref().is_ok_and(|&end| end >= 1),
+    )
+    .expect("the wait ends on a read");
     let messages = read_topic(&n.brokers, WORK, 1);
     let record = record(&messages[0]);
     let expect = announced(n.s3.store(), path.as_ref(), "CompleteMultipartUpload");
@@ -281,9 +303,13 @@ fn a_multipart_object_is_announced_at_its_stored_size_and_read() {
     wait_until(HANG, "every record of the object is written", || {
         written(&worker.script) == want
     });
-    wait_until(HANG, "the notification is committed", || {
-        committed(&n.brokers, &worker.group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the notification is committed",
+        || committed_once(&n.brokers, &worker.group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(
         high_watermark(&n.brokers, WORK),
         1,

@@ -26,7 +26,7 @@ use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{ConnectError, DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
-use spate_test::{HANG, WriteOutcome, wait_until};
+use spate_test::{HANG, WriteOutcome, wait_for_value, wait_until};
 use spate_test_s3_feed::{
     DRAIN_TIMEOUT, TWO_RANGES, data_dir, recs, sorted, stage, two_range_unit, written,
 };
@@ -35,14 +35,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, HeldUnit, RETRY, WORK, Worker, assert_stalled,
-    bounded_section, committed, create_topics, direct_with, exists, feed_yaml, group_stable,
-    high_watermark, hold_for, hold_open, launch_bounded, launch_source, launch_stopping,
-    launch_with, list_once, open_transaction_with, produce_raw, publish, publisher_on,
-    read_attempts, read_depth, run_to_exit,
+    bounded_section, committed, committed_once, create_topics, direct_with, exists, feed_yaml,
+    group_stable, high_watermark, high_watermark_once, hold_for, hold_open, launch_bounded,
+    launch_source, launch_stopping, launch_with, list_once, open_transaction_with, produce_raw,
+    publish, publisher_on, read_attempts, read_depth, run_to_exit,
 };
 use support::{
-    TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, produce_transaction,
-    transactional_broker,
+    TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, log_end_once,
+    produce_transaction, transactional_broker,
 };
 
 /// The members' session timeout. A member that dies holds its partitions
@@ -164,14 +164,17 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         waited >= SESSION - HEARTBEAT,
         "B read the unit {waited:?} after A was killed, inside A's session"
     );
-    wait_until(
+    wait_for_value(
         HANG,
         "B writes every row and commits the unit's offset",
-        || {
-            written(&b.script) == sorted(rows.clone())
-                && committed(&brokers, &group, WORK) == Some(1)
+        || Ok::<_, String>((written(&b.script), committed_once(&brokers, &group, WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted(rows.clone()) && *at == Some(1)
+            })
         },
-    );
+    )
+    .expect("the wait ends on a read");
     // The unit's identity, `units/0/0`, hashes to partition 1 of 2.
     let records: Vec<(i32, Option<u32>)> = read_attempts(&brokers, ATTEMPT_PARTITIONS, 3)
         .into_iter()
@@ -221,11 +224,18 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
         &section_with(&brokers, &group, "  attempt_cap: 2\n"),
         |_| {},
     );
-    wait_until(
+    wait_for_value(
         HANG,
         "B dead-letters the unit and commits its offset",
-        || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
-    );
+        || {
+            Ok::<_, String>((
+                high_watermark_once(&brokers, DEAD, 0)?,
+                committed_once(&brokers, &group, WORK)?,
+            ))
+        },
+        |read| *read == Ok((1, Some(1))),
+    )
+    .expect("the wait ends on a read");
     assert!(b.recording.deliveries().is_empty(), "B read the unit");
     assert_eq!(b.stop(), ExitState::Completed);
 }
@@ -530,9 +540,19 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
             )
             .map_err(|(e, _)| e)
             .expect("confirmed");
-        let (_, hwm) = rdkafka::producer::Producer::client(&producer)
-            .fetch_watermarks(ATTEMPT, delivered.partition, Duration::from_secs(10))
-            .expect("watermarks");
+        let (_, hwm) = wait_for_value(
+            HANG,
+            "a watermark read of the attempt topic",
+            || {
+                rdkafka::producer::Producer::client(&producer).fetch_watermarks(
+                    ATTEMPT,
+                    delivered.partition,
+                    Duration::from_secs(10),
+                )
+            },
+            Result::is_ok,
+        )
+        .expect("the wait ends on a read");
         assert!(
             hwm > delivered.offset,
             "write {i}: offset {} confirmed, high watermark {hwm}",
@@ -621,9 +641,13 @@ fn a_keyless_message_is_read_as_a_unit() {
     let delivery = worker.take("the keyless message");
     assert_eq!(delivery.unit, Unit::new("units/0/0", b"keyless".to_vec()));
     worker.feed.acknowledge(delivery.receipt).unwrap();
-    wait_until(HANG, "its offset is committed", || {
-        committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "its offset is committed",
+        || committed_once(&brokers, &group, WORK),
+        |read| *read == Ok(Some(1)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(
         high_watermark(&brokers, DEAD),
         0,
@@ -653,9 +677,18 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);
-    wait_until(HANG, "the message is dead-lettered and committed", || {
-        high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the message is dead-lettered and committed",
+        || {
+            Ok::<_, String>((
+                high_watermark_once(&brokers, DEAD, 0)?,
+                committed_once(&brokers, &group, WORK)?,
+            ))
+        },
+        |read| *read == Ok((1, Some(1))),
+    )
+    .expect("the wait ends on a read");
     delete_records_below(&brokers, DEAD, 0, 1);
     assert_stalled(&run_to_exit(&worker, &clock));
 }
@@ -899,10 +932,17 @@ fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
-    wait_until(HANG, "every unit is read and committed", || {
-        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
-            && job.committed(WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "every unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted([a.clone(), b.clone()].concat()) && *at == Some(2)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -921,10 +961,17 @@ fn a_feed_commit_carries_the_epoch_of_the_record_before_it() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
-    wait_until(HANG, "every unit is read and committed", || {
-        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
-            && job.committed(WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "every unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted([a.clone(), b.clone()].concat()) && *at == Some(2)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
     let epoch = support::record_epoch(&brokers, WORK, 1);
     assert!(epoch >= 0, "the broker sends an epoch with each record");
@@ -959,10 +1006,18 @@ fn a_member_reads_the_units_below_a_commit_the_leader_answers_lower() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
-    wait_until(HANG, "every unit is read and committed", || {
-        written(&worker.script) == sorted([a.clone(), b.clone(), c.clone()].concat())
-            && job.committed(WORK) == Some(3)
-    });
+    wait_for_value(
+        HANG,
+        "every unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted([a.clone(), b.clone(), c.clone()].concat())
+                    && *at == Some(3)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
@@ -985,23 +1040,52 @@ fn a_member_reads_a_partition_whose_epoch_carrying_commit_is_above_its_end() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
-    wait_until(HANG, "every unit is read and committed", || {
-        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
-            && job.committed(WORK) == Some(2)
-    });
+    wait_for_value(
+        HANG,
+        "every unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted([a.clone(), b.clone()].concat()) && *at == Some(2)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
 /// Wait until `job` has read `rows` and committed to the end of `topic`'s log,
 /// then until no open transaction holds that end back.
 fn wait_for_end(job: &BoundedJob, worker: &Worker, rows: &[String], topic: &str) {
-    wait_until(HANG, "the rows and the commit at the log's end", || {
-        written(&worker.script) == sorted(rows.to_vec())
-            && job.committed(topic) == Some(log_end(&job.brokers, topic, 0))
-    });
-    wait_until(HANG, "the stable offset reaches the log's end", || {
-        high_watermark(&job.brokers, topic) == log_end(&job.brokers, topic, 0)
-    });
+    wait_for_value(
+        HANG,
+        "the rows and the commit at the log's end",
+        || {
+            Ok::<_, String>((
+                written(&worker.script),
+                job.committed_once(topic)?,
+                log_end_once(&job.brokers, topic, 0)?,
+            ))
+        },
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at, end)| {
+                *rows_written == sorted(rows.to_vec()) && *at == Some(*end)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
+    wait_for_value(
+        HANG,
+        "the stable offset reaches the log's end",
+        || {
+            Ok::<_, String>((
+                high_watermark_once(&job.brokers, topic, 0)?,
+                log_end_once(&job.brokers, topic, 0)?,
+            ))
+        },
+        |read| read.as_ref().is_ok_and(|(stable, end)| stable == end),
+    )
+    .expect("the wait ends on a read");
 }
 
 /// Publish a unit whose object has gone, so the feed's read fails and it moves
@@ -1019,9 +1103,21 @@ fn moved_to(
     std::fs::rename(&object, &away).unwrap();
     let before = log_end(&job.brokers, topic, 0);
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
-    wait_until(HANG, "the unit is moved and its offset committed", || {
-        log_end(&job.brokers, topic, 0) > before && job.committed(WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit is moved and its offset committed",
+        || {
+            Ok::<_, String>((
+                log_end_once(&job.brokers, topic, 0)?,
+                job.committed_once(WORK)?,
+            ))
+        },
+        |read| {
+            read.as_ref()
+                .is_ok_and(|&(end, at)| end > before && at == Some(1))
+        },
+    )
+    .expect("the wait ends on a read");
     std::fs::rename(&away, &object).unwrap();
     (worker, rows)
 }
@@ -1336,6 +1432,8 @@ const FOREIGN: &[u8] = b"foreign/0/0";
 struct FeedAttempts {
     consumer: BaseConsumer,
     counts: Vec<Option<u32>>,
+    /// The last failed poll, cleared by the next record.
+    failed: Option<String>,
 }
 
 impl FeedAttempts {
@@ -1349,14 +1447,22 @@ impl FeedAttempts {
         FeedAttempts {
             consumer,
             counts: Vec::new(),
+            failed: None,
         }
     }
 
-    /// Take in every record the consumer has ready.
+    /// Take in every record the consumer has ready, up to a failed poll.
     fn poll(&mut self) {
         use rdkafka::message::Message as _;
         while let Some(polled) = self.consumer.poll(Duration::from_millis(100)) {
-            let message = polled.expect("read");
+            let message = match polled {
+                Ok(message) => message,
+                Err(e) => {
+                    self.failed = Some(e.to_string());
+                    break;
+                }
+            };
+            self.failed = None;
             if message.key() == Some(FOREIGN) {
                 continue;
             }
@@ -1372,16 +1478,22 @@ impl FeedAttempts {
         let ends: Vec<i64> = (0..ATTEMPT_PARTITIONS)
             .map(|partition| log_end(brokers, ATTEMPT, partition))
             .collect();
-        wait_until(HANG, "the attempt topic read to its end", || {
-            self.poll();
-            let position = self.consumer.position().unwrap();
-            (0..ATTEMPT_PARTITIONS).all(|partition| {
-                matches!(
-                    position.find_partition(ATTEMPT, partition).map(|e| e.offset()),
-                    Some(rdkafka::Offset::Offset(at)) if at >= ends[usize::try_from(partition).unwrap()]
-                )
-            })
-        });
+        wait_for_value(
+            HANG,
+            "the attempt topic read to its end",
+            || {
+                self.poll();
+                let position = self.consumer.position().unwrap();
+                let done = (0..ATTEMPT_PARTITIONS).all(|partition| {
+                    matches!(
+                        position.find_partition(ATTEMPT, partition).map(|e| e.offset()),
+                        Some(rdkafka::Offset::Offset(at)) if at >= ends[usize::try_from(partition).unwrap()]
+                    )
+                });
+                (done, self.failed.clone())
+            },
+            |(done, _)| *done,
+        );
     }
 
     /// The records read that carry a count.
@@ -1424,14 +1536,19 @@ fn an_open_transaction_on_the_attempt_topic_keeps_the_attempt_cap() {
         // Twice the cap, plus one, attempt writes, or the dead-letter write.
         let enough = usize::try_from(2 * CAP + 1).unwrap();
         let mut attempts = FeedAttempts::new(brokers);
-        wait_until(
+        wait_for_value(
             HANG,
             "the dead-letter write or more reads than the cap",
             || {
                 attempts.poll();
-                log_end(brokers, DEAD, 0) > 0 || attempts.written() >= enough
+                Ok::<_, String>((log_end_once(brokers, DEAD, 0)?, attempts.written()))
             },
-        );
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|&(dead, written)| dead > 0 || written >= enough)
+            },
+        )
+        .expect("the wait ends on a read");
         worker.stop();
         attempts.drain(brokers);
         let dead = log_end(brokers, DEAD, 0);
@@ -1498,9 +1615,17 @@ fn job_with_its_unit_read(
     let rows = recs("kept", 2);
     job.publish("kept.ndjson", &rows);
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
-    wait_until(HANG, "the unit is read and committed", || {
-        written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(1)
-    });
+    wait_for_value(
+        HANG,
+        "the unit is read and committed",
+        || Ok::<_, String>((written(&worker.script), job.committed_once(WORK)?)),
+        |read| {
+            read.as_ref().is_ok_and(|(rows_written, at)| {
+                *rows_written == sorted(rows.clone()) && *at == Some(1)
+            })
+        },
+    )
+    .expect("the wait ends on a read");
     (job, worker)
 }
 

@@ -725,9 +725,16 @@ mod silent_coordinator {
         support::produce_to(&brokers, TOPIC, 0, 0..10);
         let cfg = latest::config(&brokers, TOPIC, "idle", "earliest");
         let run = latest::Run::start(cfg);
-        spate_test::wait_until(HANG, "all ten committed", || {
-            support::committed_by(&brokers, "idle", TOPIC, 1)[0] == rdkafka::Offset::Offset(10)
-        });
+        spate_test::wait_for_value(
+            HANG,
+            "all ten committed",
+            || support::committed_by_once(&brokers, "idle", TOPIC, 1),
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|offsets| offsets[0] == rdkafka::Offset::Offset(10))
+            },
+        )
+        .expect("the wait ends on a read");
         proxy.trigger.store(HEARTBEAT, Ordering::SeqCst);
         proxy.armed.store(true, Ordering::SeqCst);
         spate_test::wait_until(HANG, "the coordinator silent", || {
@@ -840,9 +847,16 @@ mod silent_coordinator {
             feed.acknowledge(delivery.receipt).expect("acknowledge");
         }
         if committed {
-            spate_test::wait_until(HANG, "the units committed", || {
-                support::committed_by(&brokers, &group, "units", 1)[0] == rdkafka::Offset::Offset(3)
-            });
+            spate_test::wait_for_value(
+                HANG,
+                "the units committed",
+                || support::committed_by_once(&brokers, &group, "units", 1),
+                |read| {
+                    read.as_ref()
+                        .is_ok_and(|offsets| offsets[0] == rdkafka::Offset::Offset(3))
+                },
+            )
+            .expect("the wait ends on a read");
             proxy.armed.store(true, Ordering::SeqCst);
         }
         spate_test::wait_until(HANG, "silent", || proxy.silent.load(Ordering::SeqCst));

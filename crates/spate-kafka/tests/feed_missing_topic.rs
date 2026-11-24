@@ -7,10 +7,11 @@ mod support;
 
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::feed::{Feed as _, FeedErrorKind};
-use spate_test::{HANG, LogCapture, wait_until};
+use spate_test::{HANG, LogCapture, wait_for_value};
 use support::MockKafka;
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, RETRY, WORK, direct, feed_yaml, high_watermark, produce_raw,
+    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, RETRY, WORK, direct, feed_yaml, high_watermark_once,
+    produce_raw,
 };
 
 /// Pins that a dead-letter topic one metadata response calls missing does
@@ -37,9 +38,13 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
          debug: topic\n",
     ));
     produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"first"[..])]);
-    wait_until(HANG, "the first message is dead-lettered", || {
-        high_watermark(&brokers, DEAD) == 1
-    });
+    wait_for_value(
+        HANG,
+        "the first message is dead-lettered",
+        || high_watermark_once(&brokers, DEAD, 0),
+        |read| *read == Ok(1),
+    )
+    .expect("the wait ends on a read");
     cluster
         .topic_error(
             DEAD,
@@ -62,7 +67,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
         .unwrap();
     produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"second"[..])]);
     let mut fatal = None;
-    wait_until(
+    wait_for_value(
         HANG,
         "the second message is dead-lettered or the feed stops",
         || {
@@ -71,9 +76,14 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
             {
                 fatal = Some(e);
             }
-            fatal.is_some() || high_watermark(&brokers, DEAD) == 2
+            if fatal.is_some() {
+                return Ok(true);
+            }
+            high_watermark_once(&brokers, DEAD, 0).map(|dead| dead == 2)
         },
-    );
+        |read| *read == Ok(true),
+    )
+    .expect("the wait ends on a read");
     assert!(
         fatal.is_none(),
         "the feed stopped though the topic exists: {fatal:?}"

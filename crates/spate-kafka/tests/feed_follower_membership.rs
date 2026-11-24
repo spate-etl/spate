@@ -13,11 +13,11 @@ mod support;
 
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
-use spate_test::{HANG, LogCapture, wait_until};
+use spate_test::{HANG, LogCapture, wait_for_value, wait_until};
 use spate_test_support::SingleBroker;
 use std::time::{Duration, Instant};
 use support::broker;
-use support::feed::{WORK, committed, create_topics, feed_yaml, publish, section};
+use support::feed::{WORK, committed_once, create_topics, feed_yaml, publish, section};
 
 /// The member's session timeout, as the harness's section sets it.
 const SESSION: Duration = Duration::from_secs(6);
@@ -79,9 +79,13 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         seen.push(delivery.deliveries);
         feed.acknowledge(delivery.receipt).unwrap();
         let next = i64::try_from(n + 1).unwrap();
-        wait_until(HANG, "the unit's offset is committed", || {
-            committed(&brokers, &group, WORK) == Some(next)
-        });
+        wait_for_value(
+            HANG,
+            "the unit's offset is committed",
+            || committed_once(&brokers, &group, WORK),
+            |read| *read == Ok(Some(next)),
+        )
+        .expect("the wait ends on a read");
     }
 
     assert_eq!(assignments(&capture), 1, "{:#?}", capture.lines());

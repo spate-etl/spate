@@ -59,7 +59,7 @@ const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
 
 /// Compression codec of the objects under the prefix.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum S3Compression {
     /// Decide per object by key extension: `.gz`/`.gzip` → gzip,

@@ -60,7 +60,7 @@ fn default_epoch_ms() -> i64 {
 /// A named dataset, not a schema: see the crate docs for why a `fields:` map
 /// is out of scope.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DatagenDataset {
     /// Orders, payments and refunds over a small catalog, the model in
@@ -71,7 +71,7 @@ pub enum DatagenDataset {
 
 /// Wire format of the generated payloads.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DatagenEncoding {
     /// One JSON document per payload, internally tagged by `type`.
@@ -85,7 +85,7 @@ pub enum DatagenEncoding {
 
 /// Where event timestamps come from.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DatagenClock {
     /// Deterministic: `epoch_ms` plus one millisecond per event the lane has

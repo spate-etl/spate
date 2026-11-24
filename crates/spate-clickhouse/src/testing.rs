@@ -40,7 +40,7 @@ pub fn rowbinary_format_encoder<F>(
 }
 
 /// The frame codec for `compression`, or `None` under
-/// `off`.
+/// `none`.
 ///
 /// Each instance turns one sealed chunk into one compressed block in
 /// ClickHouse's native framing, the form an insert body sent with

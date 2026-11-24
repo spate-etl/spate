@@ -206,8 +206,6 @@ Under `snake_case` it would read `row_binary`, so give that variant an explicit 
 
 **Follow:** `PinningMode` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) for the case, and `S3Compression` in [`crates/spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs) for `none`.
 
-**Departs:** enums renamed `lowercase` or `kebab-case` in spate-clickhouse, spate-datagen, spate-kafka, spate-s3 and core's chunk config, and the off values `pinning: off` and the ClickHouse `compression` key's `off` alias ([#2324](https://github.com/spate-etl/spate/issues/2324)).
-
 **Checked by:** review.
 
 ### Name the client passthrough map for the system that defines its keys

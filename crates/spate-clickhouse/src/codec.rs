@@ -43,7 +43,7 @@ pub(crate) enum BlockMethod {
 }
 
 impl BlockMethod {
-    /// The method for `compression`, or `None` under `off`.
+    /// The method for `compression`, or `None` under `compression: none`.
     pub(crate) fn of(compression: ClickHouseCompression) -> Option<Self> {
         match compression {
             ClickHouseCompression::None => None,
@@ -120,8 +120,8 @@ enum Method {
 }
 
 impl BlockCodec {
-    /// The factory for `compression`, or `None` under `off`, where frames
-    /// ship as the encoder wrote them.
+    /// The factory for `compression`, or `None` under `compression: none`,
+    /// where frames ship as the encoder wrote them.
     pub(crate) fn factory(compression: ClickHouseCompression) -> Option<FrameCodecFactory> {
         let zstd_level = match compression {
             ClickHouseCompression::None => return None,

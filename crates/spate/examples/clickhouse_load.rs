@@ -119,7 +119,7 @@ fn order_key(row: &OrderLineRow) -> ShardKey<'_> {
 /// The `compression` value as the YAML spells it.
 fn compression_name(compression: ClickHouseCompression) -> String {
     match compression {
-        ClickHouseCompression::None => "off".to_owned(),
+        ClickHouseCompression::None => "none".to_owned(),
         ClickHouseCompression::Lz4 => "lz4".to_owned(),
         ClickHouseCompression::Zstd(level) => format!("zstd:{level}"),
         other => format!("{other:?}"),

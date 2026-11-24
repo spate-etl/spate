@@ -103,7 +103,7 @@ pub(crate) fn sealed(frames: &[Frame], token: &str) -> SealedBatch {
 }
 
 /// [`sealed`], with each frame coded by one instance of the sink's frame
-/// codec for `compression` (`lz4`, `zstd:3`, `off`), as a pipeline thread
+/// codec for `compression` (`lz4`, `zstd:3`, `none`), as a pipeline thread
 /// codes each chunk at seal.
 ///
 /// # Panics

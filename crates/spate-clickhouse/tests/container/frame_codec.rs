@@ -84,7 +84,7 @@ async fn coded_frames_insert_under_every_compression() {
     let expected = orders(0..600);
     let chunks: Vec<&[Order]> = expected.chunks(200).collect();
     for format in ["native", "rowbinary"] {
-        for compression in ["lz4", "zstd", "zstd:1", "zstd:19", "off"] {
+        for compression in ["lz4", "zstd", "zstd:1", "zstd:19", "none"] {
             let case = format!("{format} {compression}");
             truncate(&srv.admin, "orders").await;
             let sink =
@@ -154,7 +154,7 @@ async fn a_block_the_server_rejects_is_fatal() {
 async fn a_block_header_the_server_cannot_read_fails_fatally() {
     let srv = server().await;
     let lane = std::env::var("SPATE_CLICKHOUSE_LANE").unwrap_or_else(|_| "primary".into());
-    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &settings("native", "off")).await;
+    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &settings("native", "none")).await;
     // Block header: the column and row counts as varints, then per column its
     // name and type name, each with a varint length.
     let cases: [(&str, &'static [u8], u32); 4] = [
@@ -193,7 +193,7 @@ async fn a_value_over_the_binary_string_cap_fails_fatally() {
     let srv = server().await;
     let capped = format!(
         "{}settings: {{ format_binary_max_string_size: \"4\" }}\n",
-        settings("rowbinary", "off")
+        settings("rowbinary", "none")
     );
     let sink = sink_with::<Owned<Order>>(&srv.url, "orders", &capped).await;
     let row = Order {
@@ -201,7 +201,7 @@ async fn a_value_over_the_binary_string_cap_fails_fatally() {
         name: "sixteen bytes ok".into(),
         amount: None,
     };
-    let batch = coded(&sink, "off", &[&[row]], "string-cap");
+    let batch = coded(&sink, "none", &[&[row]], "string-cap");
     let err = sink
         .writer
         .write_batch(&sink.endpoints[0][0], &batch)
@@ -315,14 +315,14 @@ async fn incompressible_rows_insert_and_read_back() {
 
 /// A batch with no rows succeeds and inserts nothing. A RowBinary writer
 /// sends one request carrying only the header; a Native writer sends none.
-/// A one-row batch reads back. Both under lz4, zstd and `off`.
+/// A one-row batch reads back. Both under lz4, zstd and `none`.
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn empty_and_one_row_batches() {
     let srv = server().await;
     let proxy = Proxy::start(&srv.url, false).await;
     for format in ["native", "rowbinary"] {
-        for compression in ["lz4", "zstd", "off"] {
+        for compression in ["lz4", "zstd", "none"] {
             let case = format!("{format} {compression}");
             truncate(&srv.admin, "orders").await;
             let sink =

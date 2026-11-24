@@ -33,7 +33,7 @@ sink:
       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
     user: spate
     password: ${CLICKHOUSE_PASSWORD}
-    compression: lz4               # off | none | lz4 | zstd | zstd:<1-22>
+    compression: lz4               # none | lz4 | zstd | zstd:<1-22>
     format: rowbinary              # rowbinary | native
     timeouts: { send: 30s, end: 180s, startup: 30s }
     settings: { insert_quorum: "auto" }   # extra per-insert settings

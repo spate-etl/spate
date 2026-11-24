@@ -182,7 +182,7 @@ impl Drop for BenchServer {
 /// The writer and the one endpoint of a Native sink over the `events` table
 /// at `url`, built by `ClickHouseSinkBuilder::new(..).connect()` as a pipeline builds it.
 ///
-/// `compression` is the sink's `compression` value: `lz4`, `zstd:3`, `off`.
+/// `compression` is the sink's `compression` value: `lz4`, `zstd:3`, `none`.
 ///
 /// # Panics
 ///

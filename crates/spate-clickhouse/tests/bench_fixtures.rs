@@ -377,7 +377,7 @@ const BATCH_DIGEST: u64 = 0x605d_4db1_29ec_fb64;
 /// would fail minutes into a bench run. This builds the same sink under each
 /// `compression` value, writes one batch coded by the sink's frame codec, and
 /// checks what the server received: the schema query, the settings check,
-/// then one insert carrying the frames, raw under `off` and as the client's
+/// then one insert carrying the frames, raw under `none` and as the client's
 /// own blocks otherwise.
 #[test]
 fn the_bench_server_serves_the_schema_under_every_compression() {
@@ -395,7 +395,7 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
         .flat_map(|f| f.bytes.iter().copied())
         .collect();
 
-    for compression in ["lz4", "zstd:3", "off"] {
+    for compression in ["lz4", "zstd:3", "none"] {
         let server = http_server::BenchServer::recording(&rows::event_columns());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -419,9 +419,9 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
             insert.param("query") == Some(writer.insert_sql()),
             "{compression}: the second request is the insert"
         );
-        if compression == "off" {
-            assert_eq!(insert.param("decompress"), None, "off: no decompress");
-            assert_eq!(&insert.body[..], &raw[..], "off: the frames, unchanged");
+        if compression == "none" {
+            assert_eq!(insert.param("decompress"), None, "none: no decompress");
+            assert_eq!(&insert.body[..], &raw[..], "none: the frames, unchanged");
         } else {
             assert_eq!(
                 insert.param("decompress"),
@@ -457,7 +457,7 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
 }
 
 /// `testing::frame_codec`, the frame benches' route to the sink's codec,
-/// gives no codec under `off` and a block codec under every other
+/// gives no codec under `none` and a block codec under every other
 /// compression, with the method byte that compression names. zstd:1 and
 /// zstd:3 give different blocks.
 #[test]
@@ -467,8 +467,8 @@ fn the_codec_export_codes_under_every_compression() {
             .expect("a compression value")
     };
     assert!(
-        spate_clickhouse::testing::frame_codec(compression("off")).is_none(),
-        "off: no codec"
+        spate_clickhouse::testing::frame_codec(compression("none")).is_none(),
+        "none: no codec"
     );
     let frame = &frames::native_frames(1)[0].bytes;
     let mut blocks = Vec::new();

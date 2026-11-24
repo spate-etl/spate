@@ -49,7 +49,7 @@ async fn a_checked_rowbinary_encoder_allocates_what_the_unchecked_one_does() {
     // The settings check that follows the schema read.
     mock.add(handlers::provide::<u8>([1u8]));
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: orders\ncompression: off\nshards:\n  - replicas: [\"{}\"]\n",
+        "table: orders\ncompression: none\nshards:\n  - replicas: [\"{}\"]\n",
         mock.url()
     ))
     .unwrap();

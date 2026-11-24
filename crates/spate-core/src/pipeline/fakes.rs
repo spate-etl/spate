@@ -756,7 +756,7 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
             name: spate_test::unique_name("test"),
             threads: Some(threads),
             io_threads: 1,
-            pinning: PinningMode::Off,
+            pinning: PinningMode::None,
         },
         checkpoint: CheckpointSection {
             interval: Duration::from_millis(20),

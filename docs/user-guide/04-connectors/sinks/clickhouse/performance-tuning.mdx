@@ -211,7 +211,7 @@ fat LTO with one codegen unit made the measured pipeline 2–8% faster.
 ```yaml
 sink:
   clickhouse:
-    compression: lz4     # lz4 (default) | zstd | zstd:N | off
+    compression: lz4     # lz4 (default) | zstd | zstd:N | none
 ```
 
 This compresses the HTTP insert body.
@@ -225,7 +225,7 @@ thread keeps one compression context per compressing sink, outside
 about 0.6 MiB at the defaults to tens of MiB at high levels with large chunks.
 `lz4` is cheap and a good default on most links. `zstd` (optionally `zstd:N`)
 compresses smaller for a bit more CPU, worth it on metered or cross-region links
-where bandwidth, not CPU, is the limit. `off` saves client CPU on a fast,
+where bandwidth, not CPU, is the limit. `none` saves client CPU on a fast,
 trusted LAN where the wire is not the bottleneck. Match the choice to whichever
 of client CPU or bandwidth is scarce; it does not affect on-disk storage, only
 the traffic between the sink and the server.

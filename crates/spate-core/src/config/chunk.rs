@@ -21,7 +21,7 @@ use serde::Deserialize;
 /// (`skip` | `fail`). Keeps serde derives and wire tokens off the
 /// `#[non_exhaustive]` runtime type [`ErrorPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 enum EncodePolicyWire {
     Skip,
     Fail,

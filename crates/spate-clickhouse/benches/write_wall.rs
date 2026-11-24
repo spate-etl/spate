@@ -11,7 +11,7 @@
 //! One iteration codes the batch's frames and writes them. Under `lz4` and
 //! `zstd` every frame goes through one instance of the sink's frame codec,
 //! as a pipeline thread codes each chunk at seal, and `write_batch` then
-//! sends the blocks as they are. Under `off` the frames are written as the
+//! sends the blocks as they are. Under `none` the frames are written as the
 //! encoder made them. The writer runs on a current-thread runtime, so the
 //! coding and the socket writes share one thread.
 //!
@@ -27,7 +27,7 @@
 //!
 //! # Cases
 //!
-//! `write_lz4`, `write_zstd3` and `write_off`, one per `compression` value,
+//! `write_lz4`, `write_zstd3` and `write_none`, one per `compression` value,
 //! cost coding and writing together: the total CPU a batch costs, wherever it
 //! runs. `write_lz4_precoded` and `write_zstd3_precoded` code the frames in
 //! setup and time the write alone, which is the share left to the I/O
@@ -102,7 +102,7 @@ impl Rig {
 /// How a case prepares its frames.
 #[derive(Clone, Copy)]
 enum Coding {
-    /// Coded inside the measured iteration (or not at all under `off`).
+    /// Coded inside the measured iteration (or not at all under `none`).
     Timed,
     /// Coded once in setup; the iteration writes only.
     Precoded,
@@ -163,7 +163,7 @@ fn suite() -> Suite {
     let suite = spate_bench::suite("spate-clickhouse");
     let suite = case(suite, "write_lz4", "lz4", Coding::Timed);
     let suite = case(suite, "write_zstd3", "zstd:3", Coding::Timed);
-    let suite = case(suite, "write_off", "off", Coding::Timed);
+    let suite = case(suite, "write_none", "none", Coding::Timed);
     let suite = case(suite, "write_lz4_precoded", "lz4", Coding::Precoded);
     case(suite, "write_zstd3_precoded", "zstd:3", Coding::Precoded)
 }

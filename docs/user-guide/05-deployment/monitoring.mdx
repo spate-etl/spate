@@ -138,6 +138,11 @@ queue-bound one ([Queues](tuning.mdx#queues)), more threads or partitions for a
 CPU-bound one. Raising the binding side usually moves the bound rather than
 removing it, so read the table again after each change.
 
+A sink-bound reading can also be a slow-write tail: a few slow writes hold every
+permit while the store keeps up on average.
+[What fills the queue](tuning.mdx#find-what-fills-the-queue) tells it apart from
+a sink at capacity, with the checks to run first and the remedy for each.
+
 ## Starting alerts
 
 These catch the failure modes that matter most; verify thresholds

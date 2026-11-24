@@ -303,8 +303,10 @@ questions separately:
 histogram_quantile(0.99, sum by (le, pipeline, component) (
   rate(spate_sink_write_duration_seconds_bucket{outcome="ok"}[5m])))
 
-# Am I queueing? If this carries the flush p99, the answer is more shards or
-# a larger inflight.max_per_shard — not a faster sink.
+# Am I queueing? If this carries the flush p99, the permits are the limit: add
+# shards or raise inflight.max_per_shard. When write p99 is several times the
+# median, a few slow writes hold the permits, and a deeper queue.max_bytes
+# absorbs them (see Queues in the deployment tuning guide).
 histogram_quantile(0.99, sum by (le, pipeline, component) (
   rate(spate_sink_permit_wait_duration_seconds_bucket[5m])))
 

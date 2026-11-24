@@ -1,6 +1,9 @@
 //! What a test does to a broker through a Kafka client: create topics and
 //! wait until the broker lists them, produce records, and read a group's
-//! committed offsets, a partition's high watermark or a topic from its start.
+//! committed offsets, a partition's high watermark, a topic's partition count
+//! or a topic from its start. Each offset, watermark and partition-count
+//! reader has a `_once` form that makes one call, for a caller whose own wait
+//! reads again.
 
 use std::time::{Duration, Instant};
 
@@ -17,7 +20,8 @@ use rdkafka::{Offset, TopicPartitionList};
 pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The longest one offset or watermark request waits before it is sent
-/// again. A broker can drop a request while a coordinator or leader moves.
+/// again, and the bound of a `_once` read. A broker can drop a request while
+/// a coordinator or leader moves.
 const READ_EVERY: Duration = Duration::from_secs(10);
 
 /// How long [`send`] serves delivery reports before it asks a full queue
@@ -125,10 +129,30 @@ where
     K: Consumer<C>,
 {
     let list = partition_list(topic, partitions);
-    read_again(
-        &format!("a committed-offset read of {topic}"),
-        bound,
-        |timeout| consumer.committed_offsets(list.clone(), timeout),
+    read_again(&committed_read(topic), bound, |timeout| {
+        committed_within(consumer, &list, timeout)
+    })
+}
+
+/// [`committed`] as one request of at most 10 s, for a caller whose own wait
+/// reads again.
+///
+/// # Errors
+///
+/// Fails with the request's error, naming the read.
+pub fn committed_once<C, K>(
+    consumer: &K,
+    topic: &str,
+    partitions: i32,
+) -> Result<TopicPartitionList, String>
+where
+    C: ConsumerContext,
+    K: Consumer<C>,
+{
+    let list = partition_list(topic, partitions);
+    named(
+        &committed_read(topic),
+        committed_within(consumer, &list, READ_EVERY),
     )
 }
 
@@ -151,6 +175,42 @@ where
     committed(consumer, topic, partitions, bound).map(|list| offsets(&list))
 }
 
+/// The offsets of [`committed_once`], in partition order. A partition with no
+/// commit reads as `Offset::Invalid`.
+///
+/// # Errors
+///
+/// As [`committed_once`].
+pub fn committed_offsets_once<C, K>(
+    consumer: &K,
+    topic: &str,
+    partitions: i32,
+) -> Result<Vec<Offset>, String>
+where
+    C: ConsumerContext,
+    K: Consumer<C>,
+{
+    committed_once(consumer, topic, partitions).map(|list| offsets(&list))
+}
+
+/// One committed-offset request for `list`, waiting at most `timeout`.
+fn committed_within<C, K>(
+    consumer: &K,
+    list: &TopicPartitionList,
+    timeout: Duration,
+) -> KafkaResult<TopicPartitionList>
+where
+    C: ConsumerContext,
+    K: Consumer<C>,
+{
+    consumer.committed_offsets(list.clone(), timeout)
+}
+
+/// What a committed-offset read of `topic` is called in its error.
+fn committed_read(topic: &str) -> String {
+    format!("a committed-offset read of {topic}")
+}
+
 /// The high watermark of `partition` of `topic`, at the isolation level of
 /// `consumer`'s settings. A failed answer is read again until `bound` passes.
 ///
@@ -167,12 +227,53 @@ where
     C: ConsumerContext,
     K: Consumer<C>,
 {
-    read_again(
-        &format!("a watermark read of {topic}/{partition}"),
-        bound,
-        |timeout| consumer.fetch_watermarks(topic, partition, timeout),
+    read_again(&watermark_read(topic, partition), bound, |timeout| {
+        high_within(consumer, topic, partition, timeout)
+    })
+}
+
+/// [`high_watermark`] as one client call of at most 10 s, for a caller whose
+/// own wait reads again. librdkafka sends a request for each watermark in
+/// that call and retries some refusals inside it.
+///
+/// # Errors
+///
+/// Fails with the call's error, naming the read.
+pub fn high_watermark_once<C, K>(consumer: &K, topic: &str, partition: i32) -> Result<i64, String>
+where
+    C: ConsumerContext,
+    K: Consumer<C>,
+{
+    named(
+        &watermark_read(topic, partition),
+        high_within(consumer, topic, partition, READ_EVERY),
     )
-    .map(|(_, high)| high)
+}
+
+/// The high watermark of one watermark call, waiting at most `timeout`.
+fn high_within<C, K>(
+    consumer: &K,
+    topic: &str,
+    partition: i32,
+    timeout: Duration,
+) -> KafkaResult<i64>
+where
+    C: ConsumerContext,
+    K: Consumer<C>,
+{
+    consumer
+        .fetch_watermarks(topic, partition, timeout)
+        .map(|(_, high)| high)
+}
+
+/// What a watermark read of `partition` of `topic` is called in its error.
+fn watermark_read(topic: &str, partition: i32) -> String {
+    format!("a watermark read of {topic}/{partition}")
+}
+
+/// `answer`, with a failure named as `what`'s.
+fn named<T>(what: &str, answer: KafkaResult<T>) -> Result<T, String> {
+    answer.map_err(|e| format!("{what}: {e}"))
 }
 
 /// Partitions `0..partitions` of `topic`, with no offset.
@@ -298,23 +399,43 @@ fn read(probe: &BaseConsumer) -> Result<Vec<Listed>, String> {
 /// Whether `read` lists each `(name, partitions)` of `wanted` with no error
 /// and at least that many partitions. A failed read lists nothing yet.
 fn listed(read: Result<Vec<Listed>, String>, wanted: &[(&str, usize)]) -> Result<(), String> {
-    let topics = read.map_err(|e| format!("metadata read: {e}"))?;
+    let topics = read.map_err(metadata_failure)?;
     for &(name, partitions) in wanted {
-        match topics.iter().find(|t| t.name == name) {
-            None => return Err(format!("metadata does not list {name}")),
-            Some(Listed { error: Some(e), .. }) => {
-                return Err(format!("metadata lists {name} with {e}"));
-            }
-            Some(t) if t.partitions < partitions => {
-                return Err(format!(
-                    "metadata lists {} of {name}'s {partitions} partitions",
-                    t.partitions
-                ));
-            }
-            Some(_) => {}
+        let t = usable(&topics, name)?;
+        if t.partitions < partitions {
+            return Err(format!(
+                "metadata lists {} of {name}'s {partitions} partitions",
+                t.partitions
+            ));
         }
     }
     Ok(())
+}
+
+/// `name` as `topics` lists it, when it is listed with no error.
+fn usable<'a>(topics: &'a [Listed], name: &str) -> Result<&'a Listed, String> {
+    match topics.iter().find(|t| t.name == name) {
+        None => Err(format!("metadata does not list {name}")),
+        Some(Listed { error: Some(e), .. }) => Err(format!("metadata lists {name} with {e}")),
+        Some(t) => Ok(t),
+    }
+}
+
+/// A failed metadata read, as a listing reports it.
+fn metadata_failure(e: String) -> String {
+    format!("metadata read: {e}")
+}
+
+/// How many partitions one metadata read of at most 5 s through `probe`
+/// lists for `topic`, for a caller whose own wait reads again. `None` when
+/// the read does not list `topic`, or lists it with an error.
+///
+/// # Errors
+///
+/// Fails with the read's error.
+pub fn topic_partitions_once(probe: &BaseConsumer, topic: &str) -> Result<Option<usize>, String> {
+    let topics = read(probe).map_err(metadata_failure)?;
+    Ok(usable(&topics, topic).ok().map(|t| t.partitions))
 }
 
 /// A producer on `bootstrap` that gives up on a record after 30 s.
@@ -404,8 +525,10 @@ mod tests {
     use std::sync::{Mutex, PoisonError};
 
     use rdkafka::ClientContext;
+    use rdkafka::consumer::CommitMode;
     use rdkafka::message::{DeliveryResult, Message as _};
     use rdkafka::producer::DefaultProducerContext;
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 
     use super::*;
 
@@ -688,5 +811,70 @@ mod tests {
         list.add_partition_offset("t", 1, Offset::Offset(5))
             .unwrap();
         assert_eq!(offsets(&list), [Offset::Invalid, Offset::Offset(5)]);
+    }
+
+    /// A client that holds a mock cluster of one broker, with `topic` of
+    /// `partitions` partitions on it, and the cluster's bootstrap address.
+    fn mock_with(topic: &str, partitions: i32) -> (BaseProducer, String) {
+        let holder: BaseProducer = client("", &[("test.mock.num.brokers", "1")]).unwrap();
+        let brokers = {
+            let cluster = holder.client().mock_cluster().unwrap();
+            cluster.create_topic(topic, partitions, 1).unwrap();
+            cluster.bootstrap_servers()
+        };
+        (holder, brokers)
+    }
+
+    #[test]
+    fn a_committed_read_refused_once_returns_the_refusal_then_the_offset() {
+        let (holder, brokers) = mock_with("units", 1);
+        let reader = consumer(&brokers, &[("group.id", "once")]).unwrap();
+        let mut at = TopicPartitionList::new();
+        at.add_partition_offset("units", 0, Offset::Offset(3))
+            .unwrap();
+        reader.commit(&at, CommitMode::Sync).unwrap();
+        // librdkafka answers a refused OffsetFetch with its error, unretried.
+        holder.client().mock_cluster().unwrap().request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        let refused = committed_offsets_once(&reader, "units", 1).unwrap_err();
+        assert!(
+            refused.starts_with("a committed-offset read of units: "),
+            "{refused}"
+        );
+        assert!(refused.contains("GroupAuthorizationFailed"), "{refused}");
+        assert_eq!(
+            committed_offsets_once(&reader, "units", 1),
+            Ok(vec![Offset::Offset(3)])
+        );
+    }
+
+    #[test]
+    fn a_watermark_read_returns_the_high_mark_or_the_error() {
+        let (_holder, brokers) = mock_with("units", 1);
+        let producer = producer(&brokers).unwrap();
+        send(
+            &producer,
+            BaseRecord::<(), _>::to("units").partition(0).payload("one"),
+            Instant::now() + HANG,
+        )
+        .unwrap();
+        producer.flush(HANG).unwrap();
+        let reader = consumer(&brokers, &[]).unwrap();
+        assert_eq!(high_watermark_once(&reader, "units", 0), Ok(1));
+        let missing = high_watermark_once(&reader, "units", 5).unwrap_err();
+        assert!(
+            missing.starts_with("a watermark read of units/5: "),
+            "{missing}"
+        );
+    }
+
+    #[test]
+    fn a_topic_is_counted_by_its_partitions_once_listed() {
+        let (_holder, brokers) = mock_with("units", 2);
+        let probe = consumer(&brokers, &[]).unwrap();
+        assert_eq!(topic_partitions_once(&probe, "units"), Ok(Some(2)));
+        assert_eq!(topic_partitions_once(&probe, "never-created"), Ok(None));
     }
 }

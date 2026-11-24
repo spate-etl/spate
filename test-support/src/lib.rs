@@ -45,8 +45,9 @@ pub use kafka::{
 };
 #[cfg(feature = "kafka-client")]
 pub use kafka_client::{
-    committed, committed_offsets, consumer, create_topics, from_start, high_watermark, producer,
-    send, transactional_producer,
+    committed, committed_offsets, committed_offsets_once, committed_once, consumer, create_topics,
+    from_start, high_watermark, high_watermark_once, producer, send, topic_partitions_once,
+    transactional_producer,
 };
 #[cfg(feature = "kafka-tls")]
 pub use openssl::assert_openssl_runs_through_exit;

@@ -150,13 +150,19 @@ fn kafka_broker_round_trips_a_record() {
     .unwrap_or_else(|e| panic!("{e}"));
     consumer.subscribe(&["smoke"]).expect("subscribe");
     // Bounds a hang only: the record is read as soon as the group assigns.
+    // A failed poll counts as no record yet.
     let until = Instant::now() + HANG;
+    let mut failed = None;
     let payload = loop {
         match consumer.poll(Duration::from_millis(100)) {
             Some(Ok(m)) => break m.payload().map(<[u8]>::to_vec),
-            Some(Err(e)) => panic!("consume: {e}"),
-            None => assert!(Instant::now() < until, "no record within 60 s"),
+            Some(Err(e)) => failed = Some(e),
+            None => {}
         }
+        assert!(
+            Instant::now() < until,
+            "no record within 60 s; last failed poll: {failed:?}"
+        );
     };
     assert_eq!(payload.as_deref(), Some(&b"one"[..]));
 }

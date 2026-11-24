@@ -5,7 +5,7 @@
 
 use super::{
     assert_no_gap, await_assignment, committed_by, committed_by_once, delete_records_below,
-    produce_to,
+    produce_once, produce_to,
 };
 use rdkafka::Offset;
 use spate_core::checkpoint::Checkpointer;
@@ -197,15 +197,20 @@ impl Run {
 /// Produce to `partition` from `next` until `run` has handed one of its records
 /// to the sink, which shows the run's start is settled and it reads.
 fn await_reading(run: &Run, brokers: &str, topic: &str, partition: i32, next: &mut i64) {
-    let mut tick = 0;
-    wait_until(HANG, "the run to read", || {
-        if tick % 40 == 0 {
-            produce_to(brokers, topic, partition, *next..*next + 1);
-            *next += 1;
-        }
-        tick += 1;
-        run.attempted(partition)
-    });
+    let (mut tick, mut failed) = (0, None);
+    wait_for_value(
+        HANG,
+        "the run to read",
+        || {
+            if tick % 40 == 0 {
+                failed = produce_once(brokers, topic, partition, *next).err();
+                *next += 1;
+            }
+            tick += 1;
+            (run.attempted(partition), failed.clone())
+        },
+        |(read, _)| *read,
+    );
 }
 
 fn offset_of(offset: Offset) -> Option<i64> {
@@ -289,7 +294,7 @@ pub(crate) fn a_commit_below_the_log_start_across_a_restart(
         "the commit to pass the retained records",
         || {
             if tick % 40 == 0 {
-                produce_to(brokers, topic, 0, next..next + 1);
+                produce_once(brokers, topic, 0, next)?;
                 next += 1;
             }
             tick += 1;

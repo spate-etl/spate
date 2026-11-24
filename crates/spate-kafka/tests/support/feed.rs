@@ -3,7 +3,7 @@
 //! readers of committed offsets and of the retry, dead-letter and attempt
 //! topics.
 
-use super::{Read, from_start, read_kept};
+use super::{Read, Take, from_start, read_kept};
 use rdkafka::Offset;
 use rdkafka::consumer::BaseConsumer;
 use rdkafka::message::{Header, Message, OwnedHeaders};
@@ -265,12 +265,13 @@ fn first_offset(offsets: &[Offset]) -> Option<i64> {
     }
 }
 
-/// The first `n` messages of partition 0 of `topic`, read from its start.
+/// At least `n` messages of partition 0 of `topic`, read from its start, and
+/// any more already ready.
 pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
     let consumer = from_start(brokers, topic, 1, &[]);
     read_kept(
         &consumer,
-        n,
+        Take::AtLeast(n),
         &format!("{n} messages on {topic}"),
         |message| Some(Read::of(message)),
     )
@@ -280,24 +281,29 @@ pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
 /// `None` for a tombstone.
 pub(crate) type AttemptRecord = (i32, String, Option<u32>);
 
-/// The first `n` attempt records of the attempt topic's `partitions`
-/// partitions, read from their start, in offset order within each
+/// At least `n` attempt records of the attempt topic's `partitions`
+/// partitions, read from their start, and any more already ready, in offset order within each
 /// partition. A record whose key is not a publish identity, which always
 /// holds a `/`, is the gate's fence and is skipped.
 pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
     let consumer = from_start(brokers, ATTEMPT, partitions, &[]);
-    read_kept(&consumer, n, &format!("{n} attempt records"), |message| {
-        let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
-        if !key.contains('/') {
-            return None;
-        }
-        let count = message.payload().map(|value| {
-            let record: serde_json::Value = serde_json::from_slice(value).unwrap();
-            assert_eq!(record["v"], 1, "{record}");
-            u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
-        });
-        Some((message.partition(), key, count))
-    })
+    read_kept(
+        &consumer,
+        Take::AtLeast(n),
+        &format!("{n} attempt records"),
+        |message| {
+            let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
+            if !key.contains('/') {
+                return None;
+            }
+            let count = message.payload().map(|value| {
+                let record: serde_json::Value = serde_json::from_slice(value).unwrap();
+                assert_eq!(record["v"], 1, "{record}");
+                u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
+            });
+            Some((message.partition(), key, count))
+        },
+    )
 }
 
 /// How many messages partition 0 of `topic` holds, read at the default

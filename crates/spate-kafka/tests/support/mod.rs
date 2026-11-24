@@ -374,14 +374,41 @@ pub(crate) fn produce_to(
     let producer = spate_test_support::producer(brokers).expect("producer");
     let deadline = Instant::now() + HANG;
     for offset in offsets {
-        let payload = format!("{partition}:{offset}");
-        let record = BaseRecord::to(topic)
-            .partition(partition)
-            .payload(payload.as_bytes())
-            .key(payload.as_bytes());
-        spate_test_support::send(&producer, record, deadline).expect("enqueue");
+        send_at(&producer, topic, partition, offset, deadline).expect("enqueue");
     }
     producer.flush(Duration::from_secs(60)).expect("flush");
+}
+
+/// [`produce_to`] for one offset, sent and flushed within 10 s, for a caller
+/// whose own wait produces again.
+pub(crate) fn produce_once(
+    brokers: &str,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+) -> Result<(), String> {
+    let producer = spate_test_support::producer(brokers)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    send_at(&producer, topic, partition, offset, deadline)?;
+    producer
+        .flush(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|e| format!("a flush to {topic}/{partition}: {e}"))
+}
+
+/// Enqueue the record [`produce_to`] writes for `offset`.
+fn send_at(
+    producer: &BaseProducer,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+    deadline: Instant,
+) -> Result<(), String> {
+    let payload = format!("{partition}:{offset}");
+    let record = BaseRecord::to(topic)
+        .partition(partition)
+        .payload(payload.as_bytes())
+        .key(payload.as_bytes());
+    spate_test_support::send(producer, record, deadline)
 }
 
 /// Produce one record with `payload` to `partition`, and flush.
@@ -837,28 +864,42 @@ pub(crate) fn consume<T>(
     consumer.subscribe(&[topic]).expect("subscribe");
     read_kept(
         &consumer,
-        n,
+        Take::Exactly(n),
         &format!("{n} messages kept from {topic}"),
         keep,
     )
 }
 
-/// The first `n` values `keep` returns for the messages `consumer` reads;
-/// `what` names them in a hang. A failed poll counts as nothing read yet, and
-/// a hang prints the last one.
+/// How many values [`read_kept`] waits for.
+#[derive(Clone, Copy)]
+pub(crate) enum Take {
+    /// Stop at `n`.
+    Exactly(usize),
+    /// Wait for `n`, then keep every message already ready, so a test sees
+    /// a record written more often than it asks for.
+    AtLeast(usize),
+}
+
+/// The values `keep` returns for the messages `consumer` reads, as many as
+/// `take` asks for; `what` names them in a hang. A failed poll counts as
+/// nothing read yet, and a hang prints the last one.
 pub(crate) fn read_kept<T>(
     consumer: &BaseConsumer,
-    n: usize,
+    take: Take,
     what: &str,
     mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
 ) -> Vec<T> {
+    let (n, exact) = match take {
+        Take::Exactly(n) => (n, true),
+        Take::AtLeast(n) => (n, false),
+    };
     let mut got = Vec::new();
     let mut failed = None;
     spate_test::wait_for_value(
         HANG,
         what,
         || {
-            while got.len() < n {
+            while !exact || got.len() < n {
                 match consumer.poll(Duration::from_millis(100)) {
                     Some(Ok(message)) => {
                         failed = None;

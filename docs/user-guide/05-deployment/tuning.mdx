@@ -357,6 +357,26 @@ receives during one slow write:
    `shards × queue.max_bytes` beside the pending writes, by the
    [budget sizing rule](../02-concepts/03-backpressure.mdx#sizing-the-budget).
 
+**Worked example.** A pipeline writes to 2 shards at the default batch (128 MiB)
+and 2 in-flight writes per shard. `rate(spate_sink_bytes_total[5m])` reads about
+400 MB/s per shard while the source is not pausing, and the write p99 falls in
+the 50–100 ms bucket. 400 MB/s × 0.1 s is about 38 MiB, so `queue.max_bytes`
+goes between 38 and 76 MiB: 64 MiB. The budget rule then needs a low watermark
+of 2 × (2 × 2 × 128 MiB + 2 × 64 MiB) = 1,280 MiB, which at the default
+`low_ratio` of 0.5 is a 2,560 MiB budget:
+
+```yaml
+sink:
+  # the backend key and its settings, with 2 shards
+  queue:
+    max_bytes: 64MiB
+backpressure:
+  max_inflight_bytes: 2560MiB
+```
+
+Without the queue change, the same pipeline would need about a 2 GiB budget, so
+the deeper queue costs about 500 MiB of memory.
+
 The rule was measured at the default `inflight.max_per_shard` of 2 only, by a
 rig this repository does not carry. A deeper queue adds little latency while the
 sink has capacity to spare, and adds it when the sink is at its limit.

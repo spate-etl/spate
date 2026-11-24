@@ -138,6 +138,12 @@ queue-bound one ([Queues](tuning.mdx#queues)), more threads or partitions for a
 CPU-bound one. Raising the binding side usually moves the bound rather than
 removing it, so read the table again after each change.
 
+A sink-bound reading can also be a slow-write tail. When the shard's rate stays
+well below `inflight.max_per_shard` times the mean batch size divided by the
+mean write time, and write p99 is several times the median, a few slow writes
+hold every permit. A deeper queue absorbs them with no extra writes; see
+[what fills the queue](tuning.mdx#find-what-fills-the-queue).
+
 ## Starting alerts
 
 These catch the failure modes that matter most; verify thresholds

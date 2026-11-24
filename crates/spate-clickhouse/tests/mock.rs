@@ -56,11 +56,11 @@ async fn sink_for(url: &str) -> config::ClickHouseSink {
 
 async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        // `off`: the crate's `record` handler decodes the request body with no
+        // `none`: the crate's `record` handler decodes the request body with no
         // decompression, so a decodable round-trip requires an uncompressed body.
         r#"
 table: {table}
-compression: off
+compression: none
 shards:
   - replicas: ["{url}"]
 "#
@@ -187,7 +187,7 @@ async fn failed_sink_as(url: &str, format: &str) -> spate_clickhouse::SchemaErro
         r#"
 table: orders
 format: {format}
-compression: off
+compression: none
 shards:
   - replicas: ["{url}"]
 "#
@@ -314,7 +314,7 @@ async fn the_native_encoder_checks_wrapper_scale_against_the_fetched_precision()
             r#"
 table: events
 format: native
-compression: off
+compression: none
 shards:
   - replicas: ["{url}"]
 "#
@@ -379,7 +379,7 @@ async fn both_encoders_check_decimal_scale_against_the_fetched_column() {
             r#"
 table: events
 format: {format}
-compression: off
+compression: none
 shards:
   - replicas: ["{url}"]
 "#
@@ -564,7 +564,7 @@ async fn native_refusal_cuts_a_long_type() {
 
 async fn sink_with_format(url: &str, format: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: orders\nformat: {format}\ncompression: off\nshards:\n  - replicas: [\"{url}\"]\n"
+        "table: orders\nformat: {format}\ncompression: none\nshards:\n  - replicas: [\"{url}\"]\n"
     ))
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)
@@ -660,7 +660,7 @@ async fn the_deepest_accepted_column_type_builds_the_sink() {
                 ]),
             );
             let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-                "table: orders\nformat: {format}\ncompression: off\nshards:\n  - replicas: [\"{}\"]\n",
+                "table: orders\nformat: {format}\ncompression: none\nshards:\n  - replicas: [\"{}\"]\n",
                 mock.url()
             ))
             .expect("config yaml");
@@ -708,7 +708,7 @@ async fn a_replica_refusing_a_setting_fails_startup() {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
-compression: off
+compression: none
 shards:
   - replicas: ["{}", "{}"]
 settings: {{ insert_qourum: "2" }}
@@ -744,7 +744,7 @@ async fn replica_disagreement_fails_startup() {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
-compression: off
+compression: none
 shards:
   - replicas: ["{}", "{}"]
 "#,
@@ -1001,7 +1001,7 @@ async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::Clic
         .map(|w| format!("  - replicas: [\"{url}\"]\n    weight: {w}\n"))
         .collect();
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: orders\ncompression: off\nshards:\n{shards}{check}\n"
+        "table: orders\ncompression: none\nshards:\n{shards}{check}\n"
     ))
     .expect("config yaml");
     ClickHouseSinkBuilder::new(cfg)

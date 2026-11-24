@@ -150,14 +150,15 @@ pub(crate) fn owned_settings(
 /// ([`ClickHouseSink::frame_codec`](crate::ClickHouseSink::frame_codec)). The
 /// writer sends the blocks as they are, with `decompress=1`, and compresses
 /// nothing itself. A frame that is not a block of the configured method fails
-/// the write `Fatal` before any request is made. Under `off`, frames are sent
+/// the write `Fatal` before any request is made. Under `none`, frames are sent
 /// as the encoder wrote them.
 #[derive(Clone)]
 pub struct ClickHouseWriter {
     insert_sql: String,
     /// The RowBinary header, coded as one block when `coded` is set.
     header: Option<Bytes>,
-    /// The block method every frame carries, or `None` under `off`.
+    /// The block method every frame carries, or `None` under
+    /// `compression: none`.
     coded: Option<BlockMethod>,
     settings: Vec<(String, String)>,
     send_timeout: Option<Duration>,

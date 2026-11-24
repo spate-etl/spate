@@ -145,7 +145,7 @@ fn default_statistics_interval() -> Duration {
 /// Producer compression codec, applied as librdkafka's
 /// `compression.codec`.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum KafkaCompression {
     /// No compression.

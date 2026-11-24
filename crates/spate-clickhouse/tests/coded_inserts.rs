@@ -130,7 +130,7 @@ fn headers(r: &Recorded) -> Vec<(String, String)> {
 /// For Native and RowBinary, under lz4 and zstd at levels 1, 3 and 19, the
 /// sink's insert of coded frames carries the same body, the same headers
 /// apart from `host`, and the same query pairs as a stock compressing client
-/// sending the raw frames, with `decompress` once. Under `off` it carries no
+/// sending the raw frames, with `decompress` once. Under `none` it carries no
 /// `decompress` and the raw frames. Two writes of one batch send the same
 /// body and the same query pairs.
 #[test]
@@ -139,7 +139,7 @@ fn a_coded_insert_is_the_request_a_compressing_client_sends() {
     for format in ["native", "rowbinary"] {
         let (raw, rows) = raw_frames(format);
         let header = (format == "rowbinary").then(rowbinary_header);
-        for name in ["lz4", "zstd:1", "zstd:3", "zstd:19", "off"] {
+        for name in ["lz4", "zstd:1", "zstd:3", "zstd:19", "none"] {
             let case = format!("{format} {name}");
             let server = BenchServer::recording(&rows::event_columns());
             let sink = runtime.block_on(http_server::events_sink_in(server.url(), name, format));
@@ -176,7 +176,7 @@ fn a_coded_insert_is_the_request_a_compressing_client_sends() {
                 stock.body.len()
             );
             let decompress = first.query.iter().filter(|(k, _)| k == "decompress");
-            if name == "off" {
+            if name == "none" {
                 assert_eq!(decompress.count(), 0, "{case}: no decompress");
                 let plain: Vec<u8> = header
                     .iter()
@@ -197,7 +197,7 @@ fn a_coded_insert_is_the_request_a_compressing_client_sends() {
 fn into_parts_attaches_a_codec_only_when_compressing() {
     let runtime = runtime();
     let frame = &frames::native_frames(1)[0].bytes;
-    for (name, method) in [("off", None), ("lz4", Some(0x82)), ("zstd:3", Some(0x90))] {
+    for (name, method) in [("none", None), ("lz4", Some(0x82)), ("zstd:3", Some(0x90))] {
         let server = BenchServer::discarding(&rows::event_columns());
         let sink: ClickHouseSink =
             runtime.block_on(http_server::events_sink_in(server.url(), name, "native"));
@@ -321,7 +321,7 @@ fn an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request() {
 }
 
 /// An insert answered 271 for a stored block the server read, here a
-/// materialized view reading a damaged part, fails `Retryable` from an `off`
+/// materialized view reading a damaged part, fails `Retryable` from a `none`
 /// sink's writer and `Fatal` from an lz4 sink's writer.
 #[test]
 fn a_server_side_decode_failure_fails_fatal_only_from_a_coding_writer() {
@@ -329,7 +329,7 @@ fn a_server_side_decode_failure_fails_fatal_only_from_a_coding_writer() {
     let runtime = runtime();
     let server = BenchServer::failing_inserts(&rows::event_columns(), 271, STORED_BLOCK_271);
     let raw = frames::native_frames(1);
-    for (compression, expected) in [("off", ErrorClass::Retryable), ("lz4", ErrorClass::Fatal)] {
+    for (compression, expected) in [("none", ErrorClass::Retryable), ("lz4", ErrorClass::Fatal)] {
         let sink = runtime.block_on(http_server::events_sink_in(
             server.url(),
             compression,

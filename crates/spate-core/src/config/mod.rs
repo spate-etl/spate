@@ -218,10 +218,10 @@ impl PipelineSection {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PinningMode {
-    /// No pinning (default). Correct choice unless the pod has exclusive
-    /// cores (Kubernetes static CPU manager + Guaranteed QoS).
+    /// `none`: no pinning (default). Correct choice unless the pod has
+    /// exclusive cores (Kubernetes static CPU manager + Guaranteed QoS).
     #[default]
-    Off,
+    None,
     /// Pin thread *i* to core *i*.
     Compact,
 }
@@ -913,7 +913,7 @@ sink: { memory: {} }
         assert_eq!(cfg.pipeline.name, "demo");
         assert_eq!(cfg.pipeline.threads, None);
         assert_eq!(cfg.pipeline.io_threads, 2);
-        assert_eq!(cfg.pipeline.pinning, PinningMode::Off);
+        assert_eq!(cfg.pipeline.pinning, PinningMode::None);
         assert_eq!(cfg.checkpoint.interval, Duration::from_secs(5));
         assert_eq!(cfg.checkpoint.max_pending_batches, 1024);
         assert_eq!(cfg.checkpoint.drain_timeout, Duration::from_secs(25));
@@ -1058,6 +1058,35 @@ sink: { memory: {} }
                 msg.contains(r#"a socket address or "none""#),
                 "{null}: {msg}"
             );
+        }
+    }
+
+    fn with_pinning(pinning: &str) -> Result<PipelineConfig, ConfigError> {
+        PipelineConfig::from_str(&format!(
+            "pipeline: {{ name: demo, pinning: {pinning} }}\n\
+             source: {{ memory: {{}} }}\nsink: {{ memory: {{}} }}\n"
+        ))
+    }
+
+    /// The off value is `none`, as for every other key that turns a feature
+    /// off, so `off` fails to load and the error lists the spelling to use.
+    #[test]
+    fn pinning_off_is_refused_naming_none() {
+        let msg = with_pinning("off")
+            .expect_err("`off` is not a pinning mode")
+            .to_string();
+        assert!(msg.contains("pipeline.pinning"), "{msg}");
+        assert!(msg.contains("`none`"), "{msg}");
+    }
+
+    #[test]
+    fn pinning_takes_none_or_compact() {
+        for (value, expected) in [
+            ("none", PinningMode::None),
+            ("compact", PinningMode::Compact),
+        ] {
+            let cfg = with_pinning(value).unwrap_or_else(|e| panic!("`{value}`: {e}"));
+            assert_eq!(cfg.pipeline.pinning, expected, "for `{value}`");
         }
     }
 

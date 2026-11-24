@@ -45,7 +45,7 @@ pub(crate) const TAG: &str = "clickhouse";
 ///     user: default
 ///     password: ${CLICKHOUSE_PASSWORD}
 ///     timeouts: { send: 30s, end: 180s, startup: 30s }
-///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
+///     compression: lz4               # none | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
 ///
@@ -148,10 +148,12 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
 /// [`ClickHouseSink::encoder`] hands out the encoder that writes the
 /// configured format.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClickHouseFormat {
     /// Row-wise RowBinary (default).
+    // Spelled as one word, as ClickHouse names the format.
+    #[serde(rename = "rowbinary")]
     #[default]
     RowBinary,
     /// Columnar Native (self-describing blocks).
@@ -175,12 +177,12 @@ impl ClickHouseFormat {
 /// Deserialized from a scalar string:
 ///
 /// ```yaml
-/// compression: lz4         # off | none | lz4 | zstd | zstd:<1-22>
+/// compression: lz4         # none | lz4 | zstd | zstd:<1-22>
 /// ```
 ///
 /// `lz4` is fast and low-CPU (the default); `zstd`
 /// trades CPU for a better ratio and accepts an explicit level (`zstd` alone
-/// uses level 3). `off` disables compression.
+/// uses level 3). `none` disables compression.
 ///
 /// Insert bodies are compressed on the pipeline threads: the sink's frame
 /// codec ([`ClickHouseSink::frame_codec`]) turns each chunk into one
@@ -211,13 +213,13 @@ impl FromStr for ClickHouseCompression {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "off" | "none" => Ok(ClickHouseCompression::None),
+            "none" => Ok(ClickHouseCompression::None),
             "lz4" => Ok(ClickHouseCompression::Lz4),
             "zstd" => Ok(ClickHouseCompression::Zstd(ZSTD_DEFAULT_LEVEL)),
             other => {
                 let (lo, hi) = (ZSTD_LEVELS.start(), ZSTD_LEVELS.end());
                 let raw = other.strip_prefix("zstd:").ok_or_else(|| {
-                    format!("unknown compression: expected off, lz4, zstd, or zstd:<{lo}-{hi}>")
+                    format!("unknown compression: expected none, lz4, zstd, or zstd:<{lo}-{hi}>")
                 })?;
                 let level: i32 = raw.parse().map_err(|_| {
                     format!("invalid zstd level: expected an integer in [{lo}, {hi}]")
@@ -778,7 +780,8 @@ pub struct ClickHouseSink {
     pub writer: ClickHouseWriter,
     /// Per-shard replica endpoints, `shards[i][j]` = shard `i`, replica `j`.
     pub endpoints: Vec<Vec<ClickHouseEndpoint>>,
-    /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
+    /// Codes each chunk at seal under `lz4` or `zstd`; `None` under
+    /// `compression: none`.
     frame_codec: Option<FrameCodecFactory>,
     /// The configured wire format, with the live table's columns fetched at
     /// `connect`.
@@ -833,7 +836,7 @@ impl ClickHouseSink {
     }
 
     /// The frame codec that turns each sealed chunk into one compressed
-    /// block, or `None` under `compression: off`.
+    /// block, or `None` under `compression: none`.
     ///
     /// Under `lz4` or `zstd` the writer sends only blocks this codec made, and
     /// fails `Fatal` on any other frame. [`SinkBundle::into_parts`] attaches
@@ -1689,7 +1692,6 @@ settings: { insert_quorum: "auto" }
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
             ("", ClickHouseCompression::Lz4),
-            ("compression: off\n", ClickHouseCompression::None),
             ("compression: none\n", ClickHouseCompression::None),
             ("compression: lz4\n", ClickHouseCompression::Lz4),
             (
@@ -1713,6 +1715,9 @@ settings: { insert_quorum: "auto" }
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (value, input, needle) in [
             ("gzip", "gzip", "unknown compression"),
+            // The off value is `none`, as for every other key that turns a
+            // feature off, and the message names it.
+            ("off", "off", "expected none, lz4"),
             ("\"zstd:0\"", "zstd:0", "[1, 22]"),
             ("\"zstd:23\"", "zstd:23", "[1, 22]"),
             ("\"zstd:99\"", "99", "[1, 22]"),

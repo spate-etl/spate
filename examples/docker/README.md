@@ -72,7 +72,7 @@ past that closes the oldest.
 - `pipeline.pinning: compact` pins pipeline threads to cores. That only
   yields exclusive cores under the kubelet **static CPU manager** with
   Guaranteed QoS and integer CPU requests; otherwise it just sets affinity
-  inside the shared cpuset. Leave it `off` unless you run that setup.
+  inside the shared cpuset. Leave it `none` unless you run that setup.
 - Memory: the dominant knobs are `backpressure.max_inflight_bytes` (in
   the framework) plus librdkafka's prefetch, which is charged **per assigned
   partition** and sits outside the in-flight budget — at the default

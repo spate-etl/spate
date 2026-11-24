@@ -408,13 +408,13 @@ is the lever, not `chunk.target_bytes`.
 
 ## Pinning: `pipeline.pinning`
 
-- `off` (default): no core pinning.
+- `none` (default): no core pinning.
 - `compact`: pin pipeline thread *i* to core *i*.
 
 `compact` only yields exclusive cores under the kubelet **static CPU
 manager** with Guaranteed QoS and integer CPU requests; anywhere else it
 sets affinity inside a shared cpuset and can hurt by fighting the
-scheduler. Leave it `off` unless you run that setup.
+scheduler. Leave it `none` unless you run that setup.
 
 ## Where parallelism comes from
 

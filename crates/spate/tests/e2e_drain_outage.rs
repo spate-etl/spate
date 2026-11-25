@@ -66,9 +66,13 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     h.produce(&params.topic, first_wave);
 
     let pipeline = h.spawn_pipeline(&params);
-    wait_until(Duration::from_secs(60), "first 5k rows", || {
-        h.count(&params.table) >= 5_000
-    });
+    wait_for_value(
+        Duration::from_secs(60),
+        "first 5k rows",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows >= 5_000),
+    )
+    .expect("the wait ends on a read");
 
     // ── Freeze the sink and keep feeding it ────────────────────────────
     h.pause_clickhouse();

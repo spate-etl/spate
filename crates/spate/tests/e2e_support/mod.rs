@@ -26,7 +26,7 @@ use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 pub use rdkafka::Offset;
 use rdkafka::admin::{NewTopic, TopicReplication};
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::BaseConsumer;
 use rdkafka::producer::{BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
@@ -43,8 +43,9 @@ use spate_test::HANG;
 use spate_test::{metric_series, metric_value};
 use spate_test_support::{
     CLUSTER_NODES, KafkaBroker, KafkaCluster, PartitionState, RegistryStub, SingleBroker,
-    committed_offsets, consumer, container_image, create_topics, high_watermark, http, producer,
-    ready, send, transactional_producer,
+    committed_offsets, consumer, container_image, create_topics, high_watermark,
+    high_watermark_once, http, producer, ready, send, topic_partitions_once,
+    transactional_producer,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -214,29 +215,60 @@ impl Harness {
             .expect("create table");
     }
 
+    /// The rows in `table`, read again within [`HANG`].
     pub fn count(&self, table: &str) -> u64 {
-        self.scalar(&format!("SELECT count() FROM {table}"))
+        self.scalar(&count_sql(table))
+    }
+
+    /// [`Self::count`] as one bounded query, for a caller whose own wait reads
+    /// again.
+    pub fn count_once(&self, table: &str) -> Result<u64, String> {
+        self.scalar_once(&count_sql(table))
     }
 
     /// Distinct record ids, the row-conservation measure (duplicates from
-    /// at-least-once replay inflate `count`, never `uniq`).
+    /// at-least-once replay inflate `count`, never `uniq`), read again within
+    /// [`HANG`].
     pub fn uniq(&self, table: &str) -> u64 {
-        self.scalar(&format!("SELECT uniqExact(id) FROM {table}"))
+        self.scalar(&uniq_sql(table))
+    }
+
+    /// [`Self::uniq`] as one bounded query, for a caller whose own wait reads
+    /// again.
+    pub fn uniq_once(&self, table: &str) -> Result<u64, String> {
+        self.scalar_once(&uniq_sql(table))
     }
 
     /// How many partitions have a row in `table`, read from the partition each
-    /// id carries (see [`event_id`]).
+    /// id carries (see [`event_id`]), read again within [`HANG`].
     pub fn partitions_written(&self, table: &str) -> u64 {
-        self.scalar(&format!(
-            "SELECT uniqExact(intDiv(id, {})) FROM {table}",
-            event_id(1, 0)
-        ))
+        self.scalar(&partitions_written_sql(table))
     }
 
+    /// [`Self::partitions_written`] as one bounded query, for a caller whose own
+    /// wait reads again.
+    pub fn partitions_written_once(&self, table: &str) -> Result<u64, String> {
+        self.scalar_once(&partitions_written_sql(table))
+    }
+
+    /// The one `u64` that `sql` selects, read again within [`HANG`].
     pub fn scalar(&self, sql: &str) -> u64 {
-        self.rt
-            .block_on(self.ch_client().query(sql).fetch_one::<u64>())
-            .expect("scalar query")
+        self.again(sql, || self.scalar_once(sql))
+    }
+
+    /// [`Self::scalar`] as one query bounded by [`PROBE_TIMEOUT`].
+    pub fn scalar_once(&self, sql: &str) -> Result<u64, String> {
+        fetch_within(&self.rt, &self.ch_client(), sql)
+    }
+
+    /// The one string that `sql` selects, read again within [`HANG`].
+    pub fn text(&self, sql: &str) -> String {
+        self.again(sql, || fetch_within(&self.rt, &self.ch_client(), sql))
+    }
+
+    /// The first `Ok` that `read` returns within [`HANG`].
+    fn again<T: std::fmt::Debug>(&self, sql: &str, read: impl FnMut() -> Result<T, String>) -> T {
+        wait_for_value(HANG, sql, read, Result::is_ok).expect("the wait ends on a read")
     }
 
     /// Pause/unpause the ClickHouse container (simulated sink outage).
@@ -333,9 +365,20 @@ impl Harness {
         }
     }
 
-    /// The offset after each partition's last record.
+    /// The offset after each partition's last record, read again within
+    /// [`HANG`].
     pub fn end_offsets(&self, topic: &str, partitions: i32) -> Vec<i64> {
         read_ends(
+            &probe_consumer(&self.brokers, "e2e-metadata"),
+            topic,
+            partitions,
+        )
+    }
+
+    /// [`Self::end_offsets`] as one call per partition, for a caller whose own
+    /// wait reads again.
+    pub fn end_offsets_once(&self, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
+        ends_once(
             &probe_consumer(&self.brokers, "e2e-metadata"),
             topic,
             partitions,
@@ -357,11 +400,19 @@ impl Harness {
         // then the last stable offset `end_offsets` reads stays below the end.
         let uncommitted = consumer(&self.brokers, &[("isolation.level", "read_uncommitted")])
             .unwrap_or_else(|e| panic!("{e}"));
-        let mut end = 0;
-        wait_until(Duration::from_secs(60), "the transaction's marker", || {
-            end = read_ends(&uncommitted, TOPIC, 1)[0];
-            self.end_offsets(TOPIC, 1)[0] == end
-        });
+        let stable = probe_consumer(&self.brokers, "e2e-metadata");
+        let (end, _) = wait_for_value(
+            Duration::from_secs(60),
+            "the transaction's marker",
+            || {
+                Ok::<_, String>((
+                    ends_once(&uncommitted, TOPIC, 1)?[0],
+                    ends_once(&stable, TOPIC, 1)?[0],
+                ))
+            },
+            |read| read.as_ref().is_ok_and(|(end, stable)| stable == end),
+        )
+        .expect("the wait ends on a read");
         end - 2
     }
 
@@ -730,7 +781,13 @@ impl RunningPipeline {
         let probe = probe_consumer(&h.brokers, &self.group);
         let mut seen = String::new();
         wait_until(Duration::from_secs(180), "the run to drain", || {
-            let rows = h.uniq(&self.table);
+            let rows = match h.uniq_once(&self.table) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    println!("rows: {e}");
+                    return false;
+                }
+            };
             if rows != expected {
                 return false;
             }
@@ -1028,15 +1085,42 @@ impl SampleTarget {
         Ok(found)
     }
 
-    /// One `u64` from ClickHouse. The client has no timeout of its own, and a
-    /// paused server leaves a query waiting.
+    /// One `u64` from ClickHouse, within [`PROBE_TIMEOUT`].
     fn scalar(&self, rt: &tokio::runtime::Runtime, sql: &str) -> Result<u64, String> {
-        rt.block_on(async {
-            tokio::time::timeout(PROBE_TIMEOUT, self.ch_client.query(sql).fetch_one::<u64>()).await
-        })
-        .map_err(|_| format!("timed out: {sql}"))?
-        .map_err(|e| format!("{sql}: {e}"))
+        fetch_within(rt, &self.ch_client, sql)
     }
+}
+
+/// The one row `sql` selects, within [`PROBE_TIMEOUT`]. The client has no
+/// timeout of its own, and a paused server leaves a query waiting.
+fn fetch_within<T>(
+    rt: &tokio::runtime::Runtime,
+    client: &clickhouse::Client,
+    sql: &str,
+) -> Result<T, String>
+where
+    T: clickhouse::RowOwned + clickhouse::RowRead,
+{
+    rt.block_on(async {
+        tokio::time::timeout(PROBE_TIMEOUT, client.query(sql).fetch_one::<T>()).await
+    })
+    .map_err(|_| format!("timed out: {sql}"))?
+    .map_err(|e| format!("{sql}: {e}"))
+}
+
+fn count_sql(table: &str) -> String {
+    format!("SELECT count() FROM {table}")
+}
+
+fn uniq_sql(table: &str) -> String {
+    format!("SELECT uniqExact(id) FROM {table}")
+}
+
+fn partitions_written_sql(table: &str) -> String {
+    format!(
+        "SELECT uniqExact(intDiv(id, {})) FROM {table}",
+        event_id(1, 0)
+    )
 }
 
 /// A consumer in `group` that reads the group's offsets and joins nothing.
@@ -1063,14 +1147,24 @@ fn covered(offset: Offset) -> i64 {
     }
 }
 
-/// The partitions of the scenario's topic, which exists before its pipeline.
+/// The partitions of the scenario's topic, which exists before its pipeline,
+/// read again within [`HANG`] while the topic is missing from a listing.
 fn partition_count(probe: &BaseConsumer, params: &PipelineParams) -> i32 {
-    let metadata = probe
-        .fetch_metadata(Some(&params.topic), Duration::from_secs(10))
-        .expect("topic metadata");
-    let count = metadata.topics()[0].partitions().len();
+    let count = topic_partitions(probe, &params.topic);
     assert!(count > 0, "{} has no partitions", params.topic);
     i32::try_from(count).expect("partition count")
+}
+
+/// The partitions of `topic`, read again within [`HANG`] until a listing names it.
+pub fn topic_partitions(probe: &BaseConsumer, topic: &str) -> usize {
+    wait_for_value(
+        HANG,
+        &format!("a metadata read of {topic}"),
+        || topic_partitions_once(probe, topic),
+        |read| matches!(read, Ok(Some(_))),
+    )
+    .expect("the wait ends on a read")
+    .expect("the wait ends on a listing")
 }
 
 /// The records committed per partition, 0 where none is, read again within
@@ -1085,16 +1179,37 @@ fn read_committed(
     Ok(committed.into_iter().map(covered).collect())
 }
 
-/// The offset after each partition's last record.
+/// The offset after each partition's last record, read again within [`HANG`].
 fn read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<i64> {
-    try_read_ends(probe, topic, partitions).unwrap_or_else(|e| panic!("{e}"))
+    wait_for_value(
+        HANG,
+        &format!("the ends of {topic}"),
+        || ends_once(probe, topic, partitions),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
 }
 
-/// [`read_ends`], returning the first read that failed within its 5 s.
+/// [`read_ends`] as one call per partition, for a caller whose own wait reads
+/// again.
+pub fn ends_once(probe: &BaseConsumer, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
+    ends_by(partitions, |p| high_watermark_once(probe, topic, p))
+}
+
+/// [`read_ends`], each partition read again within its 5 s, returning the first
+/// read that failed.
 fn try_read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
-    (0..partitions)
-        .map(|p| high_watermark(probe, topic, p, PROBE_TIMEOUT))
-        .collect()
+    ends_by(partitions, |p| {
+        high_watermark(probe, topic, p, PROBE_TIMEOUT)
+    })
+}
+
+/// `read` for each of `partitions`, up to the first that fails.
+fn ends_by(
+    partitions: i32,
+    read: impl FnMut(i32) -> Result<i64, String>,
+) -> Result<Vec<i64>, String> {
+    (0..partitions).map(read).collect()
 }
 
 // ── Plumbing ───────────────────────────────────────────────────────────
@@ -1126,9 +1241,9 @@ pub fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     http(addr, "GET", path).unwrap_or_else(|e| panic!("GET {path} from {addr}: {e}"))
 }
 
-/// Poll a condition until it holds or a timeout elapses; shared with the
-/// `spate-test` crate so scenarios and framework users use one helper.
-pub use spate_test::wait_until;
+/// Poll until a condition or a read holds, or a timeout elapses; shared with
+/// the `spate-test` crate so scenarios and framework users use one helper.
+pub use spate_test::{wait_for_value, wait_until};
 
 /// Events for `total` records spread round-robin over `partitions`, with
 /// per-partition sequence numbers encoded into the id.

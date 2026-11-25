@@ -40,9 +40,13 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
     h.produce(&params.topic, waves.next().expect("the first wave"));
 
     let pipeline = h.spawn_pipeline(&params);
-    wait_until(DEADLINE, "the first wave", || {
-        h.uniq(&params.table) == WAVE as u64
-    });
+    wait_for_value(
+        DEADLINE,
+        "the first wave",
+        || h.uniq_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows == WAVE as u64),
+    )
+    .expect("the wait ends on a read");
 
     for (node, wave) in (1..=CLUSTER_NODES).zip(waves) {
         // Redpanda places leaders unevenly, and with its balancer off a
@@ -79,9 +83,16 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
 
         let before = h.uniq(&params.table);
         h.produce(&params.topic, wave);
-        wait_until(DEADLINE, "the wave through the moved leaders", || {
-            h.uniq(&params.table) >= before + WAVE as u64
-        });
+        wait_for_value(
+            DEADLINE,
+            "the wave through the moved leaders",
+            || h.uniq_once(&params.table),
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|&rows| rows >= before + WAVE as u64)
+            },
+        )
+        .expect("the wait ends on a read");
     }
 
     pipeline.assert_drained(&h, total as u64);

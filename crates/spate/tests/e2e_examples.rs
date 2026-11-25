@@ -38,11 +38,11 @@ mod support;
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
-use rdkafka::consumer::Consumer;
 use rdkafka::producer::{BaseRecord, Producer};
-use spate_test::metric_sum;
+use spate_test::{HANG, metric_sum, wait_for_value};
 use spate_test_support::{
     ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY, producer, reported_executable, send,
+    topic_partitions_once,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -287,24 +287,32 @@ impl Example {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
-    /// Poll `cond` until it holds, failing early (and printing the log) if
-    /// the example exits first.
-    fn wait_for(&mut self, what: &str, mut cond: impl FnMut() -> bool) {
+    /// Read until `done` holds for the value `read` returns, and return it,
+    /// failing early (and printing the log) if the example exits first. A hang
+    /// prints the last value read.
+    fn wait_for<T: std::fmt::Debug>(
+        &mut self,
+        what: &str,
+        mut read: impl FnMut() -> T,
+        done: impl Fn(&T) -> bool,
+    ) -> T {
         let deadline = Instant::now() + OUTPUT_DEADLINE;
         loop {
-            if cond() {
-                return;
+            let value = read();
+            if done(&value) {
+                return value;
             }
             if let Some(status) = self.child.try_wait().expect("try_wait") {
                 panic!(
-                    "{}: exited {status} before {what}\n--- log ---\n{}",
+                    "{}: exited {status} before {what}\n--- last read ---\n{value:#?}\n--- log \
+                     ---\n{}",
                     self.name,
                     self.log()
                 );
             }
             assert!(
                 Instant::now() < deadline,
-                "{}: timed out waiting for {what}\n--- log ---\n{}",
+                "{}: timed out waiting for {what}\n--- last read ---\n{value:#?}\n--- log ---\n{}",
                 self.name,
                 self.log()
             );
@@ -404,31 +412,38 @@ fn encode(schema: &Schema, fields: Vec<(&str, Value)>) -> Vec<u8> {
     to_avro_datum(schema, record).expect("avro datum")
 }
 
-/// Records on `topic`, summed over its partitions as `high - low`.
+/// Records on `topic`, summed over its partitions' high marks, read again
+/// within [`HANG`].
 ///
 /// Read from the broker's watermarks rather than by consuming: the answer is
 /// exact and immediate, an empty topic answers `0` without waiting out a quiet
 /// period, and there is no consumer group whose initial rebalance delay could
-/// be mistaken for an exhausted topic.
+/// be mistaken for an exhausted topic. A topic this suite creates has no
+/// record deleted, so its low mark is 0.
 fn topic_count(brokers: &str, topic: &str) -> usize {
+    wait_for_value(
+        HANG,
+        &format!("the records on {topic}"),
+        || topic_count_once(brokers, topic),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
+}
+
+/// [`topic_count`] as one metadata read and one call per partition, for a
+/// caller whose own wait reads again. A topic no listing names holds 0.
+fn topic_count_once(brokers: &str, topic: &str) -> Result<usize, String> {
     let probe = support::probe_consumer(brokers, &format!("probe-{}", std::process::id()));
-    let timeout = Duration::from_secs(10);
-    let metadata = probe
-        .fetch_metadata(Some(topic), timeout)
-        .expect("topic metadata");
-    let partitions = metadata
-        .topics()
-        .iter()
-        .find(|t| t.name() == topic)
-        .map_or(0, |t| t.partitions().len());
-    (0..i32::try_from(partitions).expect("partition count"))
-        .map(|p| {
-            let (low, high) = probe
-                .fetch_watermarks(topic, p, timeout)
-                .expect("partition watermarks");
-            usize::try_from(high - low).expect("record count")
-        })
-        .sum()
+    let partitions = topic_partitions_once(&probe, topic)?.unwrap_or(0);
+    let ends = support::ends_once(
+        &probe,
+        topic,
+        i32::try_from(partitions).expect("partition count"),
+    )?;
+    Ok(ends
+        .into_iter()
+        .map(|end| usize::try_from(end).expect("record count"))
+        .sum())
 }
 
 // ── Kafka + schema registry + ClickHouse ───────────────────────────────────
@@ -507,9 +522,14 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
 
     let config = render_config("kafka_avro_to_clickhouse");
     let mut example = spawn("kafka_avro_to_clickhouse", Some(&config.path), &env);
-    example.wait_for("every order row", || {
-        h.count("orders") >= u64::try_from(orders).expect("orders")
-    });
+    let want = u64::try_from(orders).expect("orders");
+    example
+        .wait_for(
+            "every order row",
+            || h.count_once("orders"),
+            |read| read.as_ref().is_ok_and(|&rows| rows >= want),
+        )
+        .expect("the wait ends on a read");
     example.terminate();
     // `uniqExact` holds the at-least-once claim (INV-1), that every lined
     // order landed and nothing was invented, and is by construction blind to
@@ -595,9 +615,13 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     let rows = u64::try_from(placed * per_order).expect("line rows");
     let config = render_config("kafka_avro_flatmap_clickhouse");
     let mut example = spawn("kafka_avro_flatmap_clickhouse", Some(&config.path), &env);
-    example.wait_for("every exploded order line", || {
-        h.count("order_lines") >= rows
-    });
+    example
+        .wait_for(
+            "every exploded order line",
+            || h.count_once("order_lines"),
+            |read| read.as_ref().is_ok_and(|&lines| lines >= rows),
+        )
+        .expect("the wait ends on a read");
     example.terminate();
     // `flat_map` exploded each order into exactly its `per_order` lines. An
     // under-count would have hung the wait above; an over-count lands here.
@@ -693,24 +717,35 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     let per_table = u64::try_from(settled).expect("settled rows");
     let config = render_config("multi_table_split");
     let mut example = spawn("multi_table_split", Some(&config.path), &env);
-    example.wait_for("both split branches", || {
-        h.count("payments") >= per_table && h.count("refunds") >= per_table
-    });
+    example
+        .wait_for(
+            "both split branches",
+            || Ok::<_, String>((h.count_once("payments")?, h.count_once("refunds")?)),
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|&(payments, refunds)| payments >= per_table && refunds >= per_table)
+            },
+        )
+        .expect("the wait ends on a read");
     // INV-7's second half: an unroutable record is dropped and counted. Scraped
     // before SIGTERM, while the admin server is still up. A floor rather than an
     // equality, because at-least-once means a replayed record is dropped again.
     let admin = config.admin.expect("the example names an admin address");
-    example.wait_for("the unrouted drops to be counted", || {
-        let (status, body) = http_get(admin, "/metrics");
-        status == 200
-            && metric_sum(
-                &body,
-                "spate_operator_records_dropped_total",
-                &[("reason", "unrouted")],
-            )
-            .unwrap_or(0.0)
-                >= per_table as f64
-    });
+    example.wait_for(
+        "the unrouted drops to be counted",
+        || {
+            let (status, body) = http_get(admin, "/metrics");
+            status == 200
+                && metric_sum(
+                    &body,
+                    "spate_operator_records_dropped_total",
+                    &[("reason", "unrouted")],
+                )
+                .unwrap_or(0.0)
+                    >= per_table as f64
+        },
+        |counted| *counted,
+    );
     let log = example.terminate();
     // The placed orders must reach the split and be dropped there as
     // `unrouted` rather than fail to decode and be dropped a stage earlier.
@@ -803,25 +838,40 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     let mut example = spawn("kafka_to_kafka_split", Some(&config.path), &env);
     // Two sub-regions land on each destination topic.
     let per_topic = per_region * 2;
-    example.wait_for("both region topics", || {
-        topic_count(&h.brokers, "orders-eu") >= per_topic
-            && topic_count(&h.brokers, "orders-us") >= per_topic
-    });
+    example
+        .wait_for(
+            "both region topics",
+            || {
+                Ok::<_, String>((
+                    topic_count_once(&h.brokers, "orders-eu")?,
+                    topic_count_once(&h.brokers, "orders-us")?,
+                ))
+            },
+            |read| {
+                read.as_ref()
+                    .is_ok_and(|&(eu, us)| eu >= per_topic && us >= per_topic)
+            },
+        )
+        .expect("the wait ends on a read");
     // INV-7's second half: an unroutable record is dropped and counted. Scraped
     // before SIGTERM, while the admin server is still up. A floor rather than an
     // equality, because at-least-once means a replayed record is dropped again.
     let admin = config.admin.expect("the example names an admin address");
-    example.wait_for("the unrouted drops to be counted", || {
-        let (status, body) = http_get(admin, "/metrics");
-        status == 200
-            && metric_sum(
-                &body,
-                "spate_operator_records_dropped_total",
-                &[("reason", "unrouted")],
-            )
-            .unwrap_or(0.0)
-                >= per_region as f64
-    });
+    example.wait_for(
+        "the unrouted drops to be counted",
+        || {
+            let (status, body) = http_get(admin, "/metrics");
+            status == 200
+                && metric_sum(
+                    &body,
+                    "spate_operator_records_dropped_total",
+                    &[("reason", "unrouted")],
+                )
+                .unwrap_or(0.0)
+                    >= per_region as f64
+        },
+        |counted| *counted,
+    );
     example.terminate();
     // Equal fifths were produced, one fifth of them unroutable. Both
     // equalities fail if the `apac` records, which match no branch and follow
@@ -1134,7 +1184,7 @@ fn s3_sqs_bounded_example_ends_on_its_own() {
     let dead = mq
         .create_queue_with_attributes("jobs-dlq", &[("MessageRetentionPeriod", "1209600")])
         .expect("create the dead-letter queue");
-    let arn = mq.queue_arn(&dead).expect("dead-letter queue ARN");
+    let arn = dead_letter_arn(&mq, &dead);
     let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
     let queue = mq
         .create_queue_with_attributes("jobs", &[("RedrivePolicy", &policy)])
@@ -1179,8 +1229,7 @@ fn s3_sqs_bounded_example_ends_on_its_own() {
         );
     }
     assert_eq!(
-        mq.approximate_counts(&dead)
-            .expect("dead-letter queue counts"),
+        queue_counts(&mq, &dead),
         (0, 0),
         "a unit reached the dead-letter queue\n--- log ---\n{log}"
     );
@@ -1200,7 +1249,7 @@ fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
     let dead = mq
         .create_queue_with_attributes("events-dlq", &[("MessageRetentionPeriod", "1209600")])
         .expect("create the dead-letter queue");
-    let arn = mq.queue_arn(&dead).expect("dead-letter queue ARN");
+    let arn = dead_letter_arn(&mq, &dead);
     let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
     let queue = mq
         .create_queue_with_attributes("events", &[("RedrivePolicy", &policy)])
@@ -1224,13 +1273,19 @@ fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
     // from the publish line. A message is deleted only once the sink has
     // written every record of the object it announces.
     let log_path = example.log.clone();
-    example.wait_for("every notification deleted", || {
-        std::fs::read_to_string(&log_path)
-            .unwrap_or_default()
-            .lines()
-            .any(|l| l == "published 12 notifications")
-            && mq.approximate_counts(&queue).expect("queue counts") == (0, 0)
-    });
+    example
+        .wait_for(
+            "every notification deleted",
+            || {
+                let published = std::fs::read_to_string(&log_path)
+                    .unwrap_or_default()
+                    .lines()
+                    .any(|l| l == "published 12 notifications");
+                Ok::<_, String>((published, mq.approximate_counts(&queue)?))
+            },
+            |read| matches!(read, Ok((true, (0, 0)))),
+        )
+        .expect("the wait ends on a read");
     let log = example.terminate();
 
     assert_eq!(
@@ -1241,8 +1296,7 @@ fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
         "expected one exit line\n--- log ---\n{log}"
     );
     assert_eq!(
-        mq.approximate_counts(&dead)
-            .expect("dead-letter queue counts"),
+        queue_counts(&mq, &dead),
         (0, 0),
         "a notification reached the dead-letter queue\n--- log ---\n{log}"
     );
@@ -1257,4 +1311,27 @@ fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
         1,
         "the job did not end on SIGTERM\n--- log ---\n{log}"
     );
+}
+
+/// The ARN of the dead-letter queue at `queue`, read again within [`HANG`].
+fn dead_letter_arn(mq: &ElasticMq, queue: &str) -> String {
+    wait_for_value(
+        HANG,
+        "the dead-letter queue ARN",
+        || mq.queue_arn(queue),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
+}
+
+/// The approximate visible and in-flight counts of `queue`, read again within
+/// [`HANG`].
+fn queue_counts(mq: &ElasticMq, queue: &str) -> (u64, u64) {
+    wait_for_value(
+        HANG,
+        &format!("the counts of {queue}"),
+        || mq.approximate_counts(queue),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
 }

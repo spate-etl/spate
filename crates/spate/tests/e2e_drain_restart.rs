@@ -66,15 +66,22 @@ fn drain_then_resume(
     // A partition's first fetch can start 500 ms behind another's, and one
     // partition can reach the row count in that gap. The commit checks below
     // need rows from every partition.
-    wait_until(
+    let partitions_u64 = u64::try_from(partitions).expect("partitions");
+    wait_for_value(
         Duration::from_secs(60),
         "mid-stream rows on every partition",
         || {
-            h.count(&params.table) >= 10_000
-                && h.partitions_written(&params.table)
-                    == u64::try_from(partitions).expect("partitions")
+            Ok::<_, String>((
+                h.count_once(&params.table)?,
+                h.partitions_written_once(&params.table)?,
+            ))
         },
-    );
+        |read| {
+            read.as_ref()
+                .is_ok_and(|&(rows, written)| rows >= 10_000 && written == partitions_u64)
+        },
+    )
+    .expect("the wait ends on a read");
     // No `assert_drained`: this instance stops with records left to read.
     let report = first.stop();
     assert!(

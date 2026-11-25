@@ -200,9 +200,10 @@ pub(crate) enum Profile {
     Contended,
     /// Usage rides as in [`Profile::Quiet`] while shard queues reject with a
     /// shard waiting for a permit. Each cycle opens with a run of rejections
-    /// that pauses at once, keeps the shard waiting for two more iterations,
-    /// then frees it one iteration before the queues read drained, and
-    /// resumes.
+    /// that pauses at once. The shard waits through two more iterations whose
+    /// queues read drained, and gets its permit on the one iteration whose
+    /// queues read not drained. The controller then resumes once its resume
+    /// conditions hold.
     Gated,
 }
 

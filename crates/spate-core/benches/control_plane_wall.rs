@@ -33,7 +33,7 @@
 //!   wall reading of one is not the point. What this tier adds is
 //!   `alloc_count_per_iter`, which must be a flat zero, at a 1% floor, on any
 //!   machine rather than only where valgrind runs. A poll loop that starts
-//!   allocating is the regression these three cases catch.
+//!   allocating is the regression these cases catch.
 //! - **The ack thread axis prices a degradation, not a speed-up.** Adding
 //!   acking threads makes this workload *slower*, and the axis measures that
 //!   degradation. Issuing is wait-free but not contention-free. A batch

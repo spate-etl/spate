@@ -1222,7 +1222,7 @@ mod tests {
 
     /// [`with_driver`] with the thread's `blocked_retry`. A failed `check`
     /// is raised without waiting for the thread, which may be asleep for a
-    /// long `blocked_retry`.
+    /// long `blocked_retry`, and leaves the thread running.
     fn with_blocked_retry(
         blocked_retry: Duration,
         mode: ChainMode,
@@ -1282,6 +1282,8 @@ mod tests {
             });
         }));
         if let Err(panic) = checked {
+            // Detach the thread: a dropped handle would join it.
+            let _ = thread.join_by(clock.now(), &*clock);
             std::panic::resume_unwind(panic);
         }
         driver

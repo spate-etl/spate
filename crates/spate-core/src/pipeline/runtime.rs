@@ -45,8 +45,8 @@ pub struct RuntimeOptions {
     /// Flush the chain after this long without new data.
     pub idle_flush: Duration,
     /// The longest wait between retries of a push or flush a full shard queue
-    /// refused, which start at 200 µs and double up to it. Also the wait before
-    /// replaying a not-ready payload.
+    /// refused, which start at 200 µs, or at this when it is shorter, and
+    /// double up to it. Also the wait before replaying a not-ready payload.
     pub blocked_retry: Duration,
     /// Controller `poll_events` timeout.
     pub event_poll_timeout: Duration,

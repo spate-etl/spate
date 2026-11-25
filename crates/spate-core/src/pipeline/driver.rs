@@ -826,8 +826,9 @@ const CAPACITY_RETRY_FIRST: Duration = Duration::from_micros(200);
 
 /// The wait before retrying a blocked push or flush.
 ///
-/// A capacity block waits [`CAPACITY_RETRY_FIRST`], doubling on each further
-/// block that shares `capacity` up to `blocked_retry`. A shard worker drains
+/// A capacity block waits [`CAPACITY_RETRY_FIRST`], or `blocked_retry` when
+/// that is shorter, doubling on each further block that shares `capacity` up to
+/// `blocked_retry`. A shard worker drains
 /// its queue in passes far shorter than `blocked_retry`, so the first retries
 /// usually find room. A not-ready block waits `blocked_retry`.
 fn retry_wait(
@@ -1463,6 +1464,34 @@ mod tests {
                 // twentieth flush; waits clamped to the 1 ms left take 20 ms.
                 d.wait_for_flushes(20);
                 d.clock.advance(Duration::from_millis(1));
+                d.wait_for_a_later_pass();
+            },
+        );
+    }
+
+    /// A drain flush that a full queue refused retries on the capacity
+    /// schedule, long before an hour-long `blocked_retry` and deadline.
+    #[test]
+    fn a_blocked_drain_flush_retries_before_blocked_retry() {
+        with_blocked_retry(
+            AN_HOUR,
+            ChainMode::FlushBlocked,
+            AN_HOUR,
+            AN_HOUR,
+            Some(0),
+            false,
+            |d| {
+                d.driver
+                    .control
+                    .send(ThreadControl::StopLanes {
+                        lanes: vec![LaneId(0)],
+                        barrier: DrainBarrier::new(1),
+                        deadline: d.clock.now() + AN_HOUR,
+                    })
+                    .unwrap();
+                d.wait_for_flushes(2);
+                // Past the deadline, the drain gives up on its next retry.
+                d.clock.advance(AN_HOUR);
                 d.wait_for_a_later_pass();
             },
         );

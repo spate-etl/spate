@@ -287,13 +287,16 @@ impl<C: Clock> WatermarkController<C> {
     ///
     /// While `budget` counts a shard whose worker waits for a write permit,
     /// the sink is the limit, and the next `tick` pauses as after
-    /// [`Self::on_send_rejected`]. Unless usage has reached the high
-    /// watermark or a run below has spanned `min_pause`, that pause ends
-    /// once no shard waits and the other resume conditions hold, with no
-    /// minimum pause. Otherwise
-    /// the worker has not reached its queue yet, and the rejection starts or
-    /// extends a run that pauses only once it spans
-    /// [`BackpressureParams::min_pause`]. [`Self::on_push_done`] ends the run.
+    /// [`Self::on_send_rejected`]. That pause ends once no shard waits and
+    /// the other resume conditions hold, with no minimum pause. It keeps
+    /// [`BackpressureParams::min_pause`] when usage had reached the high
+    /// watermark, or a run of rejections had spanned `min_pause`, on the
+    /// tick that raised it.
+    ///
+    /// While no shard waits, the worker has not reached its queue yet, and
+    /// the rejection starts or extends a run that pauses only once it spans
+    /// `min_pause`. [`Self::on_push_done`] ends the run.
+    ///
     /// While paused, any rejection restarts the minimum-pause timer.
     pub fn on_queue_rejected(&mut self, budget: &InflightBudget) {
         if self.is_paused() {

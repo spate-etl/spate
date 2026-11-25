@@ -10,10 +10,12 @@
 //! moves it, so [`gate_shard`] and [`ungate_shard`] move it for a bench that
 //! drives the controller without a sink.
 //!
-//! The seams follow the rules `spate-s3`'s `bench_seams` module states: behind
-//! the off-by-default `testing` feature and `#[doc(hidden)]`, functions and
-//! aliases over `std` types only, and one whole unit of a stage's work per
-//! function.
+//! [`poll_loop`] follows the rules `spate-s3`'s `bench_seams` module states:
+//! behind the off-by-default `testing` feature and `#[doc(hidden)]`, functions
+//! and aliases over `std` types only, and one whole unit of a stage's work per
+//! function. [`gate_shard`] and [`ungate_shard`] keep the first rule and take
+//! the budget, a public type of this crate, since moving its count is the
+//! smallest shape that reaches the controller's gated arm.
 
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AdvanceCounter, PendingGate};
@@ -193,6 +195,11 @@ pub fn gate_shard(budget: &InflightBudget) {
 
 /// Take back one shard counted by [`gate_shard`], as a sink worker does once
 /// its permit arrives.
+///
+/// # Panics
+///
+/// In a debug build, when no shard is counted. A release build wraps the
+/// count instead, so every call needs a matching [`gate_shard`].
 #[inline]
 pub fn ungate_shard(budget: &InflightBudget) {
     budget.ungate_shard();

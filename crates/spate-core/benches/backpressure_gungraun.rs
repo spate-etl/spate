@@ -26,7 +26,7 @@
 //!   than calling one of them. `tick` then takes the `Normal` arm, reads the
 //!   budget, finds it under the high watermark and returns nothing. This is
 //!   the iteration a healthy pipeline pays for hours at a time, and the floor
-//!   the other two are read against.
+//!   the other cases are read against.
 //! - `congested_traffic` — usage climbs past the high watermark and stays
 //!   there, the driver never reports its queues drained, and a `try_send`
 //!   bounces every sixty-fourth iteration. One transition at the top, then
@@ -57,11 +57,12 @@
 //! - `gated_traffic` — usage and queues as in `quiet_traffic`, while shard
 //!   queues reject with a shard waiting for a write permit, through
 //!   `on_queue_rejected`. Each sixty-four-iteration cycle opens with four
-//!   rejections, the first of which pauses at once. The shard waits two more
-//!   iterations and gets its permit one iteration before the queues read
-//!   drained, and the controller resumes once its resume conditions hold.
-//!   Read against `contended_traffic`, the difference is what a pause under
-//!   sink pressure costs over one a run of rejections has to earn.
+//!   rejections, the first of which pauses at once. The shard waits through
+//!   two more iterations whose queues read drained, and gets its permit on
+//!   the one iteration whose queues read not drained. The controller then
+//!   resumes once its resume conditions hold. Read against `quiet_traffic`,
+//!   the difference is what a pause under sink pressure and its resume
+//!   cost.
 //!
 //! The watermark ratios and the pause floor are comparisons against a field
 //! (`usage() >= high_bytes`, `duration_since(since) >= min_pause`), so their

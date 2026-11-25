@@ -41,7 +41,7 @@ const VISIBILITY: Duration = Duration::from_secs(6);
 /// a unit moves there, and returns the queue's URL.
 fn queue_with_dead_letter(mq: &ElasticMq, name: &str) -> String {
     let dead = mq.create_queue(&format!("{name}-dlq")).unwrap();
-    let arn = mq.queue_arn(&dead).unwrap();
+    let arn = queue_arn(mq, &dead);
     let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
     let queue = mq
         .create_queue_with_attributes(name, &[("RedrivePolicy", &policy)])
@@ -49,7 +49,6 @@ fn queue_with_dead_letter(mq: &ElasticMq, name: &str) -> String {
     format!("{}{queue}", mq.endpoint())
 }
 
-/// The path part of a queue URL, as the ElasticMQ helpers take it.
 /// The approximate visible and in-flight counts of `queue`, read again within
 /// [`HANG`].
 fn queue_counts(mq: &ElasticMq, queue: &str) -> (u64, u64) {
@@ -62,6 +61,18 @@ fn queue_counts(mq: &ElasticMq, queue: &str) -> (u64, u64) {
     .expect("the wait ends on a read")
 }
 
+/// The ARN of `queue`, read again within [`HANG`].
+fn queue_arn(mq: &ElasticMq, queue: &str) -> String {
+    wait_for_value(
+        HANG,
+        &format!("the ARN of {queue}"),
+        || mq.queue_arn(queue),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
+}
+
+/// The path part of a queue URL, as the ElasticMQ helpers take it.
 fn path_of(url: &str) -> &str {
     let rest = url.split_once("://").unwrap().1;
     &rest[rest.find('/').unwrap()..]
@@ -555,7 +566,7 @@ fn the_hand_back_and_sink_drain_finish_inside_the_drain_timeout() {
         .unwrap();
     assert_eq!(report.state, ExitState::Completed);
     wait_for_value(
-        Duration::from_secs(10),
+        DEADLINE,
         "the unfinished unit is visible and the finished one deleted",
         || mq.approximate_counts(path_of(&url)),
         |counts| *counts == Ok((1, 0)),
@@ -686,7 +697,7 @@ fn startup_refuses_a_queue_with_no_redrive_policy() {
 fn startup_refuses_an_unreadable_dead_letter_queue() {
     let mq = ElasticMq::start().unwrap();
     let dead = mq.create_queue("lost-dlq").unwrap();
-    let arn = mq.queue_arn(&dead).unwrap();
+    let arn = queue_arn(&mq, &dead);
     let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
     let queue = mq
         .create_queue_with_attributes("lost", &[("RedrivePolicy", &policy)])

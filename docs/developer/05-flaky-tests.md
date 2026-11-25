@@ -59,7 +59,7 @@ For a deserializer that returns `NotReady`, `spate_test::deserialize_until_ready
 A test that checks for the retryable error itself asserts on it directly.
 
 When a wait reads a broker, a database or a queue, give each read a bound well inside the wait's own, and count a failed answer as not yet.
-`spate_test::wait_for_value` takes the read and the check, and prints the last answer when the wait reaches its bound:
+Pass the read and the check to `spate_test::wait_for_value`, which prints the last answer when the wait reaches its bound:
 
 ```rust
 wait_for_value(

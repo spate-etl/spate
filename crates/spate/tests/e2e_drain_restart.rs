@@ -22,7 +22,7 @@ use support::*;
 #[test]
 #[ignore = "requires Docker"]
 fn drain_commits_only_durable_rows_and_restart_resumes() {
-    drain_then_resume(("e2e-drain", 19184, 1), ("e2e-drain-resume", 19185, 1), 3);
+    drain_then_resume(("e2e-drain", 1), ("e2e-drain-resume", 1), 3);
 }
 
 /// A restart that lowers the Kafka consumer count from four to one loses
@@ -32,7 +32,7 @@ fn drain_commits_only_durable_rows_and_restart_resumes() {
 #[test]
 #[ignore = "requires Docker"]
 fn fewer_consumers_after_a_restart_lose_nothing() {
-    drain_then_resume(("e2e-fewer", 19188, 4), ("e2e-fewer-resume", 19189, 1), 4);
+    drain_then_resume(("e2e-fewer", 4), ("e2e-fewer-resume", 1), 4);
 }
 
 /// A restart that raises the Kafka consumer count from one to four loses
@@ -40,21 +40,17 @@ fn fewer_consumers_after_a_restart_lose_nothing() {
 #[test]
 #[ignore = "requires Docker"]
 fn more_consumers_after_a_restart_lose_nothing() {
-    drain_then_resume(("e2e-more", 19190, 1), ("e2e-more-resume", 19191, 4), 4);
+    drain_then_resume(("e2e-more", 1), ("e2e-more-resume", 4), 4);
 }
 
 /// Drain a first instance mid-stream, check every committed offset is backed
 /// by durable rows, then resume with a second instance on the same topic,
 /// group and table and check nothing was lost. Each instance is `(name,
-/// admin port, Kafka consumers)`.
-fn drain_then_resume(
-    first: (&'static str, u16, usize),
-    second: (&'static str, u16, usize),
-    partitions: i32,
-) {
+/// Kafka consumers)`.
+fn drain_then_resume(first: (&'static str, usize), second: (&'static str, usize), partitions: i32) {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults(first.0, first.1);
-    params.kafka_consumers = first.2;
+    let mut params = PipelineParams::defaults(first.0);
+    params.kafka_consumers = first.1;
     let total = 120_000;
 
     h.create_topic(&params.topic, partitions);
@@ -118,8 +114,8 @@ fn drain_then_resume(
     println!("drain scenario: committed {committed:?} all backed by rows");
 
     // ── Second instance: resume and finish ─────────────────────────────
-    let mut resumed_params = PipelineParams::defaults(second.0, second.1);
-    resumed_params.kafka_consumers = second.2;
+    let mut resumed_params = PipelineParams::defaults(second.0);
+    resumed_params.kafka_consumers = second.1;
     resumed_params.topic = params.topic.clone();
     resumed_params.group = params.group.clone();
     resumed_params.table = params.table.clone();

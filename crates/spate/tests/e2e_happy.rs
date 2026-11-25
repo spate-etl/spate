@@ -19,7 +19,7 @@ use support::*;
 #[ignore = "requires Docker"]
 fn happy_path_delivers_exactly_and_commits() {
     let h = Harness::up();
-    let params = PipelineParams::defaults("e2e-happy", 19181);
+    let params = PipelineParams::defaults("e2e-happy");
     let partitions = 6;
     let total = 50_000;
 

@@ -28,7 +28,7 @@ const DEADLINE: Duration = Duration::from_secs(180);
 #[ignore = "requires Docker"]
 fn a_rolling_restart_moves_leaders_and_loses_nothing() {
     let h = Harness::up_cluster();
-    let params = PipelineParams::defaults("e2e-leader-move", 19194);
+    let params = PipelineParams::defaults("e2e-leader-move");
     let partitions = 6;
     let waves = 1 + usize::try_from(CLUSTER_NODES).expect("a node count");
     let total = waves * WAVE;

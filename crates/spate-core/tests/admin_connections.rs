@@ -20,7 +20,7 @@ use spate_test::{
     HANG, LogCapture, PipelineRun, TestEncoder, capture_sink, memory_source, passthrough_runtime,
     unique_name, wait_until,
 };
-use spate_test_support::http;
+use spate_test_support::{admin_addr, http};
 
 /// Whether the server has closed `stream`, read without blocking.
 fn closed(stream: &TcpStream) -> bool {
@@ -48,15 +48,9 @@ fn admin_clients_hold_a_bounded_number_of_server_descriptors() {
     // Each client below and the server's side of it, with room to spare.
     raise_to(4 * MAX_CONNECTIONS);
     let logs = LogCapture::install_global(tracing::Level::DEBUG);
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     let config = PipelineConfig::from_str(&format!(
         "pipeline: {{ name: {name}, threads: 1, io_threads: 1 }}\n\
-         admin: {{ listen: 127.0.0.1:{port} }}\n\
+         admin: {{ listen: 127.0.0.1:0 }}\n\
          metrics: {{ exporter: none }}\n\
          source: {{ memory: {{}} }}\n\
          sink: {{ capture: {{}} }}\n",
@@ -76,10 +70,8 @@ fn admin_clients_hold_a_bounded_number_of_server_descriptors() {
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     // The line follows the bind, so the port takes connections from here on.
-    wait_until(HANG, "the admin server listens", || {
-        logs.lines()
-            .iter()
-            .any(|l| l.contains("admin server listening"))
+    let addr = logs.wait_for(HANG, "the admin server listens", || {
+        admin_addr(&logs.lines())
     });
     let (status, _) = http(addr, "GET", "/healthz").expect("the first probe");
     assert_eq!(status, 200);

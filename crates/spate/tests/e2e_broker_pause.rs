@@ -26,7 +26,7 @@ use support::*;
 #[ignore = "requires Docker"]
 fn a_silent_broker_mid_stream_loses_nothing() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-broker-pause", 19193);
+    let mut params = PipelineParams::defaults("e2e-broker-pause");
     params.rdkafka = vec![
         ("socket.timeout.ms", "5000"),
         ("session.timeout.ms", "6000"),
@@ -87,7 +87,7 @@ fn a_silent_broker_mid_stream_loses_nothing() {
 #[ignore = "requires Docker"]
 fn a_stop_during_a_silent_broker_ends_the_run() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-stop-pause", 19197);
+    let mut params = PipelineParams::defaults("e2e-stop-pause");
     params.rdkafka = vec![
         ("socket.timeout.ms", "5000"),
         ("session.timeout.ms", "6000"),
@@ -106,20 +106,18 @@ fn a_stop_during_a_silent_broker_ends_the_run() {
     .expect("the wait ends on a read");
     let RunningPipeline {
         shutdown,
-        join,
+        run,
         sampler,
         ..
     } = pipeline;
     h.pause_broker();
     let started = std::time::Instant::now();
     shutdown.trigger();
-    while !join.is_finished() && started.elapsed() < Duration::from_secs(120) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let exited = run.wait_exit(Duration::from_secs(120));
     let waited = started.elapsed();
-    let finished = join.is_finished();
+    let finished = exited.is_some();
     h.unpause_broker();
-    join.join().expect("thread").expect("start");
+    exited.unwrap_or_else(|| run.join()).expect("start");
     sampler.finish();
     assert!(finished, "the run had not ended {waited:?} after its stop");
 }

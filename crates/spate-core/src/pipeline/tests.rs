@@ -4449,23 +4449,6 @@ fn warn_lines(lines: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// The address the admin server logged when it bound.
-fn admin_addr(h: &Harness) -> std::net::SocketAddr {
-    h.logs
-        .lines()
-        .iter()
-        .filter(|line| line.contains("admin server listening"))
-        .find_map(|line| {
-            line.split_once("addr=")?
-                .1
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()
-        })
-        .expect("admin server bound")
-}
-
 /// Feeds `sample_io_busy` a sample every 5 s for ten minutes from a
 /// three-worker runtime busy `share` of the time, under a captured subscriber,
 /// and returns every warning it logged.
@@ -6682,7 +6665,7 @@ fn a_pending_head_neither_turns_liveness_nor_counts_as_a_stall() {
     cfg.checkpoint.interval = interval;
     cfg.checkpoint.stalled_fail_after = Duration::from_secs(120);
     let (h, acks) = start_with_pending_head(cfg, &clock);
-    let addr = admin_addr(&h);
+    let addr = spate_test_support::admin_addr(&h.logs.lines()).expect("admin server bound");
 
     // The default `watermark_stuck` is 300 s.
     for _ in 0..6 {
@@ -6737,7 +6720,7 @@ fn a_stuck_watermark_turns_liveness_on_the_injected_clock() {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     passes(&h, 3);
-    let addr = admin_addr(&h);
+    let addr = spate_test_support::admin_addr(&h.logs.lines()).expect("admin server bound");
     let healthz = || {
         // A lane poll after the advance beats the driver's heart on the
         // moved clock, so only the watermark decides the answer.

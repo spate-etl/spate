@@ -20,7 +20,7 @@ use support::*;
 #[ignore = "requires Docker"]
 fn poison_payloads_are_skipped_counted_and_do_not_stall() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-poison", 19186);
+    let mut params = PipelineParams::defaults("e2e-poison");
     let valid_before = 1_000;
     let poison = 50;
     let valid_after = 10;

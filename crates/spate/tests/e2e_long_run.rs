@@ -56,7 +56,7 @@ fn wave(range: std::ops::Range<u64>) -> Vec<(i32, Event)> {
 #[ignore = "requires Docker"]
 fn sustained_traffic_holds_pending_work() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-long-run", 19196);
+    let mut params = PipelineParams::defaults("e2e-long-run");
     params.max_pending_batches = 4;
     let rounds = rounds();
 

@@ -29,7 +29,7 @@ use support::*;
 )]
 fn rebalance_under_load_preserves_every_record() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-rebalance", 19183);
+    let mut params = PipelineParams::defaults("e2e-rebalance");
     // Two consumers in the pipeline, so the intruder's join and leave each
     // revoke both of them at once.
     params.kafka_consumers = 2;

@@ -35,15 +35,12 @@ use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
 use spate::kafka::KafkaSource;
 use spate::ops::{ChunkConfig, chain_owned};
-use spate::pipeline::{
-    ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
-};
+use spate::pipeline::{ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions};
 use spate::sink::{KeyHashRouter, QueueSection};
-use spate_test::HANG;
-use spate_test::{metric_series, metric_value};
+use spate_test::{HANG, LogCapture, PipelineRun, metric_series, metric_value};
 use spate_test_support::{
     CLUSTER_NODES, KafkaBroker, KafkaCluster, PartitionState, RegistryStub, SingleBroker,
-    committed_offsets, consumer, container_image, create_topics, high_watermark,
+    admin_addr, committed_offsets, consumer, container_image, create_topics, high_watermark,
     high_watermark_once, http, producer, ready, send, topic_partitions_once,
     transactional_producer,
 };
@@ -57,6 +54,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
+use tracing::Level;
 
 /// The record that travels end to end: Avro in (field names), RowBinary out
 /// (field order is `#[derive(ClickHouseRow)]`'s generated column list).
@@ -484,10 +482,6 @@ impl Harness {
     pub fn spawn_pipeline(&self, params: &PipelineParams) -> RunningPipeline {
         let config = PipelineConfig::from_str(&params.yaml(self)).expect("pipeline config parses");
         let partitions = partition_count(&probe_consumer(&self.brokers, &params.group), params);
-        let admin: SocketAddr = config
-            .admin
-            .listen
-            .expect("the scenario names an admin address");
 
         // The builder owns init: exporter before any handle (idempotent
         // across scenarios), the shared I/O runtime, queues, pool, probe.
@@ -550,14 +544,11 @@ impl Harness {
             .into_runtime(source)
             .expect("into_runtime");
         let shutdown = runtime.shutdown_handle();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "`RunningPipeline` joins the pipeline thread"
-        )]
-        let join = std::thread::Builder::new()
-            .name("e2e-pipeline".into())
-            .spawn(move || runtime.run())
-            .expect("spawn pipeline thread");
+        // The start logs the bound address on the thread that calls `run`.
+        let logs = LogCapture::new();
+        let run_logs = logs.clone();
+        let run = PipelineRun::spawn(move || run_logs.during(Level::INFO, || runtime.run()));
+        let admin = await_admin(&logs, &run);
         let sampler = Sampler::start(SampleTarget {
             pipeline: params.name,
             brokers: self.brokers.clone(),
@@ -574,7 +565,7 @@ impl Harness {
 
         RunningPipeline {
             shutdown,
-            join,
+            run,
             admin,
             name: params.name,
             topic: params.topic.clone(),
@@ -586,13 +577,35 @@ impl Harness {
     }
 }
 
+/// The address `run`'s admin server bound, read off its start line in `logs`.
+///
+/// # Panics
+///
+/// When the run ends before it logs the line, with what the run returned, and
+/// when no line arrives within [`HANG`].
+fn await_admin(logs: &LogCapture, run: &PipelineRun) -> SocketAddr {
+    logs.wait_for(HANG, "the admin server to announce its address", || {
+        // A run that binds and then ends at once has logged its line, so the
+        // line is read first.
+        if let Some(addr) = admin_addr(&logs.lines()) {
+            return Some(addr);
+        }
+        match run.wait_exit(Duration::ZERO) {
+            Some(Err(e)) => panic!("the pipeline failed to start: {e}"),
+            Some(Ok(report)) => {
+                panic!("the pipeline ended before its admin server bound: {report:?}")
+            }
+            None => None,
+        }
+    })
+}
+
 /// Everything scenario-specific about one pipeline instance.
 pub struct PipelineParams {
     pub name: &'static str,
     pub topic: String,
     pub group: String,
     pub table: String,
-    pub admin_port: u16,
     pub threads: usize,
     pub shards: usize,
     /// Chunks each shard queue holds.
@@ -619,13 +632,12 @@ pub struct PipelineParams {
 }
 
 impl PipelineParams {
-    pub fn defaults(name: &'static str, admin_port: u16) -> Self {
+    pub fn defaults(name: &'static str) -> Self {
         PipelineParams {
             name,
             topic: format!("{name}-topic"),
             group: format!("{name}-group"),
             table: format!("{}_rows", name.replace('-', "_")),
-            admin_port,
             threads: 2,
             shards: 2,
             queue_capacity: 8,
@@ -658,7 +670,7 @@ pipeline:
   threads: {threads}
   io_threads: 2
 admin:
-  listen: 127.0.0.1:{port}
+  listen: 127.0.0.1:0
 checkpoint:
   interval: {commit}
   max_pending_batches: {max_pending}
@@ -699,7 +711,6 @@ sink:
             commit = self.commit_interval,
             max_pending = self.max_pending_batches,
             drain = self.drain_timeout,
-            port = self.admin_port,
             brokers = h.brokers,
             rdkafka = rdkafka,
             topic = self.topic,
@@ -725,7 +736,7 @@ enum Lag {
 
 pub struct RunningPipeline {
     pub shutdown: ShutdownHandle,
-    pub join: JoinHandle<Result<ExitReport, StartError>>,
+    pub run: PipelineRun,
     pub admin: SocketAddr,
     name: &'static str,
     topic: String,
@@ -749,11 +760,7 @@ impl RunningPipeline {
     /// [`Self::stop`], also returning what the sampler saw.
     pub fn stop_sampled(self) -> (ExitReport, SampleReport) {
         self.shutdown.trigger();
-        let report = self
-            .join
-            .join()
-            .expect("pipeline thread panicked")
-            .expect("pipeline start failed");
+        let report = self.run.join().expect("pipeline start failed");
         (report, self.sampler.finish())
     }
 

@@ -30,8 +30,8 @@ const PARTITIONS: i32 = 3;
 
 /// Small queues and chunks so the outage visibly backs up into the source
 /// instead of hiding in buffers. The pending-limit scenario widens the queues.
-fn outage_params(name: &'static str, admin_port: u16) -> PipelineParams {
-    let mut params = PipelineParams::defaults(name, admin_port);
+fn outage_params(name: &'static str) -> PipelineParams {
+    let mut params = PipelineParams::defaults(name);
     params.queue_capacity = 2;
     params.chunk_bytes = 2 * 1024;
     params.batch_max_rows = 1_000;
@@ -71,7 +71,7 @@ fn start_outage(h: &Harness, params: &PipelineParams) -> RunningPipeline {
 #[ignore = "requires Docker"]
 fn sink_outage_backpressures_and_loses_nothing() {
     let h = Harness::up();
-    let params = outage_params("e2e-outage", 19182);
+    let params = outage_params("e2e-outage");
     let total = TOTAL;
     let pipeline = start_outage(&h, &params);
 
@@ -133,7 +133,7 @@ fn sink_outage_backpressures_and_loses_nothing() {
 #[ignore = "requires Docker"]
 fn sink_outage_holds_pending_work_at_its_limit() {
     let h = Harness::up();
-    let mut params = outage_params("e2e-outage-limit", 19192);
+    let mut params = outage_params("e2e-outage-limit");
     params.max_pending_batches = 4;
     // A chunk holds at least one row.
     params.queue_capacity =

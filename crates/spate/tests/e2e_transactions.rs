@@ -41,7 +41,7 @@ fn records(partition: i32, offsets: Range<i64>) -> Vec<(i32, Event)> {
 #[ignore = "requires Docker"]
 fn aborted_records_stay_out_and_markers_do_not_hold_the_group_back() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-transactions", 19195);
+    let mut params = PipelineParams::defaults("e2e-transactions");
 
     // Each transaction's marker takes the one offset after its records, and
     // the broker may take offsets ahead of them too.

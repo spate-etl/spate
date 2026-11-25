@@ -46,7 +46,7 @@ const EXIT_BOUND: Duration = Duration::from_secs(60);
 #[ignore = "requires Docker"]
 fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     let h = Harness::up();
-    let mut params = PipelineParams::defaults("e2e-drain-outage", 19187);
+    let mut params = PipelineParams::defaults("e2e-drain-outage");
     // One permit per shard, small batches and queues: the outage saturates the
     // in-flight window within a batch or two instead of depending on volume.
     params.inflight_max_per_shard = 1;
@@ -96,25 +96,22 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     // No `assert_drained`: an abandoned drain leaves records to replay.
     let RunningPipeline {
         shutdown,
-        join,
+        run,
         sampler,
         ..
     } = pipeline;
     let started = Instant::now();
     shutdown.trigger();
-    while !join.is_finished() && started.elapsed() < EXIT_BOUND {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let exited = run.wait_exit(EXIT_BOUND);
     let exited_in = started.elapsed();
-    let finished = join.is_finished();
+    let finished = exited.is_some();
 
     // Unpause before asserting: on failure this lets the wedged drain
     // complete so the thread joins and the container tears down cleanly,
     // rather than leaving a frozen container behind a hung test.
     h.unpause_clickhouse();
-    let report = join
-        .join()
-        .expect("pipeline thread panicked")
+    let report = exited
+        .unwrap_or_else(|| run.join())
         .expect("pipeline start failed");
     sampler.finish();
 

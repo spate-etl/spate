@@ -10,12 +10,8 @@
 
 use spate_core::config::PipelineConfig;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
-use spate_test::{LogCapture, TestEncoder, capture_sink, memory_source, passthrough_runtime};
-use spate_test_support::http;
-use std::net::SocketAddr;
-use std::time::Duration;
-
-const DEADLINE: Duration = Duration::from_secs(10);
+use spate_test::{HANG, LogCapture, TestEncoder, capture_sink, memory_source, passthrough_runtime};
+use spate_test_support::{admin_addr, http};
 
 // Port 0 is the case under test. `exporter: none` leaves `/metrics` a 404 and
 // installs no process-global recorder; the probes do not depend on one.
@@ -26,26 +22,6 @@ metrics: { exporter: none }
 source: { memory: {} }
 sink: { capture: {} }
 "#;
-
-/// The `addr` field of the line announcing the bound admin address, once one
-/// has been written.
-///
-/// Reading the field rather than testing the line for the absence of `:0`: a
-/// formatter that stopped rendering fields this way produces that absence too,
-/// and such an assertion would pass having checked nothing.
-fn logged_addr(capture: &LogCapture) -> Option<SocketAddr> {
-    capture
-        .lines()
-        .iter()
-        .find(|l| l.contains("admin server listening"))
-        .map(|l| {
-            l.split_whitespace()
-                .find_map(|f| f.strip_prefix("addr="))
-                .unwrap_or_else(|| panic!("no `addr` field to read on: {l}"))
-                .parse()
-                .expect("addr is a socket address")
-        })
-}
 
 #[test]
 #[expect(
@@ -73,8 +49,10 @@ fn the_bound_admin_address_is_logged_and_serves() {
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
 
-    let addr = capture.wait_for(DEADLINE, "the admin server to announce its address", || {
-        logged_addr(&capture)
+    // The parsed field is read, because a formatter that stopped rendering it
+    // would also pass a check that the line lacks `:0`.
+    let addr = capture.wait_for(HANG, "the admin server to announce its address", || {
+        admin_addr(&capture.lines())
     });
     assert_ne!(
         addr.port(),
@@ -86,10 +64,9 @@ fn the_bound_admin_address_is_logged_and_serves() {
     // to answer at all, which needs the spawned server to reach its accept
     // loop; what it answers is asserted once, so a probe reporting 503 fails
     // here rather than being polled past.
-    let (status, body) =
-        capture.wait_for(DEADLINE, "/healthz to answer at the logged address", || {
-            http(addr, "GET", "/healthz").ok()
-        });
+    let (status, body) = capture.wait_for(HANG, "/healthz to answer at the logged address", || {
+        http(addr, "GET", "/healthz").ok()
+    });
     assert_eq!(status, 200, "the logged address serves the probes");
     assert_eq!(body, "ok");
 

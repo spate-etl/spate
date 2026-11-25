@@ -1,6 +1,7 @@
 //! Test helpers shared across this workspace's crates. Not published: some
 //! depend on this repository's layout and its `cargo xtask` task runner.
 
+mod admin;
 pub mod alloc;
 #[cfg(feature = "cargo")]
 mod cargo;
@@ -30,6 +31,7 @@ mod started;
 #[cfg(feature = "tls")]
 mod tls;
 
+pub use admin::admin_addr;
 #[cfg(feature = "cargo")]
 pub use cargo::reported_executable;
 pub use child::{ChildTest, run_in_child};

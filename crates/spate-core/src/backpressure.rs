@@ -327,6 +327,9 @@ impl<C: Clock> WatermarkController<C> {
     /// called at most once, and only while paused with no rejection since the
     /// last tick and usage at or below the low watermark. Returns a transition
     /// for the driver to apply, or `None`.
+    // Without the hint, a split codegen unit can leave `tick` out of line in
+    // the poll loop.
+    #[inline]
     pub fn tick(
         &mut self,
         budget: &InflightBudget,
@@ -374,6 +377,7 @@ impl<C: Clock> WatermarkController<C> {
 
     /// How long the current pause must last before it can end. A pause the
     /// sink's permits raised ends once no shard waits for one.
+    #[inline]
     fn floor(&self, budget: &InflightBudget) -> Duration {
         if self.gated && budget.gated_shards() == 0 {
             Duration::ZERO

@@ -1166,11 +1166,15 @@ mod tests {
 
     /// Run driver thread 0 over `mode`, with `lane` batches when set, until
     /// `check` returns, then shut it down.
+    /// Run `check` against a driver thread. With `gated`, one shard is counted
+    /// as waiting for a write permit before the thread starts, so its first
+    /// push reads it; `check` takes it back with `ungate_shard`.
     fn with_driver(
         mode: ChainMode,
         min_pause: Duration,
         idle_flush: Duration,
         lane: Option<usize>,
+        gated: bool,
         check: impl FnOnce(&Driving<'_>),
     ) {
         let clock = TestClock::frozen();
@@ -1210,6 +1214,9 @@ mod tests {
                     gate: None,
                 })
                 .unwrap();
+        }
+        if gated {
+            driver.budget.gate_shard();
         }
         let thread = crate::task::spawn_thread("driver-test", move || run_driver(ctx)).unwrap();
         let checked = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1273,10 +1280,7 @@ mod tests {
             ),
         };
         let mut paused = false;
-        with_driver(mode, AN_HOUR, idle_flush, lane, |d| {
-            if gated {
-                d.driver.budget.gate_shard();
-            }
+        with_driver(mode, AN_HOUR, idle_flush, lane, gated, |d| {
             match site {
                 // The push ticks the controller before it retries, so a
                 // consumed payload follows that tick.
@@ -1371,6 +1375,7 @@ mod tests {
             MIN_PAUSE,
             AN_HOUR,
             Some(usize::MAX),
+            false,
             |d| {
                 let start = std::time::Instant::now();
                 wait_until(HANG, "batches over four minimum pauses", || {
@@ -1397,6 +1402,7 @@ mod tests {
             MIN_PAUSE,
             idle_flush,
             lane,
+            false,
             |d| {
                 match site {
                     Site::FlushNow => {
@@ -1456,6 +1462,7 @@ mod tests {
             Duration::from_millis(10),
             AN_HOUR,
             Some(1),
+            false,
             |d| {
                 assert!(matches!(
                     d.driver.events.recv_timeout(HANG),

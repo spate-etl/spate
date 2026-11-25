@@ -132,7 +132,8 @@ export default function BackpressureDiagram(): React.JSX.Element {
           The pipeline thread sends a resume request once three things hold: in-flight bytes are at or
           below the low watermark, every shard queue has drained below its low mark, and at least{' '}
           <code>min_pause</code> has passed since the later of the pause and the last refused{' '}
-          <code>try_send</code>.
+          <code>try_send</code>. A pause a refused <code>try_send</code> raised while a shard worker
+          waited for a write permit skips <code>min_pause</code> once no worker waits.
         </>,
         <>
           The controller calls <code>Source::resume</code>.

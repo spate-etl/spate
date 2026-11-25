@@ -1,0 +1,3 @@
+**A pause raised while the sink is the limit ends when a write permit frees** (`spate-core`)
+
+A queue rejection while a shard worker waits for an `inflight.max_per_shard` slot pauses the pipeline thread's lanes. That pause now ends once no worker waits and the budget and queues are below their low marks, without waiting out `backpressure.min_pause`. In previous versions it lasted at least `min_pause` after the last rejection, so a sink with a slow-write tail kept the source paused after its permits had freed, and the source fell behind. Every other pause still lasts at least `min_pause`. Under a sink at its limit with many write permits, `spate_backpressure_pause_events_total` rises, and a Kafka source refetches its prefetched messages on each of those pauses.

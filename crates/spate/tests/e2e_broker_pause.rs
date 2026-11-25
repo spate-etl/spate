@@ -13,7 +13,8 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use spate_test::metric_sum;
+use spate_test::{HANG, metric_sum};
+use std::sync::mpsc;
 use std::time::Duration;
 use support::*;
 
@@ -134,18 +135,42 @@ fn a_read_of_a_paused_server_returns_its_timeout() {
     h.create_topic(topic, 1);
     h.create_table(table);
 
-    h.pause_clickhouse();
-    let rows = h.count_once(table);
-    h.unpause_clickhouse();
+    let rows = while_paused(
+        || h.pause_clickhouse(),
+        || h.unpause_clickhouse(),
+        || h.count_once(table),
+    );
     assert!(
         rows.as_ref().is_err_and(|e| e.starts_with("timed out")),
         "{rows:?}"
     );
     assert_eq!(h.count(table), 0);
 
-    h.pause_broker();
-    let ends = h.end_offsets_once(topic, 1);
-    h.unpause_broker();
+    let ends = while_paused(
+        || h.pause_broker(),
+        || h.unpause_broker(),
+        || h.end_offsets_once(topic, 1),
+    );
     assert!(ends.is_err(), "{ends:?}");
     assert_eq!(h.end_offsets(topic, 1), [0]);
+}
+
+/// What `read` returns while `pause` holds a server silent. `resume` runs once
+/// the answer is in or [`HANG`] has passed, so a read that never returns fails
+/// the test and still lets its thread finish.
+fn while_paused<T: Send>(
+    pause: impl FnOnce(),
+    resume: impl FnOnce(),
+    read: impl FnOnce() -> T + Send,
+) -> T {
+    pause();
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let _ = tx.send(read());
+        });
+        let answer = rx.recv_timeout(HANG);
+        resume();
+        answer.unwrap_or_else(|_| panic!("a read of a paused server ran past {HANG:?}"))
+    })
 }

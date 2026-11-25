@@ -22,7 +22,7 @@ use spate_core::pipeline::ExitState;
 use spate_json::JsonLinesFramer;
 use spate_s3::S3Source;
 use spate_sqs::SqsFeed;
-use spate_test::{SinkScript, WriteOutcome, wait_until};
+use spate_test::{HANG, SinkScript, WriteOutcome, wait_for_value, wait_until};
 use spate_test_s3_feed::{
     CHECKPOINT, DRAIN_TIMEOUT, PipelineConfigFeed, STEP, TWO_RANGES, assert_stalled, data_dir,
     file_source, publish, recs, sorted, stage, two_range_unit, written,
@@ -50,6 +50,18 @@ fn queue_with_dead_letter(mq: &ElasticMq, name: &str) -> String {
 }
 
 /// The path part of a queue URL, as the ElasticMQ helpers take it.
+/// The approximate visible and in-flight counts of `queue`, read again within
+/// [`HANG`].
+fn queue_counts(mq: &ElasticMq, queue: &str) -> (u64, u64) {
+    wait_for_value(
+        HANG,
+        &format!("the counts of {queue}"),
+        || mq.approximate_counts(queue),
+        Result::is_ok,
+    )
+    .expect("the wait ends on a read")
+}
+
 fn path_of(url: &str) -> &str {
     let rest = url.split_once("://").unwrap().1;
     &rest[rest.find('/').unwrap()..]
@@ -166,7 +178,7 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
     // Elapsed time is the property: the hold outlasts two visibility periods.
     for _ in 0..24 {
         std::thread::sleep(Duration::from_millis(500));
-        let counts = mq.approximate_counts(path_of(&url)).unwrap();
+        let counts = queue_counts(&mq, path_of(&url));
         assert_ne!(
             counts,
             (0, 0),
@@ -174,9 +186,13 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
         );
     }
     worker.script.release_held();
-    wait_until(DEADLINE, "the unit is deleted", || {
-        mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit is deleted",
+        || mq.approximate_counts(path_of(&url)),
+        |counts| *counts == Ok((0, 0)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(written(&worker.script), sorted(rows));
     assert_eq!(worker.stop(), ExitState::Completed);
 }
@@ -209,14 +225,18 @@ fn a_unit_read_in_ranges_is_deleted_after_its_last_range_is_acknowledged() {
         worker.script.held_writes() == 1 && worker.script.writes().len() == rows.len()
     });
     assert_ne!(
-        mq.approximate_counts(path_of(&url)).unwrap(),
+        queue_counts(&mq, path_of(&url)),
         (0, 0),
         "the unit was deleted while a range's last write was held"
     );
     worker.script.release_held();
-    wait_until(DEADLINE, "the unit is deleted", || {
-        mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit is deleted",
+        || mq.approximate_counts(path_of(&url)),
+        |counts| *counts == Ok((0, 0)),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(
         written(&worker.script),
         sorted(rows),
@@ -271,14 +291,17 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
          before its visibility lapsed",
         seen.duration_since(abandoned)
     );
-    wait_until(
+    wait_for_value(
         DEADLINE,
         "B writes every row and the unit is deleted",
         || {
-            written(&b.script) == sorted(rows.clone())
-                && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+            let all = written(&b.script) == sorted(rows.clone());
+            mq.approximate_counts(path_of(&url))
+                .map(|counts| (all, counts))
         },
-    );
+        |read| *read == Ok((true, (0, 0))),
+    )
+    .expect("the wait ends on a read");
 
     a.script.release_held();
     let _ = a.stop();
@@ -314,9 +337,13 @@ fn held_units_are_renewed_while_the_sink_stalls() {
         "the unit was delivered again during the stall"
     );
     worker.script.release_held();
-    wait_until(DEADLINE, "the unit is deleted", || {
-        mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit is deleted",
+        || mq.approximate_counts(path_of(&url)),
+        |counts| *counts == Ok((0, 0)),
+    )
+    .expect("the wait ends on a read");
     let got = written(&worker.script);
     assert_eq!(got, sorted(rows), "each row written once");
     assert_eq!(worker.recording.deliveries(), [1]);
@@ -368,7 +395,7 @@ fn a_stopping_worker_finishes_units_inside_the_drain_deadline() {
     assert!(worker.recording.handed_back().is_empty());
     assert_eq!(worker.recording.closes().len(), 1);
     assert_eq!(
-        mq.approximate_counts(path_of(&url)).unwrap(),
+        queue_counts(&mq, path_of(&url)),
         (0, 0),
         "the unit is deleted by the time the run exits"
     );
@@ -414,14 +441,17 @@ fn a_stopping_worker_hands_back_what_it_still_holds_at_once() {
     assert_eq!(b.recording.deliveries(), [2]);
     let report = a.run.wait_exit(DEADLINE).expect("A exits").unwrap();
     assert_eq!(report.state, ExitState::Completed);
-    wait_until(
+    wait_for_value(
         DEADLINE,
         "B writes every row and the unit is deleted",
         || {
-            written(&b.script) == sorted(rows.clone())
-                && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+            let all = written(&b.script) == sorted(rows.clone());
+            mq.approximate_counts(path_of(&url))
+                .map(|counts| (all, counts))
         },
-    );
+        |read| *read == Ok((true, (0, 0))),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(b.stop(), ExitState::Completed);
 }
 
@@ -465,14 +495,17 @@ fn a_unit_a_stopping_worker_receives_again_is_handed_back_again() {
         b.recording.first_seen().is_some()
     });
     assert_eq!(b.recording.deliveries(), [3]);
-    wait_until(
+    wait_for_value(
         DEADLINE,
         "B writes every row and the unit is deleted",
         || {
-            written(&b.script) == sorted(rows.clone())
-                && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+            let all = written(&b.script) == sorted(rows.clone());
+            mq.approximate_counts(path_of(&url))
+                .map(|counts| (all, counts))
         },
-    );
+        |read| *read == Ok((true, (0, 0))),
+    )
+    .expect("the wait ends on a read");
     assert_eq!(b.stop(), ExitState::Completed);
 }
 
@@ -521,11 +554,13 @@ fn the_hand_back_and_sink_drain_finish_inside_the_drain_timeout() {
         .expect("the run exits")
         .unwrap();
     assert_eq!(report.state, ExitState::Completed);
-    wait_until(
+    wait_for_value(
         Duration::from_secs(10),
         "the unfinished unit is visible and the finished one deleted",
-        || mq.approximate_counts(path_of(&url)).unwrap() == (1, 0),
-    );
+        || mq.approximate_counts(path_of(&url)),
+        |counts| *counts == Ok((1, 0)),
+    )
+    .expect("the wait ends on a read");
 }
 
 /// Pins that startup refuses a `checkpoint.drain_timeout` within the stop's
@@ -813,10 +848,17 @@ fn a_bounded_job_waits_for_the_end_marker() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(&data, &section, &clock);
-    wait_until(DEADLINE, "the unit is read and deleted", || {
-        written(&worker.script) == sorted(rows.clone())
-            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit is read and deleted",
+        || {
+            let all = written(&worker.script) == sorted(rows.clone());
+            mq.approximate_counts(path_of(&url))
+                .map(|counts| (all, counts))
+        },
+        |read| *read == Ok((true, (0, 0))),
+    )
+    .expect("the wait ends on a read");
     let probe = 1;
     clock.advance(STEP * STEPS as u32);
     assert!(running(&worker), "no marker, no end");
@@ -856,10 +898,18 @@ fn a_dead_lettered_unit_ends_the_job_stalled() {
     let clock = TestClock::frozen();
     let worker = launch_bounded(&data, &section, &clock);
     let dead = format!("{}-dlq", path_of(&url));
-    wait_until(DEADLINE, "the unit moves to the dead-letter queue", || {
-        mq.approximate_counts(&dead).unwrap() == (1, 0)
-            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit moves to the dead-letter queue",
+        || {
+            Ok::<_, String>((
+                mq.approximate_counts(&dead)?,
+                mq.approximate_counts(path_of(&url))?,
+            ))
+        },
+        |read| *read == Ok(((1, 0), (0, 0))),
+    )
+    .expect("the wait ends on a read");
     // The worker reads the queue each step while the unit is held, so the
     // window opens on whichever read finds it empty.
     let first = worker.recording.depth_reads();
@@ -921,11 +971,18 @@ fn an_idle_worker_reads_a_unit_redelivered_after_its_owner_dies() {
         running(&worker),
         "the worker stands by while a peer holds a unit"
     );
-    wait_until(DEADLINE, "the unit is delivered again and read", || {
-        worker.recording.deliveries().contains(&2)
-            && written(&worker.script) == sorted(rows.clone())
-            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
-    });
+    wait_for_value(
+        DEADLINE,
+        "the unit is delivered again and read",
+        || {
+            let read = worker.recording.deliveries().contains(&2)
+                && written(&worker.script) == sorted(rows.clone());
+            mq.approximate_counts(path_of(&url))
+                .map(|counts| (read, counts))
+        },
+        |read| *read == Ok((true, (0, 0))),
+    )
+    .expect("the wait ends on a read");
     let report = loop {
         let now = worker.recording.depth_reads();
         if let Some(report) = step_or_exit(&worker, &clock, now) {

@@ -35,7 +35,8 @@ One partition can write 10,000 rows before another has started, so a test that n
 
 ```rust
 wait_until(HANG, "mid-stream rows on every partition", || {
-    h.count(&table) >= 10_000 && h.partitions_written(&table) == partitions
+    h.count_once(&table).is_ok_and(|rows| rows >= 10_000)
+        && h.partitions_written_once(&table) == Ok(partitions)
 });
 ```
 
@@ -56,6 +57,24 @@ When the code returns a retryable error, read again, as a real caller would.
 Assert on the first answer that is not retryable.
 For a deserializer that returns `NotReady`, `spate_test::deserialize_until_ready` replays the payload until it gets another answer.
 A test that checks for the retryable error itself asserts on it directly.
+
+When a wait reads a broker, a database or a queue, give each read a bound well inside the wait's own, and count a failed answer as not yet.
+`spate_test::wait_for_value` takes the read and the check, and prints the last answer when the wait reaches its bound:
+
+```rust
+wait_for_value(
+    HANG,
+    "the unit is deleted",
+    || mq.approximate_counts(queue),
+    |counts| *counts == Ok((0, 0)),
+)
+.expect("the wait ends on a read");
+```
+
+A read that panics on its first failed answer fails the test while the wait still has time to read again.
+A read with no bound can hold the wait past its own bound, because the wait checks its bound only between reads.
+
+Outside a wait, read again until `HANG` passes, so one failed answer does not fail the test.
 
 After creating a topic, wait until the broker lists it.
 A broker can report a topic it has just created as missing for a while.

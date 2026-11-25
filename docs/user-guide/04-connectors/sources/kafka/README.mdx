@@ -367,8 +367,9 @@ under hysteresis (low watermark + `backpressure.min_pause`), because pausing a
 Kafka partition purges its prefetch buffer, so resume is not free and flapping
 would thrash the fetch pipeline.
 
-A pause raised while the sink is the limit ends once no shard waits for a
-write permit, without `backpressure.min_pause`. Each of those pauses purges
+A pause raised while the sink is the limit, with the budget under its high
+watermark, ends once no shard waits for a write permit, without
+`backpressure.min_pause`. Each of those pauses purges
 the prefetch buffer too. Under a sink at its limit with many write permits,
 these pauses repeat as permits free, and the consumer refetches on each one.
 

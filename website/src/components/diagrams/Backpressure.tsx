@@ -133,7 +133,8 @@ export default function BackpressureDiagram(): React.JSX.Element {
           below the low watermark, every shard queue has drained below its low mark, and at least{' '}
           <code>min_pause</code> has passed since the later of the pause and the last refused{' '}
           <code>try_send</code>. A pause a refused <code>try_send</code> raised while a shard worker
-          waited for a write permit skips <code>min_pause</code> once no worker waits.
+          waited for a write permit, with in-flight bytes under the high watermark, skips{' '}
+          <code>min_pause</code> once no worker waits.
         </>,
         <>
           The controller calls <code>Source::resume</code>.

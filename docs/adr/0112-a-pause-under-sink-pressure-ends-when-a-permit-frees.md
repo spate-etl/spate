@@ -35,8 +35,9 @@ arm. The question was what ends a pause raised in that state, in
 
 Chosen option: "end such a pause once no shard waits, with no minimum",
 because it removed the shortfall on every measured arm at the default
-`min_pause`, and the measured alternatives either kept the shortfall or paused
-about as often for the same rate.
+`min_pause`. The measured alternatives either kept the shortfall, or removed
+it while adding a constant no config sets. The 50 ms stand-in paused about as
+often on the default queues and about a quarter less on the saturated arm.
 
 The controller marks a pause raised by a queue rejection while a shard waits,
 unless usage had reached the high watermark or a run of rejections with no
@@ -66,7 +67,8 @@ pause needs.
   `spate_backpressure_pause_events_total` rises with it.
 - Bad, because a Kafka source purges its prefetch on each pause and refetches
   on resume, so more pauses cost it fetch traffic. Kafka was measured only on
-  one local host with two pipeline threads, where pauses rose about 20%.
+  one local host with two pipeline threads, where it paused 60 to 72 times
+against 58 to 60.
 - Bad, because `min_pause` no longer bounds every pause/resume cycle, and its
   resume-floor meaning gains an exception.
 - Neutral, because INV-2 holds: no send blocks, and a resume only re-enables
@@ -77,7 +79,7 @@ pause needs.
 ### Confirmation
 
 `crates/spate-core/src/backpressure.rs` tests the rule
-(`a_gated_pause_resumes_once_no_shard_waits` and the three tests after it,
+(the `a_gated_*` tests, `the_next_pause_after_a_gated_one_keeps_min_pause`
 and the property `an_ungated_pause_lasts_min_pause`).
 `crates/spate-core/src/pipeline/driver.rs` tests the pipeline thread's wiring
 (`a_gated_pause_resumes_once_the_shard_gets_a_permit`). The counted case

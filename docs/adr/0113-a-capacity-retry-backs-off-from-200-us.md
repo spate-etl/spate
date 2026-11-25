@@ -47,7 +47,7 @@ waiter, so while one thread waits every new `try_send` fails and joins the
 queue. Its rejections rose 20 times on one shard. The chained unpark fell
 behind on one shard. The 50 µs start reached a ceiling 4% higher than 200 µs,
 at a quarter more CPU per row on one shard. A flat 200 µs sleep refused far
-more chunks than the backoff on a saturated store.
+more chunks than the 50 µs backoff on a saturated store.
 
 `spate_queue_full_events_total` still counts each refused `try_send`. Counting
 once per refused chunk was weighed and dropped, because a stopped shard worker
@@ -101,6 +101,14 @@ rows:
   to 61; 140.8M to 142.8M at 67 to 68.
 - 1 shard against a store capped at 500 MB/s: 3.0M to 3.4M for all three, at
   106 to 110, 105 to 106 and 125 to 131.
+
+In the same runs, `spate_queue_full_events_total` counted these rejections per
+20-second window, unchanged code against the 200 µs backoff: 458k to 461k
+against 1.72M to 1.76M on 1 shard paced, 387k to 390k against 837k to 838k on
+8 shards paced, 240k to 251k against 347k to 386k on 32 shards, 382k to 386k
+against 1.24M to 1.26M on 8 shards unthrottled, and 277k to 278k against 315k to
+358k on the capped store. Paired by pass, the backoff counted 1.13 to 3.82 times
+as many.
 
 An earlier Linux run, made before the change ADR-0112 records, compared 50 µs
 with 200 µs. On 1 shard paced both kept up, at 94 to 95 against 74 to 76 CPU ms

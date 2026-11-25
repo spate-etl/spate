@@ -628,6 +628,23 @@ mod tests {
         assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
     }
 
+    /// A gated rejection does not join a run of rejections with no shard
+    /// waiting, so it cannot stretch that run past `min_pause`, and its pause
+    /// ends once no shard waits.
+    #[test]
+    fn a_gated_rejection_after_a_short_run_resumes_once_no_shard_waits() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "one rejection");
+        clock.advance(MIN_PAUSE);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
     /// The pause a gated rejection raised does not carry over to the next
     /// pause, which `on_send_rejected` raises with no shard waiting.
     #[test]

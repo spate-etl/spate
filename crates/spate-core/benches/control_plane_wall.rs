@@ -33,7 +33,7 @@
 //!   wall reading of one is not the point. What this tier adds is
 //!   `alloc_count_per_iter`, which must be a flat zero, at a 1% floor, on any
 //!   machine rather than only where valgrind runs. A poll loop that starts
-//!   allocating is the regression these three cases catch.
+//!   allocating is the regression these cases catch.
 //! - **The ack thread axis prices a degradation, not a speed-up.** Adding
 //!   acking threads makes this workload *slower*, and the axis measures that
 //!   degradation. Issuing is wait-free but not contention-free. A batch
@@ -174,11 +174,12 @@ const THREADED_ERRATIC: &str = "wall time follows where the scheduler places the
 /// Passed to the rig rather than derived by it. A rig that computed its own
 /// expectation from its own model of the state machine would agree with
 /// itself however the machine changed. `tests/bench_fixtures.rs` holds the
-/// same four numbers for the same reason.
+/// same five numbers for the same reason.
 const QUIET_TRANSITIONS: usize = 0;
 const CONGESTED_TRANSITIONS: usize = 1;
 const FLAPPING_TRANSITIONS: usize = 2048;
 const CONTENDED_TRANSITIONS: usize = 1024;
+const GATED_TRANSITIONS: usize = 1024;
 
 /// A case driving the whole schedule on the calling thread.
 ///
@@ -332,11 +333,12 @@ fn suite() -> Suite {
         Some(THREADED_ERRATIC),
     );
 
-    // The four pressure profiles. `quiet` never leaves the `Normal` arm,
+    // The five pressure profiles. `quiet` never leaves the `Normal` arm,
     // `congested` pauses once and then finds a reason not to resume on every
     // later tick, `flapping` crosses both watermarks as often as the
-    // hysteresis allows, and `contended` pauses on queue rejections that span
-    // the pause floor. All four must allocate nothing.
+    // hysteresis allows, `contended` pauses on queue rejections that span
+    // the pause floor, and `gated` pauses on a queue rejection while a shard
+    // waits for a write permit. All five must allocate nothing.
     let suite = poll_case(suite, "poll_quiet", Profile::Quiet, QUIET_TRANSITIONS);
     let suite = poll_case(
         suite,
@@ -350,12 +352,13 @@ fn suite() -> Suite {
         Profile::Flapping,
         FLAPPING_TRANSITIONS,
     );
-    poll_case(
+    let suite = poll_case(
         suite,
         "poll_contended",
         Profile::Contended,
         CONTENDED_TRANSITIONS,
-    )
+    );
+    poll_case(suite, "poll_gated", Profile::Gated, GATED_TRANSITIONS)
 }
 
 bench_main!(suite);

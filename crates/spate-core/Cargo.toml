@@ -46,7 +46,8 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 url = { workspace = true }
 
 [dev-dependencies]
-# `testing`: `bench_seams`, for the driver benches.
+# `testing`: `bench_seams`, for the driver benches and the backpressure rig
+# that `backpressure_gungraun`, `control_plane_wall` and `bench_fixtures` share.
 spate-core = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }

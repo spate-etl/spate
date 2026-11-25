@@ -21,6 +21,7 @@
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
+use spate_core::bench_seams::{gate_shard, ungate_shard};
 use spate_core::clock::Clock;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -65,7 +66,7 @@ const STEP: Duration = Duration::from_secs(1);
 /// The value cannot move the count on its own in any case. `tick` compares
 /// against it (`duration_since(since) >= min_pause`), so what a different
 /// floor changes is which arm the comparison selects, not the work the
-/// comparison does, and the four profiles put every arm under measurement
+/// comparison does, and the five profiles put every arm under measurement
 /// regardless.
 const MIN_PAUSE: Duration = Duration::from_secs(10);
 
@@ -91,6 +92,18 @@ const LONG_RUN: usize = 12;
 
 /// Where the long run starts in each contended cycle.
 const LONG_RUN_AT: usize = 32;
+
+/// Iterations in one cycle of the gated script.
+const GATED_CYCLE: usize = 64;
+
+/// Queue rejections at the start of each gated cycle, the first of which
+/// gates a shard.
+const GATED_REJECTIONS: usize = 4;
+
+/// Where the gated shard gets its permit in each gated cycle. Two quiet
+/// iterations after the last rejection, so the controller ticks while paused
+/// with a shard still waiting and no rejection to record.
+const UNGATE_AT: usize = GATED_REJECTIONS + 2;
 
 /// Injected clock. The controller reads time through a
 /// [`Clock`](spate_core::clock::Clock) so it can be driven without sleeping,
@@ -140,8 +153,9 @@ struct Step {
     queues_below_low: bool,
 }
 
-/// How one iteration's `try_send` went. The discriminant is the corpus byte,
-/// so the profiles from before the queue rejection keep their bytes.
+/// How one iteration's `try_send` went, and whether a shard's wait for a write
+/// permit began or ended with it. The discriminant is the corpus byte, so the
+/// profiles from before each variant keep their bytes.
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum Send {
@@ -153,6 +167,12 @@ enum Send {
     Queue = 2,
     /// A push completed, through `on_push_done`.
     Done = 3,
+    /// A shard starts waiting for a write permit, and a shard queue rejects
+    /// through `on_queue_rejected`.
+    Gate = 4,
+    /// The waiting shard gets its permit. Nothing for the controller to
+    /// record.
+    Ungate = 5,
 }
 
 /// Which pressure a script puts the controller under.
@@ -178,6 +198,13 @@ pub(crate) enum Profile {
     /// that a completed push ends before it spans the minimum pause, and a
     /// long run that spans it, pauses, and resumes once the queues drain.
     Contended,
+    /// Usage rides as in [`Profile::Quiet`] while shard queues reject with a
+    /// shard waiting for a permit. Each cycle opens with a run of rejections
+    /// that pauses at once. The shard waits through two more iterations whose
+    /// queues read drained, and gets its permit on the one iteration whose
+    /// queues read not drained. The controller then resumes once its resume
+    /// conditions hold.
+    Gated,
 }
 
 impl Profile {
@@ -187,7 +214,7 @@ impl Profile {
             // A plateau a megabyte up, climbing a chunk at a time for fifteen
             // iterations, then dropping the whole run back. Always far below
             // the low watermark, so no tick has a reason to pause.
-            Profile::Quiet | Profile::Contended => 1024 * 1024 + (i % 16) * CHUNK,
+            Profile::Quiet | Profile::Contended | Profile::Gated => 1024 * 1024 + (i % 16) * CHUNK,
             Profile::Congested => params.high_bytes + (i % 8 + 1) * CHUNK,
             Profile::Flapping => {
                 if high_phase(i) {
@@ -205,6 +232,7 @@ impl Profile {
             Profile::Quiet | Profile::Contended => true,
             Profile::Congested => false,
             Profile::Flapping => !high_phase(i),
+            Profile::Gated => i % GATED_CYCLE != UNGATE_AT,
         }
     }
 
@@ -220,6 +248,12 @@ impl Profile {
                 SHORT_RUN => Send::Done,
                 at if (LONG_RUN_AT..LONG_RUN_AT + LONG_RUN).contains(&at) => Send::Queue,
                 at if at == LONG_RUN_AT + LONG_RUN => Send::Done,
+                _ => Send::Clear,
+            },
+            Profile::Gated => match i % GATED_CYCLE {
+                0 => Send::Gate,
+                at if at < GATED_REJECTIONS => Send::Queue,
+                UNGATE_AT => Send::Ungate,
                 _ => Send::Clear,
             },
         }
@@ -291,6 +325,8 @@ impl Rig {
     /// restating them here. Zeroing the clock rather than letting it run on
     /// keeps every drive bit-identical, for the reason [`STEP`] gives. An
     /// offset that grew without bound would eventually change the carries.
+    /// The budget's count of shards waiting for a permit needs no reset,
+    /// because [`rig`] refuses a script that leaves a shard waiting.
     ///
     /// The whole thing is one saturating subtraction, one `Cell` write and
     /// one struct write against [`ITERATIONS`] iterations of work, and both
@@ -327,6 +363,11 @@ impl Rig {
                 Send::Pressure => controller.on_send_rejected(),
                 Send::Queue => controller.on_queue_rejected(budget),
                 Send::Done => controller.on_push_done(),
+                Send::Gate => {
+                    gate_shard(budget);
+                    controller.on_queue_rejected(budget);
+                }
+                Send::Ungate => ungate_shard(budget),
             }
             clock.advance(STEP);
             if controller.tick(budget, || step.queues_below_low).is_some() {
@@ -352,7 +393,7 @@ impl Rig {
 /// profile instead. A script that stopped crossing could not produce it.
 fn assert_in_band(profile: Profile, params: &BackpressureParams, level: usize) {
     match profile {
-        Profile::Quiet | Profile::Contended => assert!(
+        Profile::Quiet | Profile::Contended | Profile::Gated => assert!(
             level < params.low_bytes,
             "the quiet script reached {level} bytes, at or above the low \
              watermark of {}, so it is no longer the profile that never has a \
@@ -382,7 +423,7 @@ fn assert_in_band(profile: Profile, params: &BackpressureParams, level: usize) {
 pub(crate) fn rig(profile: Profile, expect_transitions: usize) -> Rig {
     let params = BackpressureParams::from_budget(MAX_INFLIGHT, 0.8, 0.5, MIN_PAUSE);
     let mut level = 0usize;
-    let script = (0..ITERATIONS)
+    let script: Vec<Step> = (0..ITERATIONS)
         .map(|i| {
             let target = profile.usage(&params, i);
             assert_in_band(profile, &params, target);
@@ -400,6 +441,18 @@ pub(crate) fn rig(profile: Profile, expect_transitions: usize) -> Rig {
             }
         })
         .collect();
+    let count = |send: Send| {
+        script
+            .iter()
+            .filter(|step| step.send as u8 == send as u8)
+            .count()
+    };
+    assert_eq!(
+        count(Send::Gate),
+        count(Send::Ungate),
+        "the script leaves a shard waiting for a permit, so a second drive \
+         would open with it still counted"
+    );
     let clock = BenchClock::new();
     Rig {
         controller: WatermarkController::with_clock(params, clock.clone()),

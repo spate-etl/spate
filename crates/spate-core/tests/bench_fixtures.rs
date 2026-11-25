@@ -85,6 +85,7 @@ fn expected_transitions(profile: Profile) -> usize {
         Profile::Congested => 1,
         Profile::Flapping => 2048,
         Profile::Contended => 1024,
+        Profile::Gated => 1024,
     }
 }
 
@@ -126,6 +127,7 @@ fn the_corpora_are_reproducible() {
         Profile::Congested,
         Profile::Flapping,
         Profile::Contended,
+        Profile::Gated,
     ] {
         assert_eq!(poll_script(profile), poll_script(profile));
     }
@@ -197,6 +199,11 @@ fn the_corpora_are_pinned_across_revisions() {
         POLL_CONTENDED_PIN,
         "poll contended script"
     );
+    assert_eq!(
+        pin(&poll_script(Profile::Gated)),
+        POLL_GATED_PIN,
+        "poll gated script"
+    );
 }
 
 /// The control-plane corpora's pins, named rather than written inline because
@@ -208,6 +215,7 @@ const POLL_QUIET_PIN: (usize, u64) = (589_824, 0xeece_ff27_400e_e502);
 const POLL_CONGESTED_PIN: (usize, u64) = (589_824, 0xa183_0e3b_66f3_72c5);
 const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xb5c4_64f3_9e0d_2545);
 const POLL_CONTENDED_PIN: (usize, u64) = (589_824, 0x45de_1615_ec43_0502);
+const POLL_GATED_PIN: (usize, u64) = (589_824, 0x4831_d3c6_60cd_cd02);
 
 /// Each corpus is the length its own constants imply.
 ///
@@ -233,6 +241,7 @@ fn each_corpus_is_the_length_its_constants_imply() {
     assert_eq!(POLL_QUIET_PIN.0, POLL_CONGESTED_PIN.0);
     assert_eq!(POLL_QUIET_PIN.0, POLL_FLAPPING_PIN.0);
     assert_eq!(POLL_QUIET_PIN.0, POLL_CONTENDED_PIN.0);
+    assert_eq!(POLL_QUIET_PIN.0, POLL_GATED_PIN.0);
 }
 
 /// Neither the tick width nor the driver changes which batches are issued.
@@ -422,6 +431,7 @@ fn a_second_drive_is_the_same_work_as_the_first() {
         Profile::Congested,
         Profile::Flapping,
         Profile::Contended,
+        Profile::Gated,
     ] {
         let expect = expected_transitions(profile);
         let mut rig = poll_traffic::rig(profile, expect);

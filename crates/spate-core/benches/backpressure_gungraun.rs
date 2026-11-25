@@ -26,7 +26,7 @@
 //!   than calling one of them. `tick` then takes the `Normal` arm, reads the
 //!   budget, finds it under the high watermark and returns nothing. This is
 //!   the iteration a healthy pipeline pays for hours at a time, and the floor
-//!   the other two are read against.
+//!   the other cases are read against.
 //! - `congested_traffic` — usage climbs past the high watermark and stays
 //!   there, the driver never reports its queues drained, and a `try_send`
 //!   bounces every sixty-fourth iteration. One transition at the top, then
@@ -54,12 +54,21 @@
 //!   a run of twelve spans it, pauses and resumes. Read against
 //!   `quiet_traffic`, the difference is what tracking a run of rejections
 //!   costs.
+//! - `gated_traffic` — usage and queues as in `quiet_traffic`, while shard
+//!   queues reject with a shard waiting for a write permit, through
+//!   `on_queue_rejected`. Each sixty-four-iteration cycle opens with four
+//!   rejections, the first of which pauses at once. The shard waits through
+//!   two more iterations whose queues read drained, and gets its permit on
+//!   the one iteration whose queues read not drained. The controller then
+//!   resumes once its resume conditions hold. Read against `quiet_traffic`,
+//!   the difference is what a pause under sink pressure and its resume
+//!   cost.
 //!
 //! The watermark ratios and the pause floor are comparisons against a field
 //! (`usage() >= high_bytes`, `duration_since(since) >= min_pause`), so their
 //! *values* cannot change the instruction count, only which arm the
-//! comparison selects, and the four profiles already put every arm under
-//! measurement. There are four cases rather than a matrix because callgrind
+//! comparison selects, and the five profiles already put every arm under
+//! measurement. There are five cases rather than a matrix because callgrind
 //! runs the workload under emulation.
 //!
 //! The controller reads time through its injected
@@ -90,12 +99,13 @@ use poll_traffic::{Profile, Rig, rig};
 /// state machine would agree with itself however the machine changed. A quiet
 /// pipeline never transitions; a congested one pauses once and never finds a
 /// reason to resume; the adversary takes a pause and a resume in every
-/// thirty-two-iteration cycle; a contended one takes a pause and a resume in
-/// every sixty-four-iteration cycle.
+/// thirty-two-iteration cycle; a contended or a gated one takes a pause and a
+/// resume in every sixty-four-iteration cycle.
 const QUIET_TRANSITIONS: usize = 0;
 const CONGESTED_TRANSITIONS: usize = 1;
 const FLAPPING_TRANSITIONS: usize = 2048;
 const CONTENDED_TRANSITIONS: usize = 1024;
+const GATED_TRANSITIONS: usize = 1024;
 
 /// The whole script, one poll iteration at a time.
 ///
@@ -130,6 +140,7 @@ fn drive(rig: &mut Rig) -> usize {
 #[bench::congested_traffic(rig(Profile::Congested, CONGESTED_TRANSITIONS))]
 #[bench::flapping_traffic(rig(Profile::Flapping, FLAPPING_TRANSITIONS))]
 #[bench::contended_traffic(rig(Profile::Contended, CONTENDED_TRANSITIONS))]
+#[bench::gated_traffic(rig(Profile::Gated, GATED_TRANSITIONS))]
 fn poll_iterations(mut rig: Rig) -> Rig {
     let transitions = black_box(drive(&mut rig));
     assert_eq!(

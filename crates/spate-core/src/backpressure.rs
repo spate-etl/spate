@@ -219,12 +219,7 @@ pub enum Transition {
 #[derive(Clone, Copy, Debug)]
 enum State {
     Normal,
-    /// `gated`: the pause came from a rejection while a shard worker waited
-    /// for a write permit, with usage under the high watermark.
-    Paused {
-        since: Instant,
-        gated: bool,
-    },
+    Paused { since: Instant },
 }
 
 /// Per-pipeline-thread pause/resume state machine with hysteresis.
@@ -240,9 +235,11 @@ pub struct WatermarkController<C: Clock = SystemClock> {
     state: State,
     /// A rejection under sink pressure observed since the last `tick`.
     rejected: bool,
-    /// The rejection behind `rejected` came while a shard worker waited for
-    /// a write permit. Set only while not paused, so the next `tick` pauses
-    /// and clears it.
+    /// While not paused, the rejection behind `rejected` came while a shard
+    /// worker waited for a write permit. While paused, that rejection raised
+    /// the pause with usage under the high watermark and no run spanning
+    /// `min_pause`, so the pause ends once no worker waits. Cleared on
+    /// resume.
     gated: bool,
     /// The first and latest rejection of the current run of rejections while
     /// no shard worker waits for a permit. A completed push ends the run.
@@ -280,7 +277,7 @@ impl<C: Clock> WatermarkController<C> {
     /// worker waits for a write permit.
     pub fn on_send_rejected(&mut self) {
         self.rejected = true;
-        if let State::Paused { since, .. } = &mut self.state {
+        if let State::Paused { since } = &mut self.state {
             *since = self.clock.now();
         }
     }
@@ -340,20 +337,18 @@ impl<C: Clock> WatermarkController<C> {
                 });
                 let over = budget.usage() >= self.params.high_bytes;
                 if self.rejected || contended || over {
-                    let gated = self.gated && !contended && !over;
+                    self.gated &= !contended && !over;
                     self.rejected = false;
-                    self.gated = false;
                     self.contended = None;
                     self.state = State::Paused {
                         since: self.clock.now(),
-                        gated,
                     };
                     Some(Transition::Pause)
                 } else {
                     None
                 }
             }
-            State::Paused { since, gated } => {
+            State::Paused { since } => {
                 if self.rejected {
                     // `on_send_rejected` already restarted the timer; clear
                     // the flag so one rejection is not counted against two
@@ -361,21 +356,25 @@ impl<C: Clock> WatermarkController<C> {
                     self.rejected = false;
                     return None;
                 }
-                // A pause the sink's permits raised ends once no shard waits
-                // for one and the queues have drained.
-                let floor = if gated && budget.gated_shards() == 0 {
-                    Duration::ZERO
-                } else {
-                    self.params.min_pause
-                };
                 let drained = budget.usage() <= self.params.low_bytes && queues_below_low();
-                if drained && self.clock.now().duration_since(since) >= floor {
+                if drained && self.clock.now().duration_since(since) >= self.floor(budget) {
+                    self.gated = false;
                     self.state = State::Normal;
                     Some(Transition::Resume)
                 } else {
                     None
                 }
             }
+        }
+    }
+
+    /// How long the current pause must last before it can end. A pause the
+    /// sink's permits raised ends once no shard waits for one.
+    fn floor(&self, budget: &InflightBudget) -> Duration {
+        if self.gated && budget.gated_shards() == 0 {
+            Duration::ZERO
+        } else {
+            self.params.min_pause
         }
     }
 

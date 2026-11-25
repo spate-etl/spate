@@ -11,14 +11,14 @@ description: "A push a full shard queue refused is retried after 200 µs, doubli
 
 ## Context and problem statement
 
-ADR-0111 made a shard-queue rejection retry the push while no shard worker
-waits for a write permit. The pipeline thread slept `RuntimeOptions::blocked_retry`,
-2 ms, before each retry in `drive_batch`, and the drain's `flush_until` slept a
-fixed 2 ms. A shard worker drains its queue in passes far shorter than that, so
-a contended thread spent most of each retry asleep with room in the queue. With
-32 threads on 1 or 8 shards, the source fell behind its offered rate, and the
-unthrottled ceiling stayed near 110M rows/s. The question was how a pipeline
-thread waits for room in a full shard queue.
+ADR-0111 made a shard-queue rejection retry the push while no shard worker waits
+for a write permit. The pipeline thread slept
+`RuntimeOptions::blocked_retry`, 2 ms, before each retry in `drive_batch`, and
+the drain's `flush_until` slept a fixed 2 ms. A shard worker drains its queue in
+passes far shorter than that, so a contended thread spent most of each retry
+asleep with room in the queue. With 32 threads on 1 or 8 shards, the source fell
+behind its offered rate, and the unthrottled ceiling stayed near 110M rows/s.
+The question was how a pipeline thread waits for room in a full shard queue.
 
 ## Considered options
 
@@ -103,9 +103,9 @@ rows:
   106 to 110, 105 to 106 and 125 to 131.
 
 An earlier Linux run, made before the change ADR-0112 records, compared 50 µs
-with 200 µs. On 1 shard paced both kept up, at 94 to 95 against 74 to 76 CPU ms per million
-rows. On 8 shards unthrottled, 50 µs reached 155.4M to 156.4M against 148.6M
-to 150.4M. Neither arm paused, so ADR-0112 does not bear on them.
+with 200 µs. On 1 shard paced both kept up, at 94 to 95 against 74 to 76 CPU ms
+per million rows. On 8 shards unthrottled, 50 µs reached 155.4M to 156.4M
+against 148.6M to 150.4M. Neither arm paused, so ADR-0112 does not bear on them.
 
 tokio's `reserve`, the chained unpark and the flat 200 µs sleep ran on macOS
 only, on the same host, three interleaved passes each. On 1 shard paced,

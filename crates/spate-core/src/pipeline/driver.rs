@@ -9,6 +9,7 @@
 use super::runtime::RuntimeOptions;
 use super::{DriverEvent, PauseCause, ThreadControl};
 use crate::admin::HealthState;
+use crate::backoff::Backoff;
 use crate::backpressure::{BackpressureParams, InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
 use crate::clock::{Clock, Stopwatch, SystemClock};
@@ -43,7 +44,8 @@ pub(crate) struct DriverParams {
     /// Flush the chain after this long without new data (drives partial
     /// encoder chunks out of idle pipelines).
     pub idle_flush: Duration,
-    /// Sleep between retries of a blocked batch.
+    /// The longest wait between retries of a push or flush a full shard queue
+    /// refused, and the wait before replaying a not-ready payload.
     pub blocked_retry: Duration,
     /// Queue fill ratio below which resume is allowed (mirrors the
     /// backpressure low watermark).
@@ -271,6 +273,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                             &events,
                             &health,
                             params.thread,
+                            params.blocked_retry,
                         );
                     }
                     // One arrival per stopped lane; the source sized the
@@ -315,6 +318,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         &events,
                         &health,
                         params.thread,
+                        params.blocked_retry,
                     );
                     lanes.clear();
                     // Dropping the chain closes this thread's shard-queue
@@ -698,7 +702,7 @@ fn park_until_shutdown<L: SourceLane>(
 ///
 /// The batch borrows the lane's buffers, so the retry loop must hold it.
 /// While blocked, the loop records each rejection with the backpressure
-/// controller and ticks it, heartbeats, and sleeps briefly. A rejection
+/// controller and ticks it, heartbeats, and sleeps for [`retry_wait`]. A rejection
 /// raises a pause request at once while a shard worker waits for a write
 /// permit, and otherwise once rejections have lasted `min_pause`. The
 /// never-block invariant is about channel sends; deferring this thread's
@@ -725,6 +729,7 @@ fn drive_batch(
     // in an arbitrary state, but this handle can still fail it.
     let ack: AckRef = batch.ack().clone();
     let mut from = 0usize;
+    let mut capacity = None;
     loop {
         health.heartbeat(params.thread);
         let pushed = std::panic::catch_unwind(AssertUnwindSafe(|| chain.push_batch(batch, from)));
@@ -760,7 +765,7 @@ fn drive_batch(
                         apply_transition(t, owned(), events, bp_metrics, pause_started);
                     }
                 }
-                std::thread::sleep(params.blocked_retry);
+                std::thread::sleep(retry_wait(reason, &mut capacity, params.blocked_retry));
             }
             Ok(PushOutcome::Fatal(error)) => {
                 ack.fail();
@@ -815,6 +820,30 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
     }
 }
 
+/// The first wait before retrying a push or flush that a full shard queue
+/// refused.
+const CAPACITY_RETRY_FIRST: Duration = Duration::from_micros(200);
+
+/// The wait before retrying a blocked push or flush.
+///
+/// A capacity block waits [`CAPACITY_RETRY_FIRST`], or `blocked_retry` when
+/// that is shorter, doubling on each further block that shares `capacity` up to
+/// `blocked_retry`. A shard worker drains
+/// its queue in passes far shorter than `blocked_retry`, so the first retries
+/// usually find room. A not-ready block waits `blocked_retry`.
+fn retry_wait(
+    reason: BlockReason,
+    capacity: &mut Option<Backoff>,
+    blocked_retry: Duration,
+) -> Duration {
+    match reason {
+        BlockReason::Capacity => capacity
+            .get_or_insert_with(|| Backoff::new(CAPACITY_RETRY_FIRST, blocked_retry))
+            .next_delay(),
+        BlockReason::NotReady => blocked_retry,
+    }
+}
+
 /// Best-effort chain flush with a deadline (revocation and shutdown).
 /// A flush still blocked at the deadline is abandoned. The terminal
 /// stage's Drop contract fails any parked acknowledgments, so abandoned
@@ -832,7 +861,9 @@ fn flush_until(
     events: &crossbeam_channel::Sender<DriverEvent>,
     health: &HealthState,
     thread: usize,
+    blocked_retry: Duration,
 ) {
+    let mut capacity = None;
     loop {
         health.heartbeat(thread);
         match chain.flush() {
@@ -850,7 +881,9 @@ fn flush_until(
                     );
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                let wait = retry_wait(BlockReason::Capacity, &mut capacity, blocked_retry);
+                // A wait never carries the drain past its deadline.
+                std::thread::sleep(wait.min(deadline.saturating_duration_since(stop_clock.now())));
             }
             PushOutcome::Fatal(error) => {
                 let _ = events.send(DriverEvent::Fatal { thread, error });
@@ -1177,11 +1210,34 @@ mod tests {
         gated: bool,
         check: impl FnOnce(&Driving<'_>),
     ) {
+        with_blocked_retry(
+            Duration::from_millis(1),
+            mode,
+            min_pause,
+            idle_flush,
+            lane,
+            gated,
+            check,
+        );
+    }
+
+    /// [`with_driver`] with the thread's `blocked_retry`. A failed `check`
+    /// is raised without waiting for the thread, which may be asleep for a
+    /// long `blocked_retry`, and leaves the thread running.
+    fn with_blocked_retry(
+        blocked_retry: Duration,
+        mode: ChainMode,
+        min_pause: Duration,
+        idle_flush: Duration,
+        lane: Option<usize>,
+        gated: bool,
+        check: impl FnOnce(&Driving<'_>),
+    ) {
         let clock = TestClock::frozen();
         let options = RuntimeOptions {
             poll_timeout: Duration::from_millis(1),
             idle_flush,
-            blocked_retry: Duration::from_millis(1),
+            blocked_retry,
             ..RuntimeOptions::default()
         };
         let backpressure = BackpressureSection {
@@ -1226,6 +1282,11 @@ mod tests {
                 shared: &shared,
             });
         }));
+        if let Err(panic) = checked {
+            // Detach the thread: a dropped handle would join it.
+            let _ = thread.join_by(clock.now(), &*clock);
+            std::panic::resume_unwind(panic);
+        }
         driver
             .control
             .send(ThreadControl::Shutdown {
@@ -1233,11 +1294,7 @@ mod tests {
                 deadline: clock.now(),
             })
             .unwrap();
-        let exit = thread.join().unwrap();
-        if let Err(panic) = checked {
-            std::panic::resume_unwind(panic);
-        }
-        assert_eq!(exit, DriverExit::Completed);
+        assert_eq!(thread.join().unwrap(), DriverExit::Completed);
     }
 
     const AN_HOUR: Duration = Duration::from_secs(3600);
@@ -1362,6 +1419,121 @@ mod tests {
     #[test]
     fn a_blocked_idle_flush_with_a_shard_gated_pauses() {
         assert!(one_rejection_pauses(Site::IdleFlush, true));
+    }
+
+    /// A push a full queue refused is retried long before `blocked_retry`,
+    /// here an hour.
+    #[test]
+    fn a_capacity_block_retries_before_blocked_retry() {
+        with_blocked_retry(
+            AN_HOUR,
+            ChainMode::BlockOnce(AtomicBool::new(false)),
+            AN_HOUR,
+            AN_HOUR,
+            Some(1),
+            false,
+            |d| {
+                wait_until(HANG, "the refused batch is retried", || {
+                    d.shared.consumed.load(Ordering::Relaxed) == 1
+                });
+            },
+        );
+    }
+
+    /// A drain flush that a full queue keeps refusing waits no longer than the
+    /// time left before the drain's deadline, with `blocked_retry` an hour.
+    #[test]
+    fn a_blocked_drain_flush_never_waits_past_its_deadline() {
+        with_blocked_retry(
+            AN_HOUR,
+            ChainMode::FlushBlocked,
+            AN_HOUR,
+            AN_HOUR,
+            Some(0),
+            false,
+            |d| {
+                d.driver
+                    .control
+                    .send(ThreadControl::StopLanes {
+                        lanes: vec![LaneId(0)],
+                        barrier: DrainBarrier::new(1),
+                        deadline: d.clock.now() + Duration::from_millis(1),
+                    })
+                    .unwrap();
+                // Waits doubling from 200 µs would take minutes to reach the
+                // twentieth flush; waits clamped to the 1 ms left take 20 ms.
+                d.wait_for_flushes(20);
+                d.clock.advance(Duration::from_millis(1));
+                d.wait_for_a_later_pass();
+            },
+        );
+    }
+
+    /// A drain flush that a full queue refused retries on the capacity
+    /// schedule, long before an hour-long `blocked_retry` and deadline.
+    #[test]
+    fn a_blocked_drain_flush_retries_before_blocked_retry() {
+        with_blocked_retry(
+            AN_HOUR,
+            ChainMode::FlushBlocked,
+            AN_HOUR,
+            AN_HOUR,
+            Some(0),
+            false,
+            |d| {
+                d.driver
+                    .control
+                    .send(ThreadControl::StopLanes {
+                        lanes: vec![LaneId(0)],
+                        barrier: DrainBarrier::new(1),
+                        deadline: d.clock.now() + AN_HOUR,
+                    })
+                    .unwrap();
+                d.wait_for_flushes(2);
+                // Past the deadline, the drain gives up on its next retry.
+                d.clock.advance(AN_HOUR);
+                d.wait_for_a_later_pass();
+            },
+        );
+    }
+
+    /// A capacity block starts at `CAPACITY_RETRY_FIRST` and doubles to
+    /// `blocked_retry`; a not-ready block waits `blocked_retry` and leaves the
+    /// capacity schedule where it was.
+    #[test]
+    fn retry_wait_backs_off_a_capacity_block_to_blocked_retry() {
+        let us = Duration::from_micros;
+        let mut capacity = None;
+        let mut waits = Vec::new();
+        for reason in [
+            BlockReason::Capacity,
+            BlockReason::Capacity,
+            BlockReason::NotReady,
+            BlockReason::Capacity,
+            BlockReason::Capacity,
+            BlockReason::Capacity,
+            BlockReason::Capacity,
+        ] {
+            waits.push(retry_wait(reason, &mut capacity, us(2_000)));
+        }
+        assert_eq!(
+            waits,
+            [
+                us(200),
+                us(400),
+                us(2_000),
+                us(800),
+                us(1_600),
+                us(2_000),
+                us(2_000)
+            ]
+        );
+
+        let mut capacity = None;
+        let waits: Vec<_> = (0..4)
+            .map(|_| retry_wait(BlockReason::Capacity, &mut capacity, us(1_000)))
+            .collect();
+        assert_eq!(waits, [us(200), us(400), us(800), us(1_000)]);
     }
 
     /// A pause a rejection raised while a shard waited for a permit ends once

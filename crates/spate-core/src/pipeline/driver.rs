@@ -1439,6 +1439,35 @@ mod tests {
         );
     }
 
+    /// A drain flush that a full queue keeps refusing waits no longer than the
+    /// time left before the drain's deadline, with `blocked_retry` an hour.
+    #[test]
+    fn a_blocked_drain_flush_never_waits_past_its_deadline() {
+        with_blocked_retry(
+            AN_HOUR,
+            ChainMode::FlushBlocked,
+            AN_HOUR,
+            AN_HOUR,
+            Some(0),
+            false,
+            |d| {
+                d.driver
+                    .control
+                    .send(ThreadControl::StopLanes {
+                        lanes: vec![LaneId(0)],
+                        barrier: DrainBarrier::new(1),
+                        deadline: d.clock.now() + Duration::from_millis(1),
+                    })
+                    .unwrap();
+                // Waits doubling from 200 µs would take minutes to reach the
+                // twentieth flush; waits clamped to the 1 ms left take 20 ms.
+                d.wait_for_flushes(20);
+                d.clock.advance(Duration::from_millis(1));
+                d.wait_for_a_later_pass();
+            },
+        );
+    }
+
     /// A capacity block starts at `CAPACITY_RETRY_FIRST` and doubles to
     /// `blocked_retry`; a not-ready block waits `blocked_retry` and leaves the
     /// capacity schedule where it was.

@@ -13,7 +13,8 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
-use spate_test::metric_sum;
+use spate_test::{HANG, metric_sum};
+use std::sync::mpsc;
 use std::time::Duration;
 use support::*;
 
@@ -41,9 +42,13 @@ fn a_silent_broker_mid_stream_loses_nothing() {
     h.produce(&params.topic, first_wave);
 
     let pipeline = h.spawn_pipeline(&params);
-    wait_until(Duration::from_secs(60), "pipeline mid-stream", || {
-        h.count(&params.table) >= 5_000
-    });
+    wait_for_value(
+        Duration::from_secs(60),
+        "pipeline mid-stream",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows >= 5_000),
+    )
+    .expect("the wait ends on a read");
 
     h.pause_broker();
     wait_until(
@@ -92,9 +97,13 @@ fn a_stop_during_a_silent_broker_ends_the_run() {
     h.create_table(&params.table);
     h.produce(&params.topic, &events(3, 20_000));
     let pipeline = h.spawn_pipeline(&params);
-    wait_until(Duration::from_secs(60), "mid-stream", || {
-        h.count(&params.table) >= 5_000
-    });
+    wait_for_value(
+        Duration::from_secs(60),
+        "mid-stream",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows >= 5_000),
+    )
+    .expect("the wait ends on a read");
     let RunningPipeline {
         shutdown,
         join,
@@ -113,4 +122,55 @@ fn a_stop_during_a_silent_broker_ends_the_run() {
     join.join().expect("thread").expect("start");
     sampler.finish();
     assert!(finished, "the run had not ended {waited:?} after its stop");
+}
+
+/// Pins that a read made inside a wait returns once its bound passes against a
+/// server that answers nothing, so the wait can read again: ClickHouse through
+/// the query timeout, and the broker through the client's request bound.
+#[test]
+#[ignore = "requires Docker"]
+fn a_read_of_a_paused_server_returns_its_timeout() {
+    let h = Harness::up();
+    let (topic, table) = ("paused-reads", "paused_reads");
+    h.create_topic(topic, 1);
+    h.create_table(table);
+
+    let rows = while_paused(
+        || h.pause_clickhouse(),
+        || h.unpause_clickhouse(),
+        || h.count_once(table),
+    );
+    assert!(
+        rows.as_ref().is_err_and(|e| e.starts_with("timed out")),
+        "{rows:?}"
+    );
+    assert_eq!(h.count(table), 0);
+
+    let ends = while_paused(
+        || h.pause_broker(),
+        || h.unpause_broker(),
+        || h.end_offsets_once(topic, 1),
+    );
+    assert!(ends.is_err(), "{ends:?}");
+    assert_eq!(h.end_offsets(topic, 1), [0]);
+}
+
+/// What `read` returns while `pause` holds a server silent. `resume` runs once
+/// the answer is in or [`HANG`] has passed, so a read that never returns fails
+/// the test and still lets its thread finish.
+fn while_paused<T: Send>(
+    pause: impl FnOnce(),
+    resume: impl FnOnce(),
+    read: impl FnOnce() -> T + Send,
+) -> T {
+    pause();
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let _ = tx.send(read());
+        });
+        let answer = rx.recv_timeout(HANG);
+        resume();
+        answer.unwrap_or_else(|_| panic!("a read of a paused server ran past {HANG:?}"))
+    })
 }

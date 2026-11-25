@@ -48,9 +48,16 @@ fn poison_payloads_are_skipped_counted_and_do_not_stall() {
 
     let pipeline = h.spawn_pipeline(&params);
 
-    wait_until(Duration::from_secs(90), "all valid rows present", || {
-        h.uniq(&params.table) == (valid_before + valid_after) as u64
-    });
+    wait_for_value(
+        Duration::from_secs(90),
+        "all valid rows present",
+        || h.uniq_once(&params.table),
+        |read| {
+            read.as_ref()
+                .is_ok_and(|&rows| rows == (valid_before + valid_after) as u64)
+        },
+    )
+    .expect("the wait ends on a read");
 
     let (status, body) = http_get(pipeline.admin, "/metrics");
     assert_eq!(status, 200);

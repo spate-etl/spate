@@ -54,7 +54,13 @@ fn start_outage(h: &Harness, params: &PipelineParams) -> RunningPipeline {
 
     let pipeline = h.spawn_pipeline(params);
 
-    wait_until(HANG, "first 10k rows", || h.count(&params.table) >= 10_000);
+    wait_for_value(
+        HANG,
+        "first 10k rows",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows >= 10_000),
+    )
+    .expect("the wait ends on a read");
 
     h.pause_clickhouse();
     h.produce(&params.topic, second_wave);

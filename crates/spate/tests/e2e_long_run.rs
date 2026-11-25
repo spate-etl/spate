@@ -71,16 +71,26 @@ fn sustained_traffic_holds_pending_work() {
     for round in 1..=rounds {
         // The next wave goes out while the sink still has one to write, so the
         // pipeline never idles and the broker's disk stays bounded.
-        wait_until(Duration::from_secs(600), "the round's rows", || {
-            // `count` stays cheap as the table grows. A replayed duplicate only
-            // ends a round early, and the drained check below reads distinct ids.
-            let rows = h.count(&params.table);
-            if produced < round * ROUND && produced.saturating_sub(rows) <= WAVE {
-                h.produce(&params.topic, &wave(produced..produced + WAVE));
-                produced += WAVE;
-            }
-            rows >= round * ROUND
-        });
+        wait_for_value(
+            Duration::from_secs(600),
+            "the round's rows",
+            || {
+                // `count` stays cheap as the table grows. A replayed duplicate
+                // only ends a round early, and the drained check below reads
+                // distinct ids.
+                let rows = h.count_once(&params.table);
+                if let Ok(rows) = rows
+                    && produced < round * ROUND
+                    && produced.saturating_sub(rows) <= WAVE
+                {
+                    h.produce(&params.topic, &wave(produced..produced + WAVE));
+                    produced += WAVE;
+                }
+                rows
+            },
+            |read| read.as_ref().is_ok_and(|&rows| rows >= round * ROUND),
+        )
+        .expect("the wait ends on a read");
         println!(
             "round {round}/{rounds}: peak pending {}",
             pipeline.sampler.peak_pending()

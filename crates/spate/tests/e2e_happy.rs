@@ -31,9 +31,13 @@ fn happy_path_delivers_exactly_and_commits() {
     let pipeline = h.spawn_pipeline(&params);
 
     // All rows land (dedup window makes in-session retries invisible).
-    wait_until(Duration::from_secs(120), "all rows in ClickHouse", || {
-        h.count(&params.table) == total as u64
-    });
+    wait_for_value(
+        Duration::from_secs(120),
+        "all rows in ClickHouse",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows == total as u64),
+    )
+    .expect("the wait ends on a read");
 
     // Probes and metrics are live while running.
     let (status, _) = http_get(pipeline.admin, "/healthz");
@@ -81,16 +85,10 @@ fn happy_path_delivers_exactly_and_commits() {
 
     // Content spot checks.
     assert_eq!(h.count(&params.table), total as u64, "no duplicates");
-    let name =
-        h.rt.block_on(
-            h.ch_client()
-                .query(&format!(
-                    "SELECT name FROM {} WHERE id = {}",
-                    params.table,
-                    event_id(3, 100)
-                ))
-                .fetch_one::<String>(),
-        )
-        .expect("spot check row");
+    let name = h.text(&format!(
+        "SELECT name FROM {} WHERE id = {}",
+        params.table,
+        event_id(3, 100)
+    ));
     assert_eq!(name, "evt-3-100");
 }

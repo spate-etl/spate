@@ -45,9 +45,13 @@ fn rebalance_under_load_preserves_every_record() {
     h.produce(&params.topic, &all[..total]);
 
     let pipeline = h.spawn_pipeline(&params);
-    wait_until(Duration::from_secs(60), "pipeline mid-stream", || {
-        h.count(&params.table) >= 5_000
-    });
+    wait_for_value(
+        Duration::from_secs(60),
+        "pipeline mid-stream",
+        || h.count_once(&params.table),
+        |read| read.as_ref().is_ok_and(|&rows| rows >= 5_000),
+    )
+    .expect("the wait ends on a read");
 
     // ── The intruder: joins the group, steals partitions, leaves ───────
     // It never commits (that would corrupt the group's offsets); whatever

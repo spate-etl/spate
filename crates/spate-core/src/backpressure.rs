@@ -8,9 +8,10 @@
 //! work pauses only once rejections have lasted `min_pause` with no push
 //! completing. The loop resumes only under hysteresis: usage back below the
 //! low watermark, downstream queues drained, and a minimum pause elapsed. A
-//! pause raised while a shard worker waited for a permit skips the minimum
-//! once no worker waits, so it cycles with the sink's permits. Every other
-//! pause/resume cycle takes at least `min_pause`.
+//! pause a queue rejection raised while a shard worker waited for a permit,
+//! with usage under the high watermark, skips the minimum once no worker
+//! waits, so it cycles with the sink's permits. Every other pause/resume cycle
+//! takes at least `min_pause`.
 //!
 //! Everything here is synchronous and tokio-free. Pipeline threads call it
 //! on every poll iteration, and the [`InflightBudget`] atomics are modeled
@@ -604,6 +605,24 @@ mod tests {
         budget.gate_shard();
         ctl.on_queue_rejected(&budget);
         assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        budget.sub(800);
+        assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A gated rejection that arrives during a pause the budget raised
+    /// restarts the timer and leaves the pause on `min_pause`.
+    #[test]
+    fn a_gated_rejection_during_a_high_watermark_pause_keeps_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.add(800);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "a rejection this tick");
         budget.ungate_shard();
         budget.sub(800);
         assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");

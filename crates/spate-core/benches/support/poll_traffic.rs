@@ -213,9 +213,7 @@ impl Profile {
             // A plateau a megabyte up, climbing a chunk at a time for fifteen
             // iterations, then dropping the whole run back. Always far below
             // the low watermark, so no tick has a reason to pause.
-            Profile::Quiet | Profile::Contended | Profile::Gated => {
-                1024 * 1024 + (i % 16) * CHUNK
-            }
+            Profile::Quiet | Profile::Contended | Profile::Gated => 1024 * 1024 + (i % 16) * CHUNK,
             Profile::Congested => params.high_bytes + (i % 8 + 1) * CHUNK,
             Profile::Flapping => {
                 if high_phase(i) {
@@ -442,7 +440,12 @@ pub(crate) fn rig(profile: Profile, expect_transitions: usize) -> Rig {
             }
         })
         .collect();
-    let count = |send: Send| script.iter().filter(|step| step.send as u8 == send as u8).count();
+    let count = |send: Send| {
+        script
+            .iter()
+            .filter(|step| step.send as u8 == send as u8)
+            .count()
+    };
     assert_eq!(
         count(Send::Gate),
         count(Send::Ungate),

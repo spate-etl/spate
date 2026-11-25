@@ -228,7 +228,10 @@ A global cap on bytes admitted into the pipeline but not yet durably
 written (default **256MiB**), with pause/resume hysteresis: sources pause
 above `high_ratio` (default **0.8**) and may resume below `low_ratio`
 (default **0.5**) after at least `min_pause` (default **500ms**; pausing a
-lane is not free for every source, and the hysteresis absorbs that cost).
+lane is not free for every source, and the hysteresis absorbs that cost). A
+pause a queue rejection raised while a shard worker waited for a write permit,
+with usage under the high watermark, ends once no worker waits, without
+`min_pause`.
 
 **Size it against the sizing rule**, which
 [Backpressure](../02-concepts/03-backpressure.mdx#sizing-the-budget) states

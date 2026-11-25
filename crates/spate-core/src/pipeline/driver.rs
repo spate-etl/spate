@@ -1364,6 +1364,33 @@ mod tests {
         assert!(one_rejection_pauses(Site::IdleFlush, true));
     }
 
+    /// A pause a rejection raised while a shard waited for a permit ends once
+    /// the shard gets one, with `min_pause` an hour.
+    #[test]
+    fn a_gated_pause_resumes_once_the_shard_gets_a_permit() {
+        with_driver(
+            ChainMode::BlockOnce(AtomicBool::new(false)),
+            AN_HOUR,
+            AN_HOUR,
+            Some(1),
+            true,
+            |d| {
+                wait_until(HANG, "the batch is taken", || {
+                    d.shared.consumed.load(Ordering::Relaxed) == 1
+                });
+                assert!(d.paused());
+                d.driver.budget.ungate_shard();
+                wait_until(HANG, "the thread resumes", || {
+                    match d.driver.events.try_recv() {
+                        Ok(DriverEvent::ResumeLanes { .. }) => true,
+                        Ok(other) => panic!("unexpected event {other:?}"),
+                        Err(_) => false,
+                    }
+                });
+            },
+        );
+    }
+
     const MIN_PAUSE: Duration = Duration::from_millis(5);
 
     /// Batches that are each rejected once and then taken, for longer than

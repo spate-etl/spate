@@ -69,14 +69,26 @@ counter climbs while a queue is busy even when nothing pauses.
 Pausing a lane is not free for every source, so the pause controller applies
 hysteresis. It releases a lane only once both pressure signals have cleared
 (the budget back below its **low watermark**, the queues back below their
-fill threshold) and a minimum pause has elapsed on top of that. A rejection
+fill threshold) and a minimum pause, `backpressure.min_pause`, has elapsed on
+top of that. The next paragraph describes the one pause that can end without
+the minimum. A rejection
 arriving while paused restarts that timer, since
 it is proof the downstream is still congested. Without the delay, a budget
 resting at the boundary would pause and resume every cycle. Observe it via
 `spate_backpressure_paused`,
-`spate_backpressure_pause_events_total` (a flapping indicator when high),
+`spate_backpressure_pause_events_total` (high when pauses flap, or when they
+cycle with a busy sink's write permits),
 and `spate_backpressure_inflight_bytes` (see
 [Metrics](../../METRICS.md)).
+
+A pause that a queue rejection raised while a shard worker waited for a write
+permit, with the budget under its high watermark, ends once no worker waits and
+both pressure signals have cleared. The worker that gets its permit reads its
+queue again, so the sink can take more records at that point. Under a sink at
+its limit with many write permits, this pause and resume repeat as permits
+free, and `spate_backpressure_pause_events_total` climbs with them while the
+lanes spend little time paused. A source whose pause drops what it had
+prefetched fetches it again after each of these pauses.
 
 Backpressure is resumable mid-batch. If `try_send` fails partway through a
 batch, the chain records the exact resume point, so already-processed records
@@ -178,7 +190,9 @@ Symptoms of an undersized budget: `spate_backpressure_paused` pinned at 1
 or `spate_backpressure_pause_events_total` climbing fast, low sink batch
 sizes, and throughput far below what the sink can absorb, while
 `spate_sink_errors_total` stays quiet. The sink isn't failing; the source
-is being duty-cycled.
+is being duty-cycled. A pause count that climbs while
+`spate_backpressure_inflight_bytes` stays under the high watermark is the
+sink's write permits cycling, and the budget needs no change.
 :::
 
 ## What backpressure looks like when it engages

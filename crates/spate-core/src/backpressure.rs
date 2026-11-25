@@ -6,9 +6,12 @@
 //! crosses its high watermark, or when a `try_send` is rejected while a shard
 //! worker waits for a write permit. A rejection while every worker can take
 //! work pauses only once rejections have lasted `min_pause` with no push
-//! completing. The loop resumes only under hysteresis (usage back below the
-//! low watermark, downstream queues drained, and a minimum pause elapsed),
-//! so pause/resume cannot flap faster than once per `min_pause`.
+//! completing. The loop resumes only under hysteresis: usage back below the
+//! low watermark, downstream queues drained, and a minimum pause elapsed. A
+//! pause a queue rejection raised while a shard worker waited for a permit,
+//! with usage under the high watermark, skips the minimum once no worker
+//! waits, so it cycles with the sink's permits. Every other pause/resume cycle
+//! takes at least `min_pause`.
 //!
 //! Everything here is synchronous and tokio-free. Pipeline threads call it
 //! on every poll iteration, and the [`InflightBudget`] atomics are modeled
@@ -157,6 +160,10 @@ pub struct BackpressureParams {
     /// Kafka partition drops its prefetched messages and refetches on
     /// resume).
     ///
+    /// A pause raised by a queue rejection while a shard worker waits for a
+    /// write permit, with usage under `high_bytes`, does not wait it out.
+    /// It ends once no worker waits and the other resume conditions hold.
+    ///
     /// Also how long queue rejections must last, with no push completing,
     /// before they pause the source while no shard worker waits for a permit
     /// (see [`WatermarkController::on_queue_rejected`]).
@@ -220,14 +227,21 @@ enum State {
 ///
 /// [`WatermarkController::tick`] returns a [`Transition`] and the driver
 /// applies it; the controller calls nothing itself. Transitions strictly
-/// alternate (`Pause`, `Resume`, `Pause`, ...) and each full cycle takes at
-/// least [`BackpressureParams::min_pause`].
+/// alternate (`Pause`, `Resume`, `Pause`, ...). Each full cycle takes at
+/// least [`BackpressureParams::min_pause`], except one whose pause a gated
+/// queue rejection raised (see [`Self::on_queue_rejected`]).
 #[derive(Debug)]
 pub struct WatermarkController<C: Clock = SystemClock> {
     params: BackpressureParams,
     state: State,
     /// A rejection under sink pressure observed since the last `tick`.
     rejected: bool,
+    /// While not paused, the rejection behind `rejected` came while a shard
+    /// worker waited for a write permit. While paused, that rejection raised
+    /// the pause with usage under the high watermark and no run spanning
+    /// `min_pause`, so the pause ends once no worker waits. Cleared on
+    /// resume.
+    gated: bool,
     /// The first and latest rejection of the current run of rejections while
     /// no shard worker waits for a permit. A completed push ends the run.
     contended: Option<(Instant, Instant)>,
@@ -250,6 +264,7 @@ impl<C: Clock> WatermarkController<C> {
             params,
             state: State::Normal,
             rejected: false,
+            gated: false,
             contended: None,
             clock,
         }
@@ -272,13 +287,25 @@ impl<C: Clock> WatermarkController<C> {
     /// from the poll loop's rejection path.
     ///
     /// While `budget` counts a shard whose worker waits for a write permit,
-    /// the sink is the limit and this is [`Self::on_send_rejected`]. Otherwise
-    /// the worker has not reached its queue yet, and the rejection starts or
-    /// extends a run that pauses only once it spans
-    /// [`BackpressureParams::min_pause`]. [`Self::on_push_done`] ends the run.
+    /// the sink is the limit, and the next `tick` pauses as after
+    /// [`Self::on_send_rejected`]. That pause ends once no shard waits and
+    /// the other resume conditions hold, with no minimum pause. It keeps
+    /// [`BackpressureParams::min_pause`] when usage had reached the high
+    /// watermark, or a run of rejections had spanned `min_pause`, on the
+    /// tick that raised it.
+    ///
+    /// While no shard waits, the worker has not reached its queue yet, and
+    /// the rejection starts or extends a run that pauses only once it spans
+    /// `min_pause`. [`Self::on_push_done`] ends the run.
+    ///
     /// While paused, any rejection restarts the minimum-pause timer.
     pub fn on_queue_rejected(&mut self, budget: &InflightBudget) {
-        if budget.gated_shards() > 0 || self.is_paused() {
+        if self.is_paused() {
+            self.on_send_rejected();
+            return;
+        }
+        if budget.gated_shards() > 0 {
+            self.gated = true;
             self.on_send_rejected();
             return;
         }
@@ -300,6 +327,9 @@ impl<C: Clock> WatermarkController<C> {
     /// called at most once, and only while paused with no rejection since the
     /// last tick and usage at or below the low watermark. Returns a transition
     /// for the driver to apply, or `None`.
+    // Without the hint, a split codegen unit can leave `tick` out of line in
+    // the poll loop.
+    #[inline]
     pub fn tick(
         &mut self,
         budget: &InflightBudget,
@@ -312,7 +342,9 @@ impl<C: Clock> WatermarkController<C> {
                 let contended = self.contended.is_some_and(|(first, last)| {
                     last.duration_since(first) >= self.params.min_pause
                 });
-                if self.rejected || contended || budget.usage() >= self.params.high_bytes {
+                let over = budget.usage() >= self.params.high_bytes;
+                if self.rejected || contended || over {
+                    self.gated &= !contended && !over;
                     self.rejected = false;
                     self.contended = None;
                     self.state = State::Paused {
@@ -332,13 +364,25 @@ impl<C: Clock> WatermarkController<C> {
                     return None;
                 }
                 let drained = budget.usage() <= self.params.low_bytes && queues_below_low();
-                if drained && self.clock.now().duration_since(since) >= self.params.min_pause {
+                if drained && self.clock.now().duration_since(since) >= self.floor(budget) {
+                    self.gated = false;
                     self.state = State::Normal;
                     Some(Transition::Resume)
                 } else {
                     None
                 }
             }
+        }
+    }
+
+    /// How long the current pause must last before it can end. A pause the
+    /// sink's permits raised ends once no shard waits for one.
+    #[inline]
+    fn floor(&self, budget: &InflightBudget) -> Duration {
+        if self.gated && budget.gated_shards() == 0 {
+            Duration::ZERO
+        } else {
+            self.params.min_pause
         }
     }
 
@@ -540,6 +584,108 @@ mod tests {
         budget.ungate_shard();
     }
 
+    /// A pause raised while a shard waited for a permit resumes once none
+    /// waits and the queues have drained, before `min_pause`.
+    #[test]
+    fn a_gated_pause_resumes_once_no_shard_waits() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        assert_eq!(ctl.tick(&budget, || true), None, "a shard still waits");
+        budget.ungate_shard();
+        assert_eq!(ctl.tick(&budget, || false), None, "queues not drained");
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A gated rejection that coincides with usage at the high watermark
+    /// raises a pause the budget also asks for, which keeps `min_pause`.
+    #[test]
+    fn a_gated_rejection_at_the_high_watermark_keeps_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.add(800);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        budget.sub(800);
+        assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A gated rejection that arrives during a pause the budget raised
+    /// restarts the timer and leaves the pause on `min_pause`.
+    #[test]
+    fn a_gated_rejection_during_a_high_watermark_pause_keeps_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.add(800);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "a rejection this tick");
+        budget.ungate_shard();
+        budget.sub(800);
+        assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A gated rejection on the tick a run with no shard waiting already
+    /// spans `min_pause` raises a pause the run also asks for, which keeps
+    /// `min_pause`.
+    #[test]
+    fn a_gated_rejection_with_a_spanning_run_keeps_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        clock.advance(MIN_PAUSE);
+        ctl.on_queue_rejected(&budget);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");
+        clock.advance(MIN_PAUSE);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// A gated rejection does not join a run of rejections with no shard
+    /// waiting, so it cannot stretch that run past `min_pause`, and its pause
+    /// ends once no shard waits.
+    #[test]
+    fn a_gated_rejection_after_a_short_run_resumes_once_no_shard_waits() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), None, "one rejection");
+        clock.advance(MIN_PAUSE);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+    }
+
+    /// The pause a gated rejection raised does not carry over to the next
+    /// pause, which `on_send_rejected` raises with no shard waiting.
+    #[test]
+    fn the_next_pause_after_a_gated_one_keeps_min_pause() {
+        let clock = TestClock::frozen();
+        let (mut ctl, budget) = setup(&clock);
+        budget.gate_shard();
+        ctl.on_queue_rejected(&budget);
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        budget.ungate_shard();
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Resume));
+        ctl.on_send_rejected();
+        assert_eq!(ctl.tick(&budget, || true), Some(Transition::Pause));
+        assert_eq!(ctl.tick(&budget, || true), None, "min_pause not elapsed");
+    }
+
     /// With no minimum pause, any queue rejection pauses on the next tick.
     #[test]
     fn a_contended_rejection_pauses_at_once_with_zero_min_pause() {
@@ -735,6 +881,39 @@ mod tests {
                 clock.advance(MIN_PAUSE * 2);
                 let _ = ctl.tick(&budget, || true);
                 prop_assert!(!ctl.is_paused(), "controller wedged in Paused");
+            }
+
+            /// With no shard ever waiting for a permit, every pause lasts at
+            /// least `min_pause`.
+            #[test]
+            fn an_ungated_pause_lasts_min_pause(
+                ops in proptest::collection::vec(
+                    op_strategy().prop_filter("no gating", |op| !matches!(op, Op::Gate | Op::Ungate)),
+                    1..200,
+                ),
+            ) {
+                let clock = TestClock::frozen();
+                let (mut ctl, budget) = setup(&clock);
+                let mut paused_at = None;
+                for op in ops {
+                    match op {
+                        Op::Add(n) => budget.add(n),
+                        Op::Sub(n) => budget.sub(n),
+                        Op::Reject => ctl.on_send_rejected(),
+                        Op::QueueReject => ctl.on_queue_rejected(&budget),
+                        Op::PushDone => ctl.on_push_done(),
+                        Op::Gate | Op::Ungate => unreachable!("filtered out"),
+                        Op::Advance(ms) => clock.advance(Duration::from_millis(ms)),
+                        Op::Tick => match ctl.tick(&budget, || true) {
+                            Some(Transition::Pause) => paused_at = Some(clock.now()),
+                            Some(Transition::Resume) => {
+                                let at = paused_at.take().expect("a resume follows a pause");
+                                prop_assert!(clock.now().duration_since(at) >= MIN_PAUSE);
+                            }
+                            None => {}
+                        },
+                    }
+                }
             }
         }
     }

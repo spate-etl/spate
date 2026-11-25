@@ -348,13 +348,15 @@ pub fn launch_framed<F: Feed + 'static>(
     }
 }
 
-/// The pipeline file a worker reads.
+/// The pipeline file a worker reads. The sink has one write permit, so a held
+/// write keeps the shard waiting and its lanes paused until it is released.
 pub fn pipeline_yaml(source_yaml: &str, feed_section: &str, checkpoint: &str) -> String {
     format!(
         "pipeline: {{ name: feed-worker, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {checkpoint}\nmetrics: {{ exporter: none }}\n\
          source:\n{source_yaml}\
-         sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }} }}\n{feed_section}"
+         sink: {{ capture: {{}}, chunk: {{ target_bytes: 64 }}, \
+         inflight: {{ max_per_shard: 1 }} }}\n{feed_section}"
     )
 }
 

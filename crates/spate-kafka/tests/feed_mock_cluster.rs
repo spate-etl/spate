@@ -1882,7 +1882,7 @@ fn a_committed_read_inside_a_wait_returns_the_refusal() {
 
 /// A work partition the feed seeks to its commit is paused before its fetch
 /// starts, so no fetch completes before the seek and is made again.
-/// Regression for #2427.
+/// Regression for the feed's form of #2427.
 #[test]
 fn a_sought_partition_is_paused_before_its_fetch_starts() {
     let cluster = cluster(1);

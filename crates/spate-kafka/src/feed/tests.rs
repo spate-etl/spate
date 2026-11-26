@@ -4551,7 +4551,7 @@ mod cluster {
 
     /// A feed that is stopping when it accepts an assignment pauses every
     /// partition before its fetch starts, and keeps a partition paused after
-    /// its seek is accepted. Regression for #2427.
+    /// its seek is accepted. Regression for the feed's form of #2427.
     #[test]
     fn a_held_assignment_pauses_every_partition_before_its_fetch_starts() {
         let group = spate_test::unique_name("held-assignment");

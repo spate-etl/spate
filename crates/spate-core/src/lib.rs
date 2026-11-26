@@ -30,7 +30,7 @@ pub mod admin;
 /// one is also fine; versions are compatible per the workspace pin).
 pub use bytes;
 
-// Kept out of loom model builds: its tests build a `sink::RetryConfig`, and
+// Kept out of loom model builds: its tests build a `sink::RetrySection`, and
 // `sink` is compiled out of them.
 #[cfg(not(loom))]
 pub mod backoff;

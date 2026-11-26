@@ -444,7 +444,7 @@ impl<W: ShardWriter> ShardWorker<W> {
     fn seal_reason(&self, acc: &Accumulator) -> Option<FlushReason> {
         if acc.rows >= self.cfg.batch.max_rows {
             Some(FlushReason::Rows)
-        } else if acc.bytes >= self.cfg.batch.max_bytes {
+        } else if acc.bytes >= self.cfg.batch.max_bytes.as_u64() {
             Some(FlushReason::Bytes)
         } else {
             None

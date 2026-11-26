@@ -13,7 +13,8 @@
 
 use crate::clock::LONGEST_DEADLINE;
 use crate::config::{
-    ConfigError, DurationBounds, DurationBoundsError, SectionPath, check_duration, de_byte_size,
+    ConfigError, DurationBounds, DurationBoundsError, SectionPath, check_duration,
+    ser_byte_size_exact,
 };
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -98,16 +99,16 @@ impl QueueSection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct BatchConfig {
+pub struct BatchSection {
     /// Seal at this many rows (for a message-oriented sink, messages).
     ///
     /// Must be at least 1; [`SinkPoolConfig::validate`] rejects `0`.
     pub max_rows: u64,
     /// Seal at this many encoded, uncompressed bytes.
     ///
-    /// Must be at least 1; [`SinkPoolConfig::validate`] rejects `0`.
-    #[serde(deserialize_with = "de_byte_size")]
-    pub max_bytes: u64,
+    /// Must be greater than zero; [`SinkPoolConfig::validate`] rejects `0`.
+    #[serde(serialize_with = "ser_byte_size_exact")]
+    pub max_bytes: ByteSize,
     /// Seal a non-empty batch this long after its first chunk arrived,
     /// bounding latency at low throughput.
     ///
@@ -117,11 +118,11 @@ pub struct BatchConfig {
     pub linger: Duration,
 }
 
-impl Default for BatchConfig {
+impl Default for BatchSection {
     fn default() -> Self {
-        BatchConfig {
+        BatchSection {
             max_rows: 500_000,
-            max_bytes: 128 * 1024 * 1024,
+            max_bytes: ByteSize::mib(128),
             linger: Duration::from_secs(1),
         }
     }
@@ -131,7 +132,7 @@ impl Default for BatchConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct InflightConfig {
+pub struct InflightSection {
     /// Concurrent sealed batches per shard (for a replicated sink, writes to
     /// different replicas). While all permits are taken the worker stops
     /// consuming its queue, which fills and surfaces as backpressure.
@@ -142,9 +143,9 @@ pub struct InflightConfig {
     pub max_per_shard: usize,
 }
 
-impl Default for InflightConfig {
+impl Default for InflightSection {
     fn default() -> Self {
-        InflightConfig { max_per_shard: 2 }
+        InflightSection { max_per_shard: 2 }
     }
 }
 
@@ -153,7 +154,7 @@ impl Default for InflightConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct RetryConfig {
+pub struct RetrySection {
     /// First backoff delay.
     #[serde(with = "humantime_serde")]
     pub initial: Duration,
@@ -170,7 +171,7 @@ pub struct RetryConfig {
     /// abandoned. The at-least-once default.
     ///
     /// An unbounded policy holds its in-flight slot
-    /// ([`InflightConfig::max_per_shard`]) for the whole outage, since a slot
+    /// ([`InflightSection::max_per_shard`]) for the whole outage, since a slot
     /// frees only when its write task ends. That is how a down sink
     /// back-pressures the source rather than buffering, and it means a shard
     /// talking to a dead sink runs at zero in-flight capacity until either the
@@ -178,9 +179,9 @@ pub struct RetryConfig {
     pub max_attempts: u32,
 }
 
-impl Default for RetryConfig {
+impl Default for RetrySection {
     fn default() -> Self {
-        RetryConfig {
+        RetrySection {
             initial: Duration::from_millis(100),
             max: Duration::from_secs(10),
             multiplier: 2.0,
@@ -190,27 +191,30 @@ impl Default for RetryConfig {
     }
 }
 
-/// Why a [`RetryConfig`] was rejected.
+/// Why a [`RetrySection`] was rejected.
 ///
 /// Each message names the offending key relative to the sink's `retry`
 /// section; connectors prepend their own config path when converting it into
 /// their `ConfigError`.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum RetryConfigError {
+pub enum RetrySectionError {
     /// `multiplier` is not a finite number in `[1.0, 1e9]`. Below `1.0` it
     /// asks for a shrinking delay, which the backoff holds at `max` from the
     /// second delay on.
-    #[error("retry.multiplier must be a finite number in [1.0, 1e9] (got {0})")]
+    #[error("retry.multiplier: must be a finite number in [1.0, 1e9] (got {0})")]
     Multiplier(f64),
     /// `jitter` is not a finite fraction in `[0.0, 1.0]`.
-    #[error("retry.jitter must be a finite fraction in [0.0, 1.0] (got {0})")]
+    #[error("retry.jitter: must be a finite fraction in [0.0, 1.0] (got {0})")]
     Jitter(f64),
-    /// `initial` or `max` is zero, leaving no delay to sleep at all.
-    #[error("retry.initial and retry.max must be non-zero")]
-    ZeroDelay,
+    /// `initial` is zero, leaving no delay to sleep at all.
+    #[error("retry.initial: must be greater than zero")]
+    ZeroInitial,
+    /// `max` is zero, leaving no delay to sleep at all.
+    #[error("retry.max: must be greater than zero")]
+    ZeroMax,
     /// `initial` is larger than the ceiling it grows towards.
-    #[error("retry.initial ({initial:?}) must not exceed retry.max ({max:?})")]
+    #[error("retry.initial: ({initial:?}) must not exceed `retry.max` ({max:?})")]
     InitialExceedsMax {
         /// The configured first delay.
         initial: Duration,
@@ -219,14 +223,14 @@ pub enum RetryConfigError {
     },
 }
 
-impl RetryConfig {
+impl RetrySection {
     /// Reject a retry policy that would misbehave at runtime.
     /// [`SinkPoolConfig::validate`] runs it with the rules of the other
     /// sections.
     ///
     /// This is about intent, not safety.
     /// [`Backoff`](crate::backoff::Backoff) never panics for *any*
-    /// `RetryConfig` and always saturates at `max`. It
+    /// `RetrySection` and always saturates at `max`. It
     /// returns a zero delay only for a policy this rejects (`initial` or
     /// `max` of zero), so "never zero" is a property of a **validated**
     /// policy, not of the type. What it catches is a policy no operator
@@ -240,29 +244,32 @@ impl RetryConfig {
     ///
     /// # Errors
     ///
-    /// [`RetryConfigError`], naming the offending key.
+    /// [`RetrySectionError`], naming the offending key.
     ///
     /// ```
-    /// use spate_core::sink::{RetryConfig, RetryConfigError};
+    /// use spate_core::sink::{RetrySection, RetrySectionError};
     ///
-    /// assert!(RetryConfig::default().validate().is_ok());
+    /// assert!(RetrySection::default().validate().is_ok());
     ///
-    /// let mut hot_loop = RetryConfig::default();
+    /// let mut hot_loop = RetrySection::default();
     /// hot_loop.multiplier = 0.5;
-    /// assert_eq!(hot_loop.validate(), Err(RetryConfigError::Multiplier(0.5)));
+    /// assert_eq!(hot_loop.validate(), Err(RetrySectionError::Multiplier(0.5)));
     /// ```
-    pub fn validate(&self) -> Result<(), RetryConfigError> {
+    pub fn validate(&self) -> Result<(), RetrySectionError> {
         if !self.multiplier.is_finite() || !(1.0..=1e9).contains(&self.multiplier) {
-            return Err(RetryConfigError::Multiplier(self.multiplier));
+            return Err(RetrySectionError::Multiplier(self.multiplier));
         }
         if !self.jitter.is_finite() || !(0.0..=1.0).contains(&self.jitter) {
-            return Err(RetryConfigError::Jitter(self.jitter));
+            return Err(RetrySectionError::Jitter(self.jitter));
         }
-        if self.initial.is_zero() || self.max.is_zero() {
-            return Err(RetryConfigError::ZeroDelay);
+        if self.initial.is_zero() {
+            return Err(RetrySectionError::ZeroInitial);
+        }
+        if self.max.is_zero() {
+            return Err(RetrySectionError::ZeroMax);
         }
         if self.initial > self.max {
-            return Err(RetryConfigError::InitialExceedsMax {
+            return Err(RetrySectionError::InitialExceedsMax {
                 initial: self.initial,
                 max: self.max,
             });
@@ -295,7 +302,7 @@ impl RetryConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct BreakerConfig {
+pub struct BreakerSection {
     /// Consecutive failures that open the breaker, quarantining that endpoint.
     ///
     /// Must be at least 1; [`validate`](Self::validate) rejects `0`. At the
@@ -319,9 +326,9 @@ pub struct BreakerConfig {
     pub half_open_probes: u32,
 }
 
-impl Default for BreakerConfig {
+impl Default for BreakerSection {
     fn default() -> Self {
-        BreakerConfig {
+        BreakerSection {
             failure_threshold: 3,
             open_for: Duration::from_secs(5),
             half_open_probes: 1,
@@ -329,7 +336,7 @@ impl Default for BreakerConfig {
     }
 }
 
-impl BreakerConfig {
+impl BreakerSection {
     /// Ceiling on [`open_for`](Self::open_for).
     ///
     /// It is stamped into a deadline, and `Instant + Duration` panics rather
@@ -345,51 +352,45 @@ impl BreakerConfig {
     ///
     /// # Errors
     ///
-    /// [`BreakerConfigError`], naming the offending key.
+    /// [`BreakerSectionError`], naming the offending key.
     ///
     /// ```
-    /// use spate_core::sink::{BreakerConfig, BreakerConfigError};
+    /// use spate_core::sink::{BreakerSection, BreakerSectionError};
     ///
-    /// assert!(BreakerConfig::default().validate().is_ok());
+    /// assert!(BreakerSection::default().validate().is_ok());
     ///
-    /// let mut wedged = BreakerConfig::default();
+    /// let mut wedged = BreakerSection::default();
     /// wedged.half_open_probes = 0;
-    /// assert_eq!(wedged.validate(), Err(BreakerConfigError::ZeroHalfOpenProbes));
+    /// assert_eq!(wedged.validate(), Err(BreakerSectionError::ZeroHalfOpenProbes));
     /// ```
-    pub fn validate(&self) -> Result<(), BreakerConfigError> {
+    pub fn validate(&self) -> Result<(), BreakerSectionError> {
         if self.failure_threshold == 0 {
-            return Err(BreakerConfigError::ZeroFailureThreshold);
+            return Err(BreakerSectionError::ZeroFailureThreshold);
         }
         if self.half_open_probes == 0 {
-            return Err(BreakerConfigError::ZeroHalfOpenProbes);
+            return Err(BreakerSectionError::ZeroHalfOpenProbes);
         }
-        if self.open_for.is_zero() {
-            return Err(BreakerConfigError::ZeroOpenFor);
-        }
-        if self.open_for > Self::MAX_OPEN_FOR {
-            return Err(BreakerConfigError::OpenForTooLong(self.open_for));
-        }
-        Ok(())
+        const OPEN_FOR: DurationBounds =
+            DurationBounds::at_least(Duration::from_nanos(1)).at_most(BreakerSection::MAX_OPEN_FOR);
+        check_duration(self.open_for, OPEN_FOR).map_err(BreakerSectionError::OpenForOutOfRange)
     }
 }
 
-/// Why a [`BreakerConfig`] was rejected.
+/// Why a [`BreakerSection`] was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum BreakerConfigError {
+pub enum BreakerSectionError {
     /// `failure_threshold` is zero, which opens the breaker on the first
     /// failure as `1` does.
-    #[error("breaker.failure_threshold must be at least 1")]
+    #[error("breaker.failure_threshold: must be at least 1")]
     ZeroFailureThreshold,
     /// `half_open_probes` is zero, so no probe budget exists to recover with.
-    #[error("breaker.half_open_probes must be at least 1")]
+    #[error("breaker.half_open_probes: must be at least 1")]
     ZeroHalfOpenProbes,
-    /// `open_for` is zero, which is not a quarantine at all.
-    #[error("breaker.open_for must be non-zero")]
-    ZeroOpenFor,
-    /// `open_for` exceeds [`BreakerConfig::MAX_OPEN_FOR`].
-    #[error("breaker.open_for must not exceed a year (got {0:?})")]
-    OpenForTooLong(Duration),
+    /// `open_for` is zero, which is not a quarantine at all, or exceeds
+    /// [`BreakerSection::MAX_OPEN_FOR`].
+    #[error("breaker.open_for: {0}")]
+    OpenForOutOfRange(DurationBoundsError),
 }
 
 /// Complete sink worker-pool configuration.
@@ -397,13 +398,13 @@ pub enum BreakerConfigError {
 #[non_exhaustive]
 pub struct SinkPoolConfig {
     /// Batch sealing thresholds.
-    pub batch: BatchConfig,
+    pub batch: BatchSection,
     /// In-flight limits.
-    pub inflight: InflightConfig,
+    pub inflight: InflightSection,
     /// Write retry policy.
-    pub retry: RetryConfig,
+    pub retry: RetrySection,
     /// Replica circuit breaker.
-    pub breaker: BreakerConfig,
+    pub breaker: BreakerSection,
 }
 
 impl SinkPoolConfig {
@@ -411,24 +412,24 @@ impl SinkPoolConfig {
     /// from its config.
     ///
     /// ```
-    /// use spate_core::sink::{BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkPoolConfig};
+    /// use spate_core::sink::{BatchSection, BreakerSection, InflightSection, RetrySection, SinkPoolConfig};
     ///
-    /// let mut batch = BatchConfig::default();
+    /// let mut batch = BatchSection::default();
     /// batch.max_rows = 1_000;
     /// let pool = SinkPoolConfig::new(
     ///     batch,
-    ///     InflightConfig::default(),
-    ///     RetryConfig::default(),
-    ///     BreakerConfig::default(),
+    ///     InflightSection::default(),
+    ///     RetrySection::default(),
+    ///     BreakerSection::default(),
     /// );
     /// assert_eq!(pool.batch.max_rows, 1_000);
     /// ```
     #[must_use]
     pub fn new(
-        batch: BatchConfig,
-        inflight: InflightConfig,
-        retry: RetryConfig,
-        breaker: BreakerConfig,
+        batch: BatchSection,
+        inflight: InflightSection,
+        retry: RetrySection,
+        breaker: BreakerSection,
     ) -> SinkPoolConfig {
         SinkPoolConfig {
             batch,
@@ -441,7 +442,7 @@ impl SinkPoolConfig {
     /// Reject a pool configuration that would misbehave at runtime.
     ///
     /// It checks the `batch` and `inflight` keys, then runs
-    /// [`RetryConfig::validate`] and [`BreakerConfig::validate`], and reports
+    /// [`RetrySection::validate`] and [`BreakerSection::validate`], and reports
     /// the first section that fails. Like those, it catches values no
     /// operator means. The pipeline builder runs it when it installs a sink.
     ///
@@ -467,12 +468,12 @@ impl SinkPoolConfig {
     }
 }
 
-impl BatchConfig {
+impl BatchSection {
     fn check(&self) -> Result<(), SinkPoolConfigError> {
         if self.max_rows == 0 {
             return Err(SinkPoolConfigError::ZeroMaxRows);
         }
-        if self.max_bytes == 0 {
+        if self.max_bytes.as_u64() == 0 {
             return Err(SinkPoolConfigError::ZeroMaxBytes);
         }
         const LINGER: DurationBounds =
@@ -482,7 +483,7 @@ impl BatchConfig {
     }
 }
 
-impl InflightConfig {
+impl InflightSection {
     /// The `inflight` rule alone, for the spawn guard.
     pub(crate) fn check(&self) -> Result<(), SinkPoolConfigError> {
         if self.max_per_shard == 0 {
@@ -504,28 +505,28 @@ impl InflightConfig {
 #[non_exhaustive]
 pub enum SinkPoolConfigError {
     /// `batch.max_rows` is zero, which seals every chunk as its own batch.
-    #[error("batch.max_rows must be at least 1")]
+    #[error("batch.max_rows: must be at least 1")]
     ZeroMaxRows,
     /// `batch.max_bytes` is zero, which seals every chunk as its own batch.
-    #[error("batch.max_bytes must be at least 1")]
+    #[error("batch.max_bytes: must be greater than zero")]
     ZeroMaxBytes,
     /// `batch.linger` exceeds a year, past the longest deadline the worker
     /// arms.
-    #[error("batch.linger {0}")]
+    #[error("batch.linger: {0}")]
     LingerTooLong(DurationBoundsError),
     /// `inflight.max_per_shard` is zero, which parks every sealed batch.
-    #[error("inflight.max_per_shard must be at least 1")]
+    #[error("inflight.max_per_shard: must be at least 1")]
     ZeroMaxPerShard,
     /// `inflight.max_per_shard` exceeds tokio's [`Semaphore::MAX_PERMITS`],
     /// which the worker's in-flight semaphore cannot hold.
-    #[error("inflight.max_per_shard must not exceed {max} (got {0})", max = Semaphore::MAX_PERMITS)]
+    #[error("inflight.max_per_shard: must not exceed {max} (got {0})", max = Semaphore::MAX_PERMITS)]
     MaxPerShardTooLarge(usize),
-    /// The `retry` section failed [`RetryConfig::validate`].
+    /// The `retry` section failed [`RetrySection::validate`].
     #[error(transparent)]
-    Retry(#[from] RetryConfigError),
-    /// The `breaker` section failed [`BreakerConfig::validate`].
+    Retry(#[from] RetrySectionError),
+    /// The `breaker` section failed [`BreakerSection::validate`].
     #[error(transparent)]
-    Breaker(#[from] BreakerConfigError),
+    Breaker(#[from] BreakerSectionError),
 }
 
 #[cfg(test)]
@@ -539,7 +540,7 @@ mod tests {
         cfg
     }
 
-    fn retry(mutate: impl FnOnce(&mut RetryConfig)) -> RetryConfig {
+    fn retry(mutate: impl FnOnce(&mut RetrySection)) -> RetrySection {
         tuned(mutate)
     }
 
@@ -580,8 +581,8 @@ mod tests {
             (retry(|c| c.jitter = 1.5), "jitter"),
             (retry(|c| c.jitter = -0.1), "jitter"),
             (retry(|c| c.jitter = f64::NAN), "jitter"),
-            (retry(|c| c.initial = Duration::ZERO), "non-zero"),
-            (retry(|c| c.max = Duration::ZERO), "non-zero"),
+            (retry(|c| c.initial = Duration::ZERO), "retry.initial: "),
+            (retry(|c| c.max = Duration::ZERO), "retry.max: "),
             (
                 retry(|c| {
                     c.initial = Duration::from_secs(10);
@@ -604,24 +605,28 @@ mod tests {
         // Both sinks mirrored these strings before the rules moved here, and
         // their config tests still assert on them under their own prefix.
         assert_eq!(
-            RetryConfigError::Multiplier(0.5).to_string(),
-            "retry.multiplier must be a finite number in [1.0, 1e9] (got 0.5)"
+            RetrySectionError::Multiplier(0.5).to_string(),
+            "retry.multiplier: must be a finite number in [1.0, 1e9] (got 0.5)"
         );
         assert_eq!(
-            RetryConfigError::Jitter(1.5).to_string(),
-            "retry.jitter must be a finite fraction in [0.0, 1.0] (got 1.5)"
+            RetrySectionError::Jitter(1.5).to_string(),
+            "retry.jitter: must be a finite fraction in [0.0, 1.0] (got 1.5)"
         );
         assert_eq!(
-            RetryConfigError::ZeroDelay.to_string(),
-            "retry.initial and retry.max must be non-zero"
+            RetrySectionError::ZeroInitial.to_string(),
+            "retry.initial: must be greater than zero"
         );
         assert_eq!(
-            RetryConfigError::InitialExceedsMax {
+            RetrySectionError::ZeroMax.to_string(),
+            "retry.max: must be greater than zero"
+        );
+        assert_eq!(
+            RetrySectionError::InitialExceedsMax {
                 initial: Duration::from_secs(10),
                 max: Duration::from_secs(1),
             }
             .to_string(),
-            "retry.initial (10s) must not exceed retry.max (1s)"
+            "retry.initial: (10s) must not exceed `retry.max` (1s)"
         );
     }
 
@@ -639,7 +644,7 @@ mod tests {
             .stalls_indefinitely()
         );
         // A short ceiling keeps the retries visibly ticking.
-        assert!(!RetryConfig::default().stalls_indefinitely());
+        assert!(!RetrySection::default().stalls_indefinitely());
         // Right at the threshold is still fine; it is an upper bound.
         assert!(!retry(|c| c.max = Duration::from_secs(300)).stalls_indefinitely());
         assert!(retry(|c| c.max = Duration::from_secs(301)).stalls_indefinitely());
@@ -647,8 +652,8 @@ mod tests {
 
     #[test]
     fn validate_accepts_the_default_and_the_boundaries() {
-        assert!(RetryConfig::default().validate().is_ok());
-        let boundary = RetryConfig {
+        assert!(RetrySection::default().validate().is_ok());
+        let boundary = RetrySection {
             initial: Duration::from_nanos(1),
             max: Duration::from_nanos(1),
             multiplier: 1.0,
@@ -656,15 +661,15 @@ mod tests {
             max_attempts: 0,
         };
         assert!(boundary.validate().is_ok(), "{boundary:?}");
-        let upper = RetryConfig {
+        let upper = RetrySection {
             multiplier: 1e9,
             jitter: 1.0,
-            ..RetryConfig::default()
+            ..RetrySection::default()
         };
         assert!(upper.validate().is_ok(), "{upper:?}");
     }
 
-    fn breaker(mutate: impl FnOnce(&mut BreakerConfig)) -> BreakerConfig {
+    fn breaker(mutate: impl FnOnce(&mut BreakerSection)) -> BreakerSection {
         tuned(mutate)
     }
 
@@ -676,7 +681,7 @@ mod tests {
     fn breaker_validate_rejects_a_budget_no_replica_could_recover_from() {
         assert_eq!(
             breaker(|c| c.failure_threshold = 0).validate(),
-            Err(BreakerConfigError::ZeroFailureThreshold)
+            Err(BreakerSectionError::ZeroFailureThreshold)
         );
         // The threshold is checked first, so a config with both zero names it.
         assert_eq!(
@@ -685,26 +690,31 @@ mod tests {
                 c.half_open_probes = 0;
             })
             .validate(),
-            Err(BreakerConfigError::ZeroFailureThreshold)
+            Err(BreakerSectionError::ZeroFailureThreshold)
         );
         assert_eq!(
             breaker(|c| c.half_open_probes = 0).validate(),
-            Err(BreakerConfigError::ZeroHalfOpenProbes)
+            Err(BreakerSectionError::ZeroHalfOpenProbes)
+        );
+        let refused = |open_for| {
+            breaker(|c| c.open_for = open_for)
+                .validate()
+                .expect_err("out of range")
+                .to_string()
+        };
+        assert_eq!(
+            refused(Duration::ZERO),
+            "breaker.open_for: must be from 1ns to 1year; found 0s"
         );
         assert_eq!(
-            breaker(|c| c.open_for = Duration::ZERO).validate(),
-            Err(BreakerConfigError::ZeroOpenFor)
-        );
-        let too_long = BreakerConfig::MAX_OPEN_FOR + Duration::from_secs(1);
-        assert_eq!(
-            breaker(|c| c.open_for = too_long).validate(),
-            Err(BreakerConfigError::OpenForTooLong(too_long))
+            refused(BreakerSection::MAX_OPEN_FOR + Duration::from_nanos(1)),
+            "breaker.open_for: must be from 1ns to 1year; found 1year 1ns"
         );
     }
 
     #[test]
     fn breaker_validate_accepts_the_default_and_the_boundaries() {
-        assert!(BreakerConfig::default().validate().is_ok());
+        assert!(BreakerSection::default().validate().is_ok());
         // Both ends of every bound, so tightening one shows up here rather
         // than in a connector's load path.
         assert!(breaker(|c| c.half_open_probes = 1).validate().is_ok());
@@ -720,7 +730,7 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            breaker(|c| c.open_for = BreakerConfig::MAX_OPEN_FOR)
+            breaker(|c| c.open_for = BreakerSection::MAX_OPEN_FOR)
                 .validate()
                 .is_ok()
         );
@@ -734,7 +744,7 @@ mod tests {
                 SinkPoolConfigError::ZeroMaxRows,
             ),
             (
-                pool(|c| c.batch.max_bytes = 0),
+                pool(|c| c.batch.max_bytes = ByteSize::b(0)),
                 SinkPoolConfigError::ZeroMaxBytes,
             ),
             (
@@ -743,15 +753,19 @@ mod tests {
             ),
             (
                 pool(|c| c.retry.initial = Duration::ZERO),
-                SinkPoolConfigError::Retry(RetryConfigError::ZeroDelay),
+                SinkPoolConfigError::Retry(RetrySectionError::ZeroInitial),
+            ),
+            (
+                pool(|c| c.retry.max = Duration::ZERO),
+                SinkPoolConfigError::Retry(RetrySectionError::ZeroMax),
             ),
             (
                 pool(|c| c.breaker.failure_threshold = 0),
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
+                SinkPoolConfigError::Breaker(BreakerSectionError::ZeroFailureThreshold),
             ),
             (
                 pool(|c| c.breaker.half_open_probes = 0),
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroHalfOpenProbes),
+                SinkPoolConfigError::Breaker(BreakerSectionError::ZeroHalfOpenProbes),
             ),
         ];
         for (cfg, want) in cases {
@@ -764,14 +778,14 @@ mod tests {
         assert_eq!(SinkPoolConfig::default().validate(), Ok(()));
         let ones = pool(|c| {
             c.batch.max_rows = 1;
-            c.batch.max_bytes = 1;
+            c.batch.max_bytes = ByteSize::b(1);
             c.inflight.max_per_shard = 1;
             c.breaker.failure_threshold = 1;
         });
         assert_eq!(ones.validate(), Ok(()), "{ones:?}");
         let upper = pool(|c| {
             c.batch.max_rows = u64::MAX;
-            c.batch.max_bytes = u64::MAX;
+            c.batch.max_bytes = ByteSize::b(u64::MAX);
             c.batch.linger = LONGEST_DEADLINE;
             c.inflight.max_per_shard = Semaphore::MAX_PERMITS;
             c.breaker.failure_threshold = u32::MAX;
@@ -804,27 +818,27 @@ mod tests {
     /// is refused naming the key, and that `1y` itself passes.
     #[test]
     fn a_yaml_linger_past_a_year_is_refused() {
-        let batch: BatchConfig = serde_yaml::from_str("linger: 300000000000y").expect("parses");
+        let batch: BatchSection = serde_yaml::from_str("linger: 300000000000y").expect("parses");
         let err = pool(|c| c.batch = batch).validate().unwrap_err();
         assert!(
             matches!(err, SinkPoolConfigError::LingerTooLong(_)),
             "{err:?}"
         );
-        assert!(err.to_string().starts_with("batch.linger "), "{err}");
+        assert!(err.to_string().starts_with("batch.linger: "), "{err}");
 
-        let year: BatchConfig = serde_yaml::from_str("linger: 1y").expect("parses");
+        let year: BatchSection = serde_yaml::from_str("linger: 1y").expect("parses");
         assert_eq!(pool(|c| c.batch = year).validate(), Ok(()));
-        let two: BatchConfig = serde_yaml::from_str("linger: 2y").expect("parses");
+        let two: BatchSection = serde_yaml::from_str("linger: 2y").expect("parses");
         assert_eq!(
             pool(|c| c.batch = two).validate().unwrap_err().to_string(),
-            "batch.linger must be from 0s to 1year; found 2years"
+            "batch.linger: must be from 0s to 1year; found 2years"
         );
     }
 
     /// Pins that `breaker.open_for: 1y`, refused by v0.4.0, now loads.
     #[test]
     fn a_yaml_open_for_of_a_year_validates() {
-        let breaker: BreakerConfig = serde_yaml::from_str("open_for: 1y").expect("parses");
+        let breaker: BreakerSection = serde_yaml::from_str("open_for: 1y").expect("parses");
         assert_eq!(breaker.validate(), Ok(()));
     }
 
@@ -833,7 +847,7 @@ mod tests {
     fn pool_validate_reports_the_first_invalid_section() {
         let mut cfg = pool(|c| {
             c.batch.max_rows = 0;
-            c.batch.max_bytes = 0;
+            c.batch.max_bytes = ByteSize::b(0);
             c.inflight.max_per_shard = 0;
             c.retry.initial = Duration::ZERO;
             c.breaker.failure_threshold = 0;
@@ -841,18 +855,18 @@ mod tests {
         assert_eq!(cfg.validate(), Err(SinkPoolConfigError::ZeroMaxRows));
         cfg.batch.max_rows = 1;
         assert_eq!(cfg.validate(), Err(SinkPoolConfigError::ZeroMaxBytes));
-        cfg.batch.max_bytes = 1;
+        cfg.batch.max_bytes = ByteSize::b(1);
         assert_eq!(cfg.validate(), Err(SinkPoolConfigError::ZeroMaxPerShard));
         cfg.inflight.max_per_shard = 1;
         assert_eq!(
             cfg.validate(),
-            Err(SinkPoolConfigError::Retry(RetryConfigError::ZeroDelay))
+            Err(SinkPoolConfigError::Retry(RetrySectionError::ZeroInitial))
         );
         cfg.retry.initial = Duration::from_millis(1);
         assert_eq!(
             cfg.validate(),
             Err(SinkPoolConfigError::Breaker(
-                BreakerConfigError::ZeroFailureThreshold
+                BreakerSectionError::ZeroFailureThreshold
             ))
         );
     }
@@ -864,27 +878,35 @@ mod tests {
         let cases = [
             (
                 SinkPoolConfigError::ZeroMaxRows,
-                "batch.max_rows must be at least 1",
+                "batch.max_rows: must be at least 1",
             ),
             (
                 SinkPoolConfigError::ZeroMaxBytes,
-                "batch.max_bytes must be at least 1",
+                "batch.max_bytes: must be greater than zero",
             ),
             (
                 SinkPoolConfigError::ZeroMaxPerShard,
-                "inflight.max_per_shard must be at least 1",
+                "inflight.max_per_shard: must be at least 1",
             ),
             (
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
-                "breaker.failure_threshold must be at least 1",
+                SinkPoolConfigError::Breaker(BreakerSectionError::ZeroFailureThreshold),
+                "breaker.failure_threshold: must be at least 1",
             ),
             (
-                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroOpenFor),
-                "breaker.open_for must be non-zero",
+                SinkPoolConfigError::Breaker(BreakerSectionError::ZeroHalfOpenProbes),
+                "breaker.half_open_probes: must be at least 1",
             ),
             (
-                SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5)),
-                "retry.multiplier must be a finite number in [1.0, 1e9] (got 0.5)",
+                SinkPoolConfigError::MaxPerShardTooLarge(Semaphore::MAX_PERMITS + 1),
+                &format!(
+                    "inflight.max_per_shard: must not exceed {} (got {})",
+                    Semaphore::MAX_PERMITS,
+                    Semaphore::MAX_PERMITS + 1
+                ),
+            ),
+            (
+                SinkPoolConfigError::Retry(RetrySectionError::Multiplier(0.5)),
+                "retry.multiplier: must be a finite number in [1.0, 1e9] (got 0.5)",
             ),
         ];
         for (err, want) in cases {

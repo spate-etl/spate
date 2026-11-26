@@ -2,6 +2,7 @@
 //! an intake pass that parks on the linger timer does not allocate.
 
 use bytes::Bytes;
+use bytesize::ByteSize;
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckSet;
 use spate_core::error::SinkError;
@@ -55,7 +56,7 @@ fn intake_passes_under_a_lingering_batch_do_not_allocate_each() {
         )];
         let mut cfg = SinkPoolConfig::default();
         cfg.batch.max_rows = u64::MAX;
-        cfg.batch.max_bytes = u64::MAX;
+        cfg.batch.max_bytes = ByteSize::b(u64::MAX);
         cfg.batch.linger = Duration::from_secs(3600);
         let pool = SinkPool::spawn(
             Arc::new(Noop),

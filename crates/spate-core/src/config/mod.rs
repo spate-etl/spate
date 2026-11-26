@@ -97,10 +97,19 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-/// Accept `64KiB`-style sizes on the wire while keeping the field a plain
-/// `u64`. `ByteSize` is a parsing convenience, not part of the typed API.
+/// Accept `64KiB`-style sizes on the wire into a private `u64` field.
 pub(crate) fn de_byte_size<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     ByteSize::deserialize(d).map(|b| b.as_u64())
+}
+
+/// Write a `ByteSize` as its byte count. Its own `Serialize` rounds to one
+/// decimal place, and the sink overlay round-trips each pool block through
+/// its serde form.
+pub(crate) fn ser_byte_size_exact<S: serde::Serializer>(
+    size: &ByteSize,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_u64(size.as_u64())
 }
 
 /// The ceiling on a duration the runtime adds to a clock reading. A day is far
@@ -654,13 +663,13 @@ impl PipelineConfig {
         let fail = |msg: String| Err(ConfigError::Validation(msg));
 
         if self.pipeline.name.trim().is_empty() {
-            return fail("pipeline.name must not be empty".into());
+            return fail("pipeline.name: must not be empty".into());
         }
         if self.pipeline.io_threads == 0 {
-            return fail("pipeline.io_threads must be at least 1".into());
+            return fail("pipeline.io_threads: must be at least 1".into());
         }
         if self.pipeline.threads == Some(0) {
-            return fail("pipeline.threads must be at least 1 when set".into());
+            return fail("pipeline.threads: must be at least 1 when set".into());
         }
         // The commit loop fires once `interval` has passed since the last
         // commit, so an interval below a poll cycle commits on nearly every
@@ -672,25 +681,25 @@ impl PipelineConfig {
             DurationBounds::at_least(Duration::from_millis(100));
         if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL_FLOOR) {
             return fail(format!(
-                "checkpoint.interval {e}: the commit loop fires every interval, so \
+                "checkpoint.interval: {e}: the commit loop fires every interval, so \
                  sub-100ms intervals hammer the source's offset store without \
                  improving durability"
             ));
         }
         if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
-            return fail(format!("checkpoint.interval {e}"));
+            return fail(format!("checkpoint.interval: {e}"));
         }
         if self.checkpoint.max_pending_batches == 0 {
-            return fail("checkpoint.max_pending_batches must be at least 1".into());
+            return fail("checkpoint.max_pending_batches: must be at least 1".into());
         }
         if let Err(e) = check_duration(self.checkpoint.drain_timeout, DRAIN_TIMEOUT) {
-            return fail(format!("checkpoint.drain_timeout {e}"));
+            return fail(format!("checkpoint.drain_timeout: {e}"));
         }
         if self.checkpoint.stalled_fail_after.is_zero() {
-            return fail("checkpoint.stalled_fail_after must be greater than zero".into());
+            return fail("checkpoint.stalled_fail_after: must be greater than zero".into());
         }
         if self.backpressure.max_inflight_bytes.as_u64() == 0 {
-            return fail("backpressure.max_inflight_bytes must be greater than zero".into());
+            return fail("backpressure.max_inflight_bytes: must be greater than zero".into());
         }
         let (low, high) = (self.backpressure.low_ratio, self.backpressure.high_ratio);
         if !(low > 0.0 && low < high && high <= 1.0) {
@@ -707,14 +716,14 @@ impl PipelineConfig {
                 return fail("a `sink:` or `sinks:` section is required".into());
             }
             (None, Some(map)) if map.is_empty() => {
-                return fail("`sinks:` must declare at least one sink".into());
+                return fail("sinks: must not be empty".into());
             }
             _ => {}
         }
         if let Some(sinks) = &self.sinks {
             for name in sinks.keys() {
                 if name.is_empty() {
-                    return fail("`sinks:` names must be non-empty".into());
+                    return fail("sinks: a sink name must not be empty".into());
                 }
                 // "default" maps to the historical component="sink" metric
                 // label, so a sink literally named "sink" would merge its
@@ -811,7 +820,7 @@ impl PipelineConfig {
         ] {
             // Raised to a day, a value under its floor is in range.
             check_duration(value.max(ONE_DAY), bounds)
-                .map_err(|e| ConfigError::Validation(format!("{key} {e}")))?;
+                .map_err(|e| ConfigError::Validation(format!("{key}: {e}")))?;
         }
         Ok(())
     }
@@ -832,7 +841,7 @@ impl PipelineConfig {
             return Ok(());
         };
         check_duration(window, SETTLING_WINDOW)
-            .map_err(|e| ConfigError::Validation(format!("`feed.settling_window` {e}")))
+            .map_err(|e| ConfigError::Validation(format!("feed.settling_window: {e}")))
     }
 
     /// The backend component for the sink named `name`. The single-sink
@@ -1500,7 +1509,7 @@ sinks:
 "#;
         assert!(matches!(
             PipelineConfig::from_str(empty_name),
-            Err(ConfigError::Validation(msg)) if msg.contains("non-empty")
+            Err(ConfigError::Validation(msg)) if msg == "sinks: a sink name must not be empty"
         ));
     }
 
@@ -1563,58 +1572,74 @@ sinks:
         }
     }
 
+    /// Pins each `validate` rule's whole message, each led by its key.
     #[test]
     fn validation_rules() {
+        const TAIL: &str = "source: { m: {} }\nsink: { m: {} }";
+        let floor = "checkpoint.interval: must be at least 100ms; found {}: the commit loop \
+                     fires every interval, so sub-100ms intervals hammer the source's offset \
+                     store without improving durability";
         let cases = [
             (
-                "pipeline: { name: '  ' }\nsource: { m: {} }\nsink: { m: {} }",
-                "pipeline.name",
+                "pipeline: { name: '  ' }",
+                "pipeline.name: must not be empty".to_owned(),
             ),
             (
-                "pipeline: { name: x, io_threads: 0 }\nsource: { m: {} }\nsink: { m: {} }",
-                "io_threads",
+                "pipeline: { name: x, io_threads: 0 }",
+                "pipeline.io_threads: must be at least 1".to_owned(),
             ),
             (
-                "pipeline: { name: x, threads: 0 }\nsource: { m: {} }\nsink: { m: {} }",
-                "threads",
+                "pipeline: { name: x, threads: 0 }",
+                "pipeline.threads: must be at least 1 when set".to_owned(),
             ),
             (
-                "pipeline: { name: x }\ncheckpoint: { interval: 0s }\nsource: { m: {} }\nsink: { m: {} }",
-                "interval",
+                "pipeline: { name: x }\ncheckpoint: { interval: 0s }",
+                floor.replace("{}", "0s"),
             ),
             (
-                "pipeline: { name: x }\ncheckpoint: { interval: 50ms }\nsource: { m: {} }\nsink: { m: {} }",
-                "at least 100ms",
+                "pipeline: { name: x }\ncheckpoint: { interval: 50ms }",
+                floor.replace("{}", "50ms"),
             ),
             (
-                "pipeline: { name: x }\ncheckpoint: { max_pending_batches: 0 }\nsource: { m: {} }\nsink: { m: {} }",
-                "max_pending_batches",
+                "pipeline: { name: x }\ncheckpoint: { max_pending_batches: 0 }",
+                "checkpoint.max_pending_batches: must be at least 1".to_owned(),
             ),
             (
-                "pipeline: { name: x }\ncheckpoint: { drain_timeout: 0s }\nsource: { m: {} }\nsink: { m: {} }",
-                "drain_timeout",
+                "pipeline: { name: x }\ncheckpoint: { drain_timeout: 0s }",
+                "checkpoint.drain_timeout: must be from 1ns to 1day; found 0s".to_owned(),
             ),
             (
-                "pipeline: { name: x }\ncheckpoint: { stalled_fail_after: 0s }\nsource: { m: {} }\nsink: { m: {} }",
-                "stalled_fail_after",
+                "pipeline: { name: x }\ncheckpoint: { stalled_fail_after: 0s }",
+                "checkpoint.stalled_fail_after: must be greater than zero".to_owned(),
             ),
             (
-                "pipeline: { name: x }\nbackpressure: { max_inflight_bytes: 0 }\nsource: { m: {} }\nsink: { m: {} }",
-                "max_inflight_bytes",
+                "pipeline: { name: x }\nbackpressure: { max_inflight_bytes: 0 }",
+                "backpressure.max_inflight_bytes: must be greater than zero".to_owned(),
             ),
             (
-                "pipeline: { name: x }\nbackpressure: { low_ratio: 0.9, high_ratio: 0.8 }\nsource: { m: {} }\nsink: { m: {} }",
-                "low_ratio",
+                "pipeline: { name: x }\nbackpressure: { low_ratio: 0.9, high_ratio: 0.8 }",
+                "backpressure ratios must satisfy 0 < low_ratio < high_ratio <= 1 \
+                 (got low_ratio=0.9, high_ratio=0.8)"
+                    .to_owned(),
             ),
             (
-                "pipeline: { name: x }\nbackpressure: { high_ratio: 1.5 }\nsource: { m: {} }\nsink: { m: {} }",
-                "high_ratio",
+                "pipeline: { name: x }\nbackpressure: { high_ratio: 1.5 }",
+                "backpressure ratios must satisfy 0 < low_ratio < high_ratio <= 1 \
+                 (got low_ratio=0.5, high_ratio=1.5)"
+                    .to_owned(),
             ),
         ];
-        for (yaml, needle) in cases {
-            let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
-            assert!(err.contains(needle), "expected `{needle}` in: {err}");
+        for (head, want) in cases {
+            let err = PipelineConfig::from_str(&format!("{head}\n{TAIL}"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, format!("invalid configuration: {want}"), "{head}");
         }
+        let no_sinks = "pipeline: { name: x }\nsource: { m: {} }\nsinks: {}";
+        assert_eq!(
+            PipelineConfig::from_str(no_sinks).unwrap_err().to_string(),
+            "invalid configuration: sinks: must not be empty"
+        );
     }
 
     /// Pins that `checkpoint.interval` and `checkpoint.drain_timeout` load at
@@ -1636,7 +1661,7 @@ sinks:
             let from = if key == "interval" { "100ms" } else { "1ns" };
             assert!(
                 err.ends_with(&format!(
-                    "checkpoint.{key} must be from {from} to 1day; found 1day 1ns"
+                    "checkpoint.{key}: must be from {from} to 1day; found 1day 1ns"
                 )),
                 "{err}"
             );
@@ -1660,7 +1685,7 @@ sinks:
             .to_string();
         assert_eq!(
             err,
-            "invalid configuration: checkpoint.interval must be at least 100ms; \
+            "invalid configuration: checkpoint.interval: must be at least 100ms; \
              found 99ms 999us 999ns: the commit loop fires every interval, so \
              sub-100ms intervals hammer the source's offset store without \
              improving durability"

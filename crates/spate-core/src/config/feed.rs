@@ -391,7 +391,10 @@ mod tests {
     #[test]
     fn a_zero_settling_window_is_refused() {
         let err = load("{ sqs: {}, settling_window: 0s }").unwrap_err();
-        assert!(err.contains("`feed.settling_window`"), "{err}");
+        assert_eq!(
+            err,
+            "invalid configuration: feed.settling_window: must be from 20s to 1day; found 0s"
+        );
     }
 
     /// Pins the window's floor at one read interval, `20s` loading and
@@ -406,7 +409,7 @@ mod tests {
         let err = load("{ sqs: {}, settling_window: 19s 999ms }").unwrap_err();
         assert_eq!(
             err,
-            "invalid configuration: `feed.settling_window` must be from 20s to 1day; found 19s 999ms"
+            "invalid configuration: feed.settling_window: must be from 20s to 1day; found 19s 999ms"
         );
     }
 
@@ -418,7 +421,9 @@ mod tests {
         for value in ["24h 1s", "1000000years"] {
             let err = load(&format!("{{ sqs: {{}}, settling_window: {value} }}")).unwrap_err();
             assert!(
-                err.contains("`feed.settling_window`") && err.contains("1day"),
+                err.starts_with(
+                    "invalid configuration: feed.settling_window: must be from 20s to 1day; found "
+                ),
                 "{value}: {err}"
             );
         }

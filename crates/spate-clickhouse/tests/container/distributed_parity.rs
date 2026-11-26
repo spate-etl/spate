@@ -49,6 +49,7 @@
 // `spate-ch1-<nonce>` rather than a fixed `ch-shard-0`.
 
 use super::*;
+use bytesize::ByteSize;
 use spate_clickhouse::{ClickHouseDistributedRouter, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::{AckRef, Checkpointer};
@@ -462,7 +463,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let router = sink.router::<Owned<LineRow>>(sku_key);
     let mut pool_cfg = SinkPoolConfig::default();
     pool_cfg.batch.max_rows = 100_000;
-    pool_cfg.batch.max_bytes = 64 * 1024 * 1024;
+    pool_cfg.batch.max_bytes = ByteSize::b(64 * 1024 * 1024);
     pool_cfg.batch.linger = Duration::from_millis(100);
     let writer = Arc::new(sink.writer.clone());
     let encoder = sink.encoder::<Owned<LineRow>>();

@@ -1,0 +1,9 @@
+**Breaking:** **The sink pool blocks are named `*Section`, and every core refusal leads with its key** (`spate-core`)
+
+`BatchConfig`, `InflightConfig`, `RetryConfig` and `BreakerConfig` are renamed `BatchSection`, `InflightSection`, `RetrySection` and `BreakerSection`, and `RetryConfigError` and `BreakerConfigError` are renamed `RetrySectionError` and `BreakerSectionError`. `SinkPoolConfig` and `SinkPoolConfigError` keep their names. The YAML keys are unchanged.
+
+`BatchSection::max_bytes` is a `ByteSize`. In previous versions it was a `u64`. Code that sets it writes `ByteSize::mib(64)` or `ByteSize::b(n)`, and code that reads it calls `as_u64()`. It still serializes as a plain byte count.
+
+`RetrySectionError::ZeroDelay` is replaced by `ZeroInitial` and `ZeroMax`, one for each key. `BreakerSectionError::ZeroOpenFor` and `OpenForTooLong` are replaced by `OpenForOutOfRange`, which holds the `DurationBoundsError`. The accepted values are unchanged: `breaker.open_for` still takes 1ns to a year.
+
+Every refusal from `PipelineConfig::validate`, `SinkPoolConfig::validate` and the pipeline's startup checks leads with the key, a colon, then the rule, such as `sinks.eu: batch.max_rows: must be at least 1`. In previous versions it read `sinks.eu: batch.max_rows must be at least 1`. A zero byte size or a zero duration with no upper bound reads `must be greater than zero`, so `batch.max_bytes: 0` reads `batch.max_bytes: must be greater than zero`, where it read `must be at least 1`. A zero `breaker.open_for` reads `breaker.open_for: must be from 1ns to 1year; found 0s`. An empty `sinks:` map reads `sinks: must not be empty`. A zero `pipeline.threads` or `pipeline.io_threads` reaching `PipelineRuntime::run` names its key, where both read `thread counts must be non-zero`.

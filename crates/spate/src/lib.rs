@@ -151,7 +151,7 @@ pub mod prelude {
     };
     pub use spate_core::record::PartitionId;
     pub use spate_core::sink::{
-        KeyHashRouter, RetryConfig, RetryConfigError, SinkBundle, SinkParts, SinkPoolConfig,
+        KeyHashRouter, RetrySection, RetrySectionError, SinkBundle, SinkParts, SinkPoolConfig,
     };
     pub use spate_core::telemetry::LogFormat;
 }

@@ -70,8 +70,6 @@ Name the type a component is built from `*Config`, and a block nested inside a Y
 
 **Follow:** `CheckpointSection` in [`crates/spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs).
 
-**Departs:** core's sink pool blocks `BatchConfig`, `InflightConfig`, `RetryConfig` and `BreakerConfig` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
-
 **Checked by:** review.
 
 ### Export every type a role's user names from the crate root
@@ -155,6 +153,28 @@ Without the attribute, serde drops the key and the default applies with no warni
 
 **Checked by:** review.
 
+### Word a refused value one way
+
+Start a refusal with the key's path, a colon, then the rule, as `SectionPath::invalid` writes it: `sinks.eu: batch.max_rows: must be at least 1`.
+Put any other key the rule names in backticks.
+When a component refuses a key of another section, the refusal names that section, a colon, then the key in backticks: ``feed: `location` must not be empty``.
+A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka.rdkafka."group.id" cannot be overridden: …`.
+
+Word a zero or empty value by what the key holds:
+
+- a count: `must be at least 1`;
+- a byte size, or a duration with no ceiling: `must be greater than zero`;
+- a duration with a ceiling: the range `check_duration` states, such as `must be from 1ns to 1day; found 0s`;
+- a list or a string: `must not be empty`.
+
+**Why:** an operator then finds the key at the start of every refusal, and a zero reads the same in every connector.
+
+**Follow:** `SinkPoolConfigError` in [`crates/spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs).
+
+**Departs:** messages in the ClickHouse, Kafka, S3, Avro, datagen and SQS crates that name another key without backticks or word a zero another way ([#1604](https://github.com/spate-etl/spate/issues/1604)).
+
+**Checked by:** review.
+
 ### Mark public config types `#[non_exhaustive]`
 
 Mark every public config struct and enum `#[non_exhaustive]`.
@@ -176,6 +196,8 @@ Some timeouts must stay bounded, such as the Kafka sink's `delivery_timeout`, wh
 
 **Why:** every duration key in every connector then takes the same syntax, and a timeout that can be off is turned off the same way everywhere.
 
+A duration that bounds a state, such as how long a watermark may stay stalled, is named for what it measures, as `checkpoint.stalled_fail_after` and `feed.settling_window` are.
+
 **Follow:** `startup_timeout` in [`crates/spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs).
 
 **Departs:** the ClickHouse sink's nested `timeouts:` block, where null turns a timeout off ([#1604](https://github.com/spate-etl/spate/issues/1604)).
@@ -189,8 +211,6 @@ Give every byte-size field the type `ByteSize`, so the YAML value reads `1MiB` a
 **Why:** a byte size then has one type beside its neighbors in every config.
 
 **Follow:** `max_message_bytes` in [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs).
-
-**Departs:** `BatchConfig::max_bytes`, a `u64` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 
@@ -212,9 +232,24 @@ Under `snake_case` it would read `row_binary`, so give that variant an explicit 
 
 Name a map of client settings passed through unread for the system whose documentation defines its keys: `rdkafka` for librdkafka properties, `store` for object_store options, `settings` for ClickHouse query settings.
 
+A client with a passthrough map takes `region` and `endpoint` through it, as the S3 source takes them through `store`.
+A client with no passthrough map takes them as typed keys named `region` and `endpoint`, as the SQS feed does.
+
 **Why:** the key name then tells a user where to look up what goes in the map.
 
-**Follow:** [`crates/spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs).
+**Follow:** [`crates/spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs), and [`crates/spate-sqs/src/config.rs`](repo:crates/spate-sqs/src/config.rs) for typed `region` and `endpoint`.
+
+**Checked by:** review.
+
+### Spell a login `username` and `password`
+
+Name the typed keys that carry a login `username` and `password`, and print `password` redacted in the config's `Debug`.
+
+**Why:** a user then sets a login with the same two keys in every connector.
+
+**Follow:** `AvroRegistrySection` in [`crates/spate-avro/src/config.rs`](repo:crates/spate-avro/src/config.rs).
+
+**Departs:** the ClickHouse sink's `user` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 
@@ -238,6 +273,17 @@ A sink leaves out `batch`, `inflight`, `retry` and `breaker` and passes a defaul
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 
 **Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
+
+**Checked by:** review.
+
+### Name a sink's shard key `shards`
+
+Name the key that sets a sink's shards `shards`.
+Make it a count when the store has no shard layout of its own, as the Kafka sink does, and a list when each shard is one of the store's own, as the ClickHouse sink does.
+
+**Why:** each shard is one of core's shard workers, the unit that `inflight.max_per_shard` and `spate_sink_shard_healthy` count ([Sink sharding](../user-guide/02-concepts/05-sink-sharding.mdx)).
+
+**Follow:** `shards` in [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs) for a count, and in [`crates/spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs) for a list.
 
 **Checked by:** review.
 

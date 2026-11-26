@@ -110,8 +110,9 @@ typed bound for a request, make it cover the whole request.
 client needs a request timeout.
 
 If a duration key has a valid range, refuse a value outside it at load with
-`spate::config::check_duration`, and put the key and the reason for the bound
-around its error.
+`spate::config::check_duration`. Pass its error to `SectionPath::invalid` with
+the key, and add the reason for the bound after it, so the refusal reads
+`sink.example.timeout: must be from 1s to 1h; found 0s`.
 
 ## Client identity
 
@@ -147,7 +148,7 @@ that is not a URL or has no `//` after its scheme, a scheme off the list, and a
 URL that carries a user or a password, so a credential written into a URL fails
 at load, before a client can log it. Pass its error to `SectionPath::invalid`
 with the key, such as
-`sink.example.endpoint: carries userinfo; set them in user and password`.
+``sink.example.endpoint: carries userinfo; set them in `username` and `password` ``.
 
 [Securing connections](../03-guides/securing-connections.mdx) describes what
 an operator then sees.

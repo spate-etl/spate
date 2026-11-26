@@ -35,8 +35,8 @@ mod worker;
 
 pub use bundle::{SinkBundle, SinkParts};
 pub use config::{
-    BatchConfig, BreakerConfig, BreakerConfigError, InflightConfig, QueueSection, RetryConfig,
-    RetryConfigError, SinkPoolConfig, SinkPoolConfigError,
+    BatchSection, BreakerSection, BreakerSectionError, InflightSection, QueueSection, RetrySection,
+    RetrySectionError, SinkPoolConfig, SinkPoolConfigError,
 };
 pub use failures::SinkFailures;
 pub use pool::{DrainReport, SinkPool};
@@ -117,7 +117,7 @@ pub struct EncodedChunk {
     pub frame: Bytes,
     /// The frame's length as the encoder wrote it, before any codec. Equal
     /// to `frame.len()` when the sink has no codec. The in-flight budget and
-    /// [`BatchConfig::max_bytes`] count this length.
+    /// [`BatchSection::max_bytes`] count this length.
     pub raw_len: usize,
     /// Number of rows in `frame`.
     pub rows: u32,
@@ -203,7 +203,7 @@ pub trait RowEncoder<F: RecFamily>: Send {
 /// chunk is queued. The output becomes the chunk's frame, is stored, and is
 /// never recomputed, so every write attempt of a batch, including retries,
 /// sends the same bytes. The in-flight budget and
-/// [`BatchConfig::max_bytes`] count the chunk's length before the codec, so
+/// [`BatchSection::max_bytes`] count the chunk's length before the codec, so
 /// neither depends on what a codec does.
 ///
 /// The contract:

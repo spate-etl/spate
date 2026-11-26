@@ -241,8 +241,9 @@ fn op_version(line: &str) -> Option<u32> {
 }
 
 /// A partition's fetcher starts before the source hands out its lane, so a
-/// pause issued after the assignment is ordered after the fetch start.
-/// Regression for #638.
+/// pause issued after the assignment is ordered after the fetch start, and
+/// the partition is paused before the fetch start too, so no fetch completes
+/// before its queue is split. Regression for #638 and #2427.
 #[test]
 fn the_fetcher_starts_before_the_lane_is_handed_out() {
     let cluster = MockKafka::new();
@@ -284,10 +285,28 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
             .and_then(|l| op_version(l))
     };
     let start = version_of("Start consuming").expect("no fetch start logged");
-    let pause = version_of("Pause ").expect("no pause logged");
+    let ops = |op: &str| -> Vec<u32> {
+        let needle = format!("{op} {partition} (v");
+        lines
+            .iter()
+            .filter(|l| l.contains("librdkafka") && l.contains(&needle))
+            .filter_map(|l| op_version(l))
+            .collect()
+    };
+    let pauses = ops("Pause");
     assert!(
-        start < pause,
-        "fetch start v{start} was issued after the pause v{pause}"
+        pauses.iter().any(|p| *p < start),
+        "fetch start v{start} was issued before the first pause, pauses {pauses:?}"
+    );
+    // The source's own resume is the first above the start; the test's
+    // pause comes after it.
+    let resume = ops("Resume")
+        .into_iter()
+        .find(|r| *r > start)
+        .expect("no resume after the fetch start logged");
+    assert!(
+        pauses.iter().any(|p| start < *p && *p < resume),
+        "no pause between the fetch start v{start} and the resume v{resume}, pauses {pauses:?}"
     );
     let outdated: Vec<_> = lines.iter().filter(|l| l.contains("outdated op")).collect();
     assert!(

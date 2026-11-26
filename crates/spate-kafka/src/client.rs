@@ -488,6 +488,41 @@ pub(crate) fn queued_events<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> u
     }
 }
 
+/// Create the client's object for each partition in `tpl`, so that a pause
+/// before `assign` reaches it.
+///
+/// `pause` skips a partition whose topic the client has not seen, which is
+/// every partition at a client's first assignment. Getting the partition's
+/// queue creates the topic and the partition as `assign` would, and sets no
+/// forwarding.
+pub(crate) fn create_partitions<C: ConsumerContext>(
+    consumer: &BaseConsumer<C>,
+    tpl: &TopicPartitionList,
+) {
+    let rk = consumer.client().native_ptr();
+    for elem in tpl.elements() {
+        // A name librdkafka cannot take is skipped, and `pause` then skips
+        // that partition too.
+        let Ok(topic) = CString::new(elem.topic()) else {
+            continue;
+        };
+        // SAFETY: `consumer` keeps `rk` live for the call, and `topic` is a
+        // NUL-terminated string that outlives it. For a consumer the handle is
+        // null only when the topic cannot be created, and a non-null handle is
+        // released before the next one.
+        unsafe {
+            let q = rdkafka::bindings::rd_kafka_queue_get_partition(
+                rk,
+                topic.as_ptr(),
+                elem.partition(),
+            );
+            if !q.is_null() {
+                rdkafka::bindings::rd_kafka_queue_destroy(q);
+            }
+        }
+    }
+}
+
 /// How many times a drop's serve reads the length of a consumer's queue.
 pub(crate) const DROP_SERVE_PASSES: usize = 4;
 

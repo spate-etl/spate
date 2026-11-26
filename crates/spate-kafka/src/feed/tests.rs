@@ -4518,6 +4518,103 @@ mod cluster {
         assert!(d.paused.contains(&work()));
     }
 
+    /// [`parts_for`] with librdkafka's `topic` debug lines on. They reach the
+    /// thread that polls, here the test's.
+    fn parts_logging_topics(brokers: &str, group: &str) -> (Arc<Core>, Producer, Driver) {
+        let config =
+            KafkaFeedConfig::from_section(&section_with(brokers, group, "    debug: topic\n"))
+                .unwrap();
+        super::super::parts(&config, TWO, SyncClock::system()).unwrap()
+    }
+
+    /// The op versions librdkafka logged for `op` on `partition`, such as
+    /// `Pause units [0] (v2)`, in log order.
+    fn op_versions(lines: &[String], op: &str, partition: &str) -> Vec<u32> {
+        let needle = format!("{op} {partition}");
+        lines
+            .iter()
+            .filter(|l| l.contains("librdkafka") && l.contains(&needle))
+            .filter_map(|l| {
+                let start = l.rfind("(v")? + 2;
+                let len = l[start..].find(')')?;
+                l[start..start + len].parse().ok()
+            })
+            .collect()
+    }
+
+    /// Whether `partition`'s first pause is ordered before its fetch start.
+    fn paused_before_fetch_start(lines: &[String], partition: &str) -> bool {
+        let start = op_versions(lines, "Start consuming", partition);
+        let pause = op_versions(lines, "Pause", partition);
+        matches!((pause.first(), start.first()), (Some(p), Some(s)) if p < s)
+    }
+
+    /// A feed that is stopping when it accepts an assignment pauses every
+    /// partition before its fetch starts, and keeps a partition paused after
+    /// its seek is accepted. Regression for the feed's form of #2427.
+    #[test]
+    fn a_held_assignment_pauses_every_partition_before_its_fetch_starts() {
+        let group = spate_test::unique_name("held-assignment");
+        let cluster = committed_within_the_log(&group);
+        let (core, _producer, mut d) = parts_logging_topics(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Accept));
+        let calls = Arc::new(AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        core.lock().stopping = true;
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            drive(&mut d, "the work partition is sought", |_| {
+                calls.load(Ordering::SeqCst) == 1
+            });
+            assert!(d.validating.is_empty());
+            assert!(d.paused.contains(&work()) && d.paused.contains(&retry()));
+            // Held paused, the work partition is fetched no earlier than the
+            // retry partition: one broker serves both, one fetch at a time.
+            d.consumer.resume(&tpl_of(&[retry()])).unwrap();
+            drive(
+                &mut d,
+                "the retry partition delivers and the queue drains",
+                |d| delivered(d, &retry()) && crate::client::queued_events(&d.consumer) == 0,
+            );
+            assert!(!delivered(&d, &work()));
+        });
+        for partition in ["units [0]", "units-retry [0]"] {
+            assert!(
+                paused_before_fetch_start(&lines, partition),
+                "{partition}: starts {:?}, pauses {:?}",
+                op_versions(&lines, "Start consuming", partition),
+                op_versions(&lines, "Pause", partition)
+            );
+        }
+    }
+
+    /// A feed that is not held pauses only the partition it seeks before the
+    /// partition's fetch starts. A pause of the retry partition, which waits
+    /// on its listed start, would cost it a retry.
+    #[test]
+    fn an_assignment_pauses_only_the_partitions_it_seeks() {
+        let group = spate_test::unique_name("unheld-assignment");
+        let cluster = committed_within_the_log(&group);
+        let (_core, _producer, mut d) = parts_logging_topics(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Accept));
+        let calls = Arc::new(AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            drive(&mut d, "both partitions deliver", |d| {
+                delivered(d, &work()) && delivered(d, &retry())
+            });
+        });
+        assert!(
+            paused_before_fetch_start(&lines, "units [0]"),
+            "starts {:?}, pauses {:?}",
+            op_versions(&lines, "Start consuming", "units [0]"),
+            op_versions(&lines, "Pause", "units [0]")
+        );
+        assert_eq!(
+            op_versions(&lines, "Pause", "units-retry [0]"),
+            Vec::<u32>::new()
+        );
+    }
+
     /// Backpressure that resumes the partitions it paused
     /// leaves a partition waiting for its seek paused, so it reads nothing
     /// from its commit unchecked.

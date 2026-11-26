@@ -1879,3 +1879,52 @@ fn a_committed_read_inside_a_wait_returns_the_refusal() {
         Ok(Some(3))
     );
 }
+
+/// A work partition the feed seeks to its commit is paused before its fetch
+/// starts, so no fetch completes before the seek and is made again.
+/// Regression for the feed's form of #2427.
+#[test]
+fn a_sought_partition_is_paused_before_its_fetch_starts() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let mut job = listed(&brokers, "paused-before-start");
+    let mut past_commit = Vec::new();
+    for i in 0..4 {
+        let rows = recs(&format!("o{i}"), 1);
+        job.publish(&format!("o{i}.ndjson"), &rows);
+        if i >= 2 {
+            past_commit.extend(rows);
+        }
+    }
+    // An epoch on the commit makes the feed seek to it.
+    support::commit_with_epoch(&brokers, &job.group, WORK, 2, 0);
+    job.section.push_str("      debug: topic\n");
+    let clock = TestClock::frozen();
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+        wait_until(HANG, "every unit past the commit is read", || {
+            written(&worker.script) == sorted(past_commit.clone())
+        });
+        assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+    let versions = |op: &str| -> Vec<u32> {
+        let needle = format!("{op} {WORK} [0]");
+        lines
+            .iter()
+            .filter(|l| l.contains("librdkafka") && l.contains(&needle))
+            .filter_map(|l| {
+                let start = l.rfind("(v")? + 2;
+                let len = l[start..].find(')')?;
+                l[start..start + len].parse().ok()
+            })
+            .collect()
+    };
+    let start = *versions("Start consuming")
+        .first()
+        .expect("no fetch start logged");
+    let pause = *versions("Pause").first().expect("no pause logged");
+    assert!(
+        pause < start,
+        "fetch start v{start} was issued before the first pause v{pause}"
+    );
+}

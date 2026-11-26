@@ -43,22 +43,24 @@
 //!    lookup, list, commit, `assign`, resume, lane. Consumers of a process have
 //!    no order among them, and the broker's generation check orders them across
 //!    generations;
-//! 2. `assign(tpl)` — accept the partitions. With concrete offsets the
+//! 2. `pause(tpl)` — before `assign`, so no partition fetches before its
+//!    queue is split and no fetch is discarded and made again. `pause` skips
+//!    a partition the client has not seen, so each partition's client object
+//!    is created first;
+//! 3. `assign(tpl)` — accept the partitions. With concrete offsets the
 //!    fetchers start before `assign` returns. The fetcher of a partition
 //!    left for librdkafka does not start before `assign` returns, and a
 //!    fetcher librdkafka starts later can lose its start to a concurrent
 //!    `pause`/`resume`, which leaves the partition unfetched until the next
 //!    rebalance
 //!    ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591));
-//! 3. `pause(tpl)` — a fetch that completed before it is discarded as
-//!    outdated and refetched, so no message leaks onto the main queue. It also
-//!    waits for the stop of an earlier assignment on this client, which resets
-//!    the position a lane reads;
-//! 4. `split_partition_queue` per partition (must be redone after *every*
+//! 4. `pause(tpl)` again — it waits for the stop of an earlier assignment on
+//!    this client, which resets the position a lane reads;
+//! 5. `split_partition_queue` per partition (must be redone after *every*
 //!    assign, since assign deactivates existing queues) and build lanes;
-//! 5. `resume(tpl)` — messages start flowing into the split queues, which
+//! 6. `resume(tpl)` — messages start flowing into the split queues, which
 //!    buffer until pipeline threads take the lanes over;
-//! 6. return [`SourceEvent::LanesAssigned`].
+//! 7. return [`SourceEvent::LanesAssigned`].
 //!
 //! **Revocation** (spans two `poll_events` calls, or one with nothing live,
 //! where the consumer is released inline):
@@ -109,8 +111,8 @@
 //! the contract.
 
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, list_offsets,
-    listed_offset, send_commit, set_epoch,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, create_partitions, epoch_of,
+    list_offsets, listed_offset, send_commit, set_epoch,
 };
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
@@ -660,7 +662,7 @@ impl KafkaSource {
     }
 
     /// Accept one consumer's assignment from its settled `start` offsets:
-    /// assign → pause → seek → split → resume → lanes. An empty `tpl`
+    /// pause → assign → pause → seek → split → resume → lanes. An empty `tpl`
     /// acknowledges an empty assignment, which the rebalance protocol still
     /// requires. A partition whose seek is refused stays paused until a later
     /// seek is accepted.
@@ -686,9 +688,12 @@ impl KafkaSource {
             .clone()
             .ok_or_else(|| SourceError::fatal("assignment before open()"))?;
 
+        // Paused before `assign`, no partition fetches before its queue is
+        // split, so none fetches a batch that a later pause discards.
+        create_partitions(&consumer, tpl);
+        consumer.pause(tpl).map_err(fatal("pause before assign"))?;
         consumer.assign(start).map_err(fatal("assign"))?;
-        // A fetch that completes before this pause is discarded as outdated
-        // and refetched, so no pre-split message reaches the main queue.
+        // Waits for the stop of an earlier assignment on this client.
         consumer.pause(tpl).map_err(fatal("pause new assignment"))?;
         // A new assignment starts every partition unpaused by the runtime, and
         // with no refused seek left from an assignment before it.

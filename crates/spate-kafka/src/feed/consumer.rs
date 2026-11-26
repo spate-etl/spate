@@ -17,6 +17,10 @@
 //!   ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591)).
 //!   When the committed-offset read fails or times out, the start offset
 //!   is left for librdkafka to resolve, and that window stays open.
+//!   Before `assign`, the thread pauses each partition it will seek to its
+//!   commit, and every partition when the feed is held, so none fetches a
+//!   batch that the seek or the pause then discards. It resumes a sought
+//!   partition once its seek is accepted, unless the feed is held.
 //! - **Revocation.** The thread takes the partitions out of the tracker,
 //!   drops their buffered units, commits each partition up to its first
 //!   unfinished offset, resumes any it paused, and unassigns.
@@ -79,8 +83,8 @@ use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, message_epoch,
-    read_position, send_commit, set_epoch,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, create_partitions, epoch_of,
+    message_epoch, read_position, send_commit, set_epoch,
 };
 use crate::context::{Intent, SourceContext};
 #[cfg(test)]
@@ -559,6 +563,18 @@ impl Driver {
         } else {
             self.start_positions(tpl, until)
         };
+        let held = {
+            let st = self.core.lock();
+            st.stopping || st.held_for_reader() >= READY_CAPACITY
+        };
+        // Paused before `assign`, a partition fetches nothing that a later
+        // pause or seek discards. A held feed pauses every partition, as
+        // `backpressure` would. Otherwise only the partitions to be sought
+        // are paused: a pause and resume of a partition waiting on its listed
+        // start costs it a retry.
+        let early = if held { start.clone() } else { seek.clone() };
+        let sought = if held { Vec::new() } else { self.tps(&seek) };
+        self.pause_before_assign(&early, held);
         // Accepted even when empty: under deferred completion the
         // rebalance stays in progress until `assign` is called.
         if let Err(e) = self.consumer.assign(&start) {
@@ -591,18 +607,20 @@ impl Driver {
             })
             .collect();
         self.hold_validating(refused);
-        let (pause, owned) = {
+        let owned = {
             let mut st = self.core.lock();
             st.tracker.assign_from(started);
-            let pause = st.stopping || st.held_for_reader() >= READY_CAPACITY;
-            (pause, st.tracker.owned().cloned().collect::<Vec<_>>())
+            st.tracker.owned().cloned().collect::<Vec<_>>()
         };
         // Released here, never on the revoke: an eager rebalance revokes
         // everything before handing most of it back.
         self.core.release_consumer_partitions(&owned);
-        if pause {
-            self.pause(tps.clone());
-        }
+        // A partition still waiting for its seek stays paused.
+        let resume: Vec<Tp> = sought
+            .into_iter()
+            .filter(|tp| !self.validating.contains(tp))
+            .collect();
+        self.resume(&resume);
         tracing::info!(
             partitions = tps.len(),
             "the Kafka feed accepted an assignment"
@@ -691,6 +709,35 @@ impl Driver {
         self.waits.lock().expect("waits lock").push(wait);
         if let Some(on_call) = &mut self.on_call {
             on_call(wait);
+        }
+    }
+
+    /// Pause `tpl` ahead of its `assign`, recording the partitions in
+    /// [`paused`](Self::paused) when `held`. A partition `pause` skips is
+    /// left to [`backpressure`](Self::backpressure), which pauses it after
+    /// the `assign`.
+    fn pause_before_assign(&mut self, tpl: &TopicPartitionList, held: bool) {
+        if tpl.count() == 0 {
+            return;
+        }
+        create_partitions(&self.consumer, tpl);
+        match self.consumer.pause(tpl) {
+            Ok(()) if held => {
+                let paused: Vec<Tp> = self
+                    .tps(tpl)
+                    .into_iter()
+                    .zip(tpl.elements())
+                    .filter(|(_, e)| e.error().is_ok())
+                    .map(|(tp, _)| tp)
+                    .collect();
+                self.paused.extend(paused);
+            }
+            Ok(()) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "pausing partitions before accepting their assignment failed; a fetch that \
+                 completes before their seek or pause is made again"
+            ),
         }
     }
 

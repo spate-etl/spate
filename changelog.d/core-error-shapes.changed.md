@@ -6,6 +6,6 @@ Each of these variants prints the wrapped error's text with no prefix of its own
 
 `FatalErrorReport` is removed. `ExitState::Failed` holds the `FatalError` that stopped the run, and `ExitReport::ok` returns it, with the same `component` and `reason` fields. It prints `fatal error in <component>: <reason>`, where it printed `pipeline failed in <component>: <reason>`.
 
-`FatalError`, `ChunkSendError`, `ReservedKeyError`, `UrlRuleError` and `DurationBoundsError` are `#[non_exhaustive]`. Code outside `spate-core` builds a `FatalError` with the new `FatalError::new`, and matches a rejected chunk as `ChunkSendError(chunk, ..)`. `ChunkSendError` implements `std::error::Error`. The `Debug` of an `EncodedChunk`, and of anything holding one, shows the frame's length and not its bytes.
+`FatalError`, `ChunkSendError`, `ReservedKeyError`, `UrlRuleError` and `DurationBoundsError` are `#[non_exhaustive]`. Code outside `spate-core` builds a `FatalError` with the new `FatalError::new`, and matches a rejected chunk as `ChunkSendError(chunk, ..)`. `ChunkSendError` implements `std::error::Error`. The `Debug` of an `EncodedChunk`, and of anything holding one, shows the frame as its length, so it prints no record content.
 
 `RetrySectionError::Multiplier` and `RetrySectionError::Jitter` are renamed `MultiplierOutOfRange` and `JitterOutOfRange`. Their messages are unchanged.

@@ -2,7 +2,9 @@
 
 use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
-use spate_core::config::{ConfigError, FeedSection, SectionPath, UrlRule, redact};
+use spate_core::config::{
+    ConfigError, DurationBounds, FeedSection, SectionPath, UrlRule, check_duration, redact,
+};
 use spate_core::tls::{TlsSection, is_https};
 use std::fmt;
 use std::time::Duration;
@@ -102,13 +104,12 @@ impl SqsFeedConfig {
                  queue's `maxReceiveCount`",
             ));
         }
-        if let Some(window) = section.settling_window
-            && window < MIN_SETTLING_WINDOW
-        {
-            return Err(at.error(format!(
-                "`settling_window` must be at least 1m on `sqs`, whose message counts take \
-                     at least a minute to settle; got {window:?}"
-            )));
+        if let Some(window) = section.settling_window {
+            check_duration(window, DurationBounds::at_least(MIN_SETTLING_WINDOW)).map_err(|e| {
+                at.error(format!(
+                    "`settling_window` {e}: `sqs` message counts take at least a minute to settle"
+                ))
+            })?;
         }
         config.validate()?;
         Ok(config)
@@ -516,11 +517,13 @@ pub(crate) mod tests {
             refusal(SqsFeedConfig::from_section(&s)),
             (
                 "feed.sqs".to_owned(),
-                "feed.sqs: `settling_window` must be at least 1m on `sqs`, whose message counts \
-                 take at least a minute to settle; got 59s"
+                "feed.sqs: `settling_window` must be at least 1m; found 59s: `sqs` message \
+                 counts take at least a minute to settle"
                     .to_owned()
             )
         );
+        s.settling_window = Some(MIN_SETTLING_WINDOW);
+        SqsFeedConfig::from_section(&s).expect("a settling window of exactly 1m is accepted");
     }
 
     /// Pins the refusals: another backend's tag, reported at the section,

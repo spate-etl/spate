@@ -306,9 +306,10 @@ impl AvroDeserializerConfig {
             Some(registry) if self.mode == AvroMode::Confluent => {
                 let url = registry_url(&registry.url)?;
                 if registry.password.is_some() && registry.username.is_none() {
-                    return Err(
-                        at.invalid("registry.password", "is set, but registry.username is not")
-                    );
+                    return Err(at.invalid(
+                        "registry.password",
+                        "is set, but `registry.username` is not",
+                    ));
                 }
                 Some((registry, url))
             }
@@ -342,7 +343,7 @@ impl AvroDeserializerConfig {
                 if registry.tls.root_ca.is_some() && url.scheme() != "https" {
                     return Err(at.invalid(
                         "registry.tls.root_ca",
-                        "is set, but registry.url is not https://",
+                        "is set, but `registry.url` is not https://",
                     ));
                 }
                 Checked::Confluent { registry, url }
@@ -774,7 +775,7 @@ mod tests {
         ] {
             assert_eq!(
                 error.to_string(),
-                "deserializer.avro.registry.password: is set, but registry.username is not"
+                "deserializer.avro.registry.password: is set, but `registry.username` is not"
             );
             assert!(!format!("{error:?}").contains("s3cret"), "{error:?}");
         }
@@ -958,7 +959,7 @@ mod tests {
         let rt = runtime();
         assert_eq!(
             refusal(build(&config, &rt)),
-            "deserializer.avro.registry.tls.root_ca: is set, but registry.url is not https://"
+            "deserializer.avro.registry.tls.root_ca: is set, but `registry.url` is not https://"
         );
     }
 
@@ -1059,12 +1060,12 @@ mod tests {
                 "url userinfo",
                 AvroDeserializerConfig::confluent(AvroRegistrySection::new("http://u:p@sr")),
                 "deserializer.avro.registry.url: carries userinfo; set them in \
-                 registry.username and registry.password",
+                 `registry.username` and `registry.password`",
             ),
             (
                 "password without username",
                 AvroDeserializerConfig::confluent(password_only),
-                "deserializer.avro.registry.password: is set, but registry.username is not",
+                "deserializer.avro.registry.password: is set, but `registry.username` is not",
             ),
             (
                 "ttl floor",
@@ -1094,7 +1095,7 @@ mod tests {
             (
                 "root_ca over http",
                 AvroDeserializerConfig::confluent(http_root_ca),
-                "deserializer.avro.registry.tls.root_ca: is set, but registry.url is not https://",
+                "deserializer.avro.registry.tls.root_ca: is set, but `registry.url` is not https://",
             ),
             (
                 "raw without schema",
@@ -1390,11 +1391,11 @@ mod tests {
             (
                 with_registry(AvroRegistrySection::new("http://urluser:urlsecret@sr")),
                 "deserializer.avro.registry.url: carries userinfo; set them in \
-                 registry.username and registry.password",
+                 `registry.username` and `registry.password`",
             ),
             (
                 with_registry(password_only),
-                "deserializer.avro.registry.password: is set, but registry.username is not",
+                "deserializer.avro.registry.password: is set, but `registry.username` is not",
             ),
         ] {
             assert_eq!(refusal(build(&config, &rt)), expected);

@@ -139,7 +139,8 @@ batches were abandoned (see below; the report's `sink_drain` field says so).
 A source that reaches the end of its input is held to more, needing every
 batch acknowledged and the final commit persisted, or the run exits `Failed`.
 A pipeline thread that does not stop also fails the run, with the component
-`driver-N` for the first such thread.
+`driver-N` for the first such thread, unless the run has already failed for
+another reason.
 `ExitState::Failed` carries the failing component and reason; Kubernetes
 restarts the pod and the data replays.
 
@@ -188,10 +189,10 @@ backstop would become the normal path instead of the never-fires path.
 A pipeline thread stops when it takes its shutdown message between lane polls.
 A lane whose `poll` blocks past its `timeout` keeps the thread from taking it.
 `run` waits for each pipeline thread until 500ms past the drivers' deadline.
-A thread still running then is logged at `ERROR` with how long ago it last
-showed progress, and the run exits `Failed`. A recent heartbeat means the
-thread loops without taking its message, and an old one means it is held in a
-call.
+A thread still running then is logged at `ERROR` with its heartbeat age, the
+time since it last went round its loop, and the run exits `Failed`. A recent
+heartbeat means the thread loops without taking its message, and an old one
+means it is held in a call.
 
 The thread runs on with its lanes, its chain and its `ShardQueues` clone. The
 sink drain then starts with no time left, so the sink abandons what it holds,
@@ -209,9 +210,9 @@ The drivers' deadline depends on how the drain started:
   threads to stop within `drain_timeout` and gives up 500ms after that.
 
 The thread ends when it next returns from the call that held it, or when the
-process exits. A program that calls `run` again in the same process under the
-same pipeline name fails to start until the old thread ends, because that
-thread still holds its metric series.
+process exits. Building another pipeline with the same name in the same
+process fails until the old thread ends, because that thread still holds the
+pipeline's shard-queue metrics.
 
 ### Leaked queues {#leaked-queues-bounded-loud-contained}
 

@@ -87,8 +87,9 @@ a run whose thread is late only by a lane drop.
   pushes meet queues no worker reads, and its backpressure gauges, which keep
   their last value in an application that embeds Spate.
 - Bad, because the thread keeps its shard-queue clone, which holds the queue
-  depth claims. A second `run` in the same process with the same pipeline name
-  fails with `StartError::Metrics` until the thread ends, as INV-10 requires.
+  depth claims. Building a second pipeline in the same process with the same
+  name fails with `BuildError::Metrics` until the thread ends, as INV-10
+  requires.
 - Bad, because a thread that ends on its own more than 500 ms past its deadline
   now fails the run. By reading, a flush blocked to the deadline is followed
   only by lane and chain drops, and no shipped lane has a `Drop` impl of its

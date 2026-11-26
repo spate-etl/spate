@@ -73,8 +73,8 @@ The drivers' deadline depends on the branch:
 A second stop signal was left out because the thread already has one: a thread
 that misses the message would miss the flag for the same reason. A grace of
 1 s needed a longer controller wait, which moves the final commit later in the
-5 s that the defaults leave before Kubernetes' kill. A grace of 100 ms would fail
-a run whose thread is late only by a lane drop.
+5 s that the defaults leave before Kubernetes' kill. A grace of 100 ms would
+fail a run whose thread is late only by a lane drop.
 
 ### Consequences
 

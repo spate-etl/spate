@@ -345,7 +345,8 @@ several objects takes one of `units_held`, and its lane reads them in turn.
 On the ETag-pinned ranged path, read-ahead memory grows with active lanes,
 current GET windows and backing windows retained by queued chunks. A lane reads
 its next window while it hands on the current one, including the first window
-of the next object in a unit. As
+of the next object in a unit. A paused lane finishes the window it is reading
+ahead and starts no other. As
 [`spate-s3/src/fetch.rs`](repo:crates/spate-s3/src/fetch.rs) shows, chunks share
 an entire GET buffer, so the previous window, the current window and the next
 window can coexist. That overlap uses about `3 × units_held × prefetch_bytes`

@@ -141,16 +141,17 @@ Consequences worth designing around:
 
 The gate stops the framework *taking* data, and a source client can keep
 buffering ahead of it. A partition that stays at the ceiling for
-`backpressure.min_pause` therefore also has its lanes paused at the source, so
-the client stops fetching for it. The lanes resume when the gate reopens.
+`backpressure.min_pause` therefore also has its lanes paused at the source, and
+the client stops fetching for it, at once or after a delay the source's page
+states. The lanes resume when the gate reopens.
 `spate_checkpoint_ceiling_pauses_total` counts these pauses.
 
 A partition that reaches the ceiling and leaves it within `min_pause` is not
 paused, because a pause can cost a source the data it has buffered. With
 `min_pause` at zero the pause is requested as soon as the partition reaches
-the ceiling. A longer `min_pause` leaves the client fetching for that long.
-What it buffers in that time is governed by the client's own settings and
-sits outside this ceiling.
+the ceiling. A longer `min_pause` leaves the client fetching for at least that
+long. What it buffers in that time is governed by the client's own settings
+and sits outside this ceiling.
 
 ## Sizing the budget {#sizing-the-budget}
 

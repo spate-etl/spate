@@ -42,8 +42,17 @@ impl DurationBounds {
 
     /// Bounds that accept anything longer than `floor`, and refuse `floor`
     /// itself.
+    ///
+    /// # Panics
+    ///
+    /// If `floor` is [`Duration::MAX`], which no value is longer than. In a
+    /// `const` item this fails to compile.
     #[must_use]
     pub const fn above(floor: Duration) -> Self {
+        assert!(
+            floor.as_nanos() < Duration::MAX.as_nanos(),
+            "an exclusive duration floor must be below Duration::MAX"
+        );
         Self {
             exclusive_floor: true,
             ..Self::at_least(floor)
@@ -395,6 +404,15 @@ mod tests {
     fn a_ceiling_at_an_exclusive_floor_panics_at_construction() {
         let floor = Duration::from_secs(5);
         let _ = DurationBounds::above(floor).at_most(floor);
+    }
+
+    /// Pins that an exclusive floor no value is longer than is refused when
+    /// the bounds are built.
+    #[test]
+    #[should_panic(expected = "an exclusive duration floor must be below Duration::MAX")]
+    fn an_exclusive_floor_at_the_maximum_panics_at_construction() {
+        let floor = Duration::MAX;
+        let _ = DurationBounds::above(floor);
     }
 
     /// Pins that `or_zero` on an exclusive zero floor, which would then accept

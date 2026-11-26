@@ -1292,8 +1292,9 @@ shards:
     /// and keeps the user and setting names. Regression for #754.
     #[test]
     fn debug_never_prints_password_or_settings_values() {
-        let yaml =
-            format!("{MINIMAL}username: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n");
+        let yaml = format!(
+            "{MINIMAL}username: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n"
+        );
         let builder = ClickHouseSinkBuilder::from_component_config(&component(&yaml)).unwrap();
         let printed = format!("{builder:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
@@ -1457,9 +1458,8 @@ settings: { insert_quorum: "auto" }
     /// A builder for table `t` on one replica at `url`, with a 7 s startup
     /// bound on `clock` and `extra` appended to its section.
     fn bounded_builder(url: &str, clock: &SyncClock, extra: &str) -> ClickHouseSinkBuilder {
-        let section = format!(
-            "table: t\nshards: [{{replicas: [\"{url}\"]}}]\nstartup_timeout: 7s\n{extra}"
-        );
+        let section =
+            format!("table: t\nshards: [{{replicas: [\"{url}\"]}}]\nstartup_timeout: 7s\n{extra}");
         on_clock(
             ClickHouseSinkBuilder::from_component_config(&component(&section)).unwrap(),
             clock,
@@ -1586,7 +1586,10 @@ settings: { insert_quorum: "auto" }
         let mock = Mock::new();
         mock.add(handlers::provide(id_column()));
         mock.add(handlers::provide::<u8>([1u8]));
-        let section = format!("table: t\nshards: [{{replicas: [\"{}\"]}}]\n{extra}", mock.url());
+        let section = format!(
+            "table: t\nshards: [{{replicas: [\"{}\"]}}]\n{extra}",
+            mock.url()
+        );
         let sink = ClickHouseSinkBuilder::from_component_config(&component(&section))
             .unwrap()
             .connect::<spate_core::deser::Owned<IdOnly>>()
@@ -2346,10 +2349,7 @@ settings: { insert_quorum: "auto" }
         let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
             "table: t\nshards: []\n",
         )));
-        assert_eq!(
-            err,
-            "sinks.eu.clickhouse.shards: must not be empty"
-        );
+        assert_eq!(err, "sinks.eu.clickhouse.shards: must not be empty");
 
         let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
             &format!("{MINIMAL}settings: {{insert_deduplicate: \"0\"}}\n"),

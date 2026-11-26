@@ -172,8 +172,6 @@ Word a zero or empty value by what the key holds:
 
 **Follow:** `SinkPoolConfigError` in [`crates/spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs).
 
-**Departs:** `visibility` on `sqs` is checked by hand in wording of its own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
-
 **Checked by:** review.
 
 ### Mark public config types `#[non_exhaustive]`

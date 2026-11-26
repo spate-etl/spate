@@ -2385,7 +2385,7 @@ impl Source for KafkaSource {
             for member in &mut self.members {
                 if let Some(&p) = member.assignment.get(lane) {
                     // A pause that has not reached the client leaves nothing
-                    // to resume, and a resume would drop the prefetch.
+                    // to resume there.
                     if let Some(EnginePause::Due(_)) = member.engine_paused.remove(&p) {
                         continue;
                     }

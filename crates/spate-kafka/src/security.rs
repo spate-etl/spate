@@ -53,7 +53,7 @@ fn check(
         {
             return Err(at.invalid(
                 "tls.root_ca",
-                "needs rdkafka.\"security.protocol\" set to ssl or sasl_ssl, the \
+                "needs `rdkafka.\"security.protocol\"` set to ssl or sasl_ssl, the \
                  protocols under which librdkafka verifies the broker",
             ));
         }

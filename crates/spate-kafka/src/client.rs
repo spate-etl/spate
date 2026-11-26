@@ -1815,12 +1815,13 @@ mod tests {
                 let msg = loaded
                     .expect_err(&format!("{path} {protocol:?}"))
                     .to_string();
-                assert!(
-                    msg.starts_with(&format!(
-                        "{path}.tls.root_ca: needs rdkafka.\"security.protocol\" set to ssl \
-                         or sasl_ssl"
-                    )),
-                    "{protocol:?}: {msg}"
+                assert_eq!(
+                    msg,
+                    format!(
+                        "{path}.tls.root_ca: needs `rdkafka.\"security.protocol\"` set to ssl \
+                         or sasl_ssl, the protocols under which librdkafka verifies the broker"
+                    ),
+                    "{protocol:?}"
                 );
             }
         }

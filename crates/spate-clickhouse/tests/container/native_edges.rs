@@ -58,7 +58,7 @@ async fn native_edge_case_columns_match_the_literal_row() {
     let sink = sink_with::<Owned<EdgeRow>>(
         &srv.url,
         "native_edges",
-        "format: native\nuser: default\npassword: edges-secret\n",
+        "format: native\nusername: default\npassword: edges-secret\n",
     )
     .await;
     let mut encoder = sink.encoder::<Owned<EdgeRow>>();

@@ -46,8 +46,9 @@ paused at the consumer by the same 2 s, and a pipeline that keeps polling its
 lanes still keeps the prefetch.
 
 Each lane counts its polls in the state it shares with the source. A pause
-records its instant and the count when it begins, after which the pipeline
-thread polls the lane no more. A resume that finds the pause not yet at the
+records its instant and the count when the source receives it. The pipeline
+thread stops polling the lane before it asks for the pause, and polls it again
+only after its own resume. A resume that finds the pause not yet at the
 consumer keeps both. A pause before the count moves takes that instant back, and
 one after it starts a new 2 s wait. Time the lane spends resumed but not yet
 polled counts, because the partition fetches unchecked then too. Everything else

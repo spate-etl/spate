@@ -379,8 +379,9 @@ pipeline took. Until a pause reaches the consumer, the partition keeps fetching
 up to `queued.min.messages` and `queued.max.messages.kbytes`. On a topic that
 carries aborted transactions those limits do not count the aborted records, so
 for those 2 seconds the client can take in more than the limits. A poll of the
-lane frees what the aborted records held, and until a resumed lane is polled
-they stay held.
+lane frees what the aborted records held. A lane the runtime has resumed and
+the pipeline thread has not polled yet holds them and takes in more, with no
+bound in time.
 
 A pause raised while the sink is the limit, with the budget under its high
 watermark, ends once no shard waits for a write permit, without

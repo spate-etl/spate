@@ -172,8 +172,9 @@ const CLIENT_PAUSE_WAIT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EnginePause {
     /// Not paused at the client yet; due at `at`. `polls` is the partition's
-    /// poll count when the pause began, after which the pipeline thread polls
-    /// the lane no more.
+    /// poll count when the source recorded the pause. The pipeline thread
+    /// stops polling the lane before it asks for the pause, so a higher count
+    /// means it has resumed the lane and polled it.
     Due { at: Instant, polls: u64 },
     /// Resumed by the runtime before its pause reached the client. A pause
     /// while the partition's poll count is still `polls` keeps `at`.
@@ -3006,6 +3007,26 @@ mod tests {
         clock.advance(CLIENT_PAUSE_WAIT * 3 / 4);
         poll_quiet(&mut source);
         source.pause(&[LaneId(0)]).expect("pause");
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+    }
+
+    /// After a poll restarts the wait, a later pause with no poll since keeps
+    /// the restarted instant.
+    #[test]
+    fn a_restarted_wait_is_kept_across_a_later_unpolled_pause() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        let shared = Arc::new(Shared::new(None, -1));
+        source.members[0].watermarks.insert(0, Arc::clone(&shared));
+        source.pause(&[LaneId(0)]).expect("pause");
+        source.resume(&[LaneId(0)]).expect("resume");
+        shared.polls.fetch_add(1, Ordering::Relaxed);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        source.resume(&[LaneId(0)]).expect("resume");
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
         poll_quiet(&mut source);
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
     }

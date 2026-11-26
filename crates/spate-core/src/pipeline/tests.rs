@@ -4871,8 +4871,9 @@ fn joined(h: &Harness) {
 /// A run that holds pipeline threads past their deadline.
 struct StuckRun {
     h: Harness,
-    /// The pipeline and stop clock, frozen at the start.
-    clock: Arc<crate::clock::TestClock>,
+    /// The pipeline clock, frozen at the start, and the stop clock that reads
+    /// it.
+    clock: Arc<RunClock>,
     /// Each sender releases one held poll when it fires or drops.
     release: Vec<mpsc::Sender<()>>,
     /// Chain flushes before the run was told to stop.
@@ -4890,7 +4891,11 @@ fn start_stuck(
 ) -> StuckRun {
     let mut cfg = stop_config(Duration::from_millis(100));
     cfg.pipeline.threads = Some(threads);
-    let clock = crate::clock::TestClock::frozen();
+    let clock = Arc::new(RunClock {
+        clock: crate::clock::TestClock::frozen(),
+        reader: Mutex::new(None),
+        reads: AtomicUsize::new(0),
+    });
     let (reached_tx, reached) = mpsc::channel();
     let mut release = Vec::new();
     let mut polls = Vec::new();
@@ -4909,11 +4914,12 @@ fn start_stuck(
         },
         move |runtime, _| {
             runtime
-                .with_clock(Arc::clone(&run_clock) as _)
+                .with_clock(Arc::clone(&run_clock.clock) as _)
                 .with_stop_clock(run_clock)
         },
         mode_factory,
     );
+    *clock.reader.lock().unwrap() = Some(h.join.thread().id());
     // Lanes go to the least-loaded thread, the lowest index first.
     h.script.lock().unwrap().push_back(Script::Assign(
         (0..held)
@@ -5030,6 +5036,10 @@ fn a_thread_that_stops_within_the_grace_is_joined() {
     run.h.shutdown.trigger();
     run.wait_for_shutdown();
     run.clock.advance(Duration::from_millis(599));
+    // Past the drivers' deadline, so the controller stops waiting for the
+    // thread and `run` starts its join. Between the stop and the join, `run`
+    // reads the stop clock nowhere else.
+    run.clock.wait_for_reads();
     let abandoned = run.abandon_lines();
     let report = run.release_and_join().expect("the run starts");
     assert!(
@@ -5063,6 +5073,27 @@ fn a_controller_panic_does_not_wait_on_a_thread_that_never_stops() {
         abandoned[0].contains("thread=0 heartbeat_age=600ms"),
         "{abandoned:?}"
     );
+}
+
+/// After a controller panic, a pipeline thread that ends before the grace past
+/// the deadline it was stopped by runs out is joined, and nothing is logged as
+/// abandoned.
+#[test]
+fn a_controller_panic_joins_a_thread_that_stops_within_the_grace() {
+    let run = start_stuck(2, 1, ok_chain);
+    run.h.script.lock().unwrap().push_back(Script::PanicPoll);
+    run.wait_for_shutdown();
+    run.clock.advance(Duration::from_millis(599));
+    // Between the panic and the join, `run` reads the stop clock only to set
+    // the threads' deadline, so two more reads mean it is in the join.
+    run.clock.wait_for_reads();
+    let abandoned = run.abandon_lines();
+    let report = run.release_and_join().expect("the run starts");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a controller panic fails the run: {:?}", report.state);
+    };
+    assert_eq!(failure.component, "controller");
+    assert_eq!(abandoned, Vec::<String>::new());
 }
 
 /// A pipeline thread that panics outside the batch guard, here in its

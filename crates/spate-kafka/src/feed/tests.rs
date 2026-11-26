@@ -4570,9 +4570,11 @@ mod cluster {
             // Held paused, the work partition is fetched no earlier than the
             // retry partition: one broker serves both, one fetch at a time.
             d.consumer.resume(&tpl_of(&[retry()])).unwrap();
-            drive(&mut d, "the retry partition delivers and the queue drains", |d| {
-                delivered(d, &retry()) && crate::client::queued_events(&d.consumer) == 0
-            });
+            drive(
+                &mut d,
+                "the retry partition delivers and the queue drains",
+                |d| delivered(d, &retry()) && crate::client::queued_events(&d.consumer) == 0,
+            );
             assert!(!delivered(&d, &work()));
         });
         for partition in ["units [0]", "units-retry [0]"] {
@@ -4607,7 +4609,10 @@ mod cluster {
             op_versions(&lines, "Start consuming", "units [0]"),
             op_versions(&lines, "Pause", "units [0]")
         );
-        assert_eq!(op_versions(&lines, "Pause", "units-retry [0]"), Vec::<u32>::new());
+        assert_eq!(
+            op_versions(&lines, "Pause", "units-retry [0]"),
+            Vec::<u32>::new()
+        );
     }
 
     /// Backpressure that resumes the partitions it paused

@@ -201,7 +201,7 @@ impl DatagenSourceConfig {
         if self.events_per_tick == 0 {
             return Err(at.invalid(
                 "events_per_tick",
-                "must be at least 1 (set tick_interval: 0s to run unthrottled instead)",
+                "must be at least 1 (set `tick_interval` to 0s to run unthrottled instead)",
             ));
         }
         if let Some(count) = self.count {
@@ -215,10 +215,10 @@ impl DatagenSourceConfig {
                 return Err(at.invalid(
                     "count",
                     format!(
-                        "({count}) is below source.datagen.partitions ({}): the total splits \
-                         as count / partitions = {} events per lane with the first {} lanes \
-                         taking one more, so {} lane(s) would be born exhausted — lower \
-                         partitions or raise count",
+                        "({count}) is below `partitions` ({}): the total splits as `count` / \
+                         `partitions` = {} events per lane with the first {} lanes taking one \
+                         more, so {} lane(s) would be born exhausted — lower `partitions` or \
+                         raise `count`",
                         self.partitions,
                         count / u64::from(self.partitions),
                         count % u64::from(self.partitions),
@@ -347,8 +347,8 @@ mod tests {
                     events_per_tick: 0,
                     ..DatagenSourceConfig::default()
                 },
-                "source.datagen.events_per_tick: must be at least 1 (set tick_interval: 0s to \
-                 run unthrottled instead)"
+                "source.datagen.events_per_tick: must be at least 1 (set `tick_interval` to 0s \
+                 to run unthrottled instead)"
                     .to_owned(),
             ),
             (
@@ -365,10 +365,10 @@ mod tests {
                     count: Some(5),
                     ..DatagenSourceConfig::default()
                 },
-                "source.datagen.count: (5) is below source.datagen.partitions (8): the total \
-                 splits as count / partitions = 0 events per lane with the first 5 lanes taking \
-                 one more, so 3 lane(s) would be born exhausted — lower partitions or raise \
-                 count"
+                "source.datagen.count: (5) is below `partitions` (8): the total splits as \
+                 `count` / `partitions` = 0 events per lane with the first 5 lanes taking one \
+                 more, so 3 lane(s) would be born exhausted — lower `partitions` or raise \
+                 `count`"
                     .to_owned(),
             ),
         ];
@@ -424,7 +424,7 @@ mod tests {
             DatagenSourceConfig::from_component_config(&section("  partitions: 8\n  count: 4\n"))
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("count / partitions"), "{err}");
+        assert!(err.contains("`count` / `partitions`"), "{err}");
         assert!(err.contains("4 lane(s) would be born exhausted"), "{err}");
     }
 

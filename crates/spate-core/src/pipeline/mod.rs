@@ -174,26 +174,8 @@ pub enum ExitState {
     Completed,
     /// A fatal error stopped the pipeline; the process should exit
     /// non-zero.
-    Failed(FatalErrorReport),
+    Failed(FatalError),
 }
-
-/// Owned copy of the fatal error carried in the exit report.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct FatalErrorReport {
-    /// Component that failed.
-    pub component: String,
-    /// Human-readable cause.
-    pub reason: String,
-}
-
-impl std::fmt::Display for FatalErrorReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pipeline failed in {}: {}", self.component, self.reason)
-    }
-}
-
-impl std::error::Error for FatalErrorReport {}
 
 /// Outcome of [`PipelineRuntime::run`].
 #[derive(Debug)]
@@ -245,8 +227,8 @@ impl ExitReport {
 
     /// The report as a `Result`, so a `main` can `?` a failed run: a clean
     /// exit passes the report through, a failure returns the
-    /// [`FatalErrorReport`] as the error.
-    pub fn ok(self) -> Result<ExitReport, FatalErrorReport> {
+    /// [`FatalError`] as the error.
+    pub fn ok(self) -> Result<ExitReport, FatalError> {
         match &self.state {
             ExitState::Completed => Ok(self),
             ExitState::Failed(failure) => Err(failure.clone()),

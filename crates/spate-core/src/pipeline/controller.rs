@@ -6,7 +6,7 @@
 //! implementation never needs internal locking for the control plane.
 
 use super::runtime::StopRequest;
-use super::{DriverEvent, ExitState, FatalErrorReport, PauseCause, ThreadControl};
+use super::{DriverEvent, ExitState, PauseCause, ThreadControl};
 use crate::admin::HealthState;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::Checkpointer;
@@ -606,10 +606,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
 
     let report = ControllerReport {
         state: match state.failure {
-            Some(e) => ExitState::Failed(FatalErrorReport {
-                component: e.component,
-                reason: e.reason,
-            }),
+            Some(e) => ExitState::Failed(e),
             None => ExitState::Completed,
         },
         final_watermarks: state.committed.into_iter().collect(),

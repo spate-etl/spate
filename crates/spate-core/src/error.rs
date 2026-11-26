@@ -37,13 +37,35 @@ pub enum ErrorClass {
 /// An unrecoverable pipeline failure: an invariant was violated or a
 /// `Fail`-policy stage tripped. The pipeline transitions to `Failed`, the
 /// partition watermarks stop advancing, and the process exits non-zero.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("fatal error in {component}: {reason}")]
+#[non_exhaustive]
 pub struct FatalError {
     /// Component id where the failure originated.
     pub component: String,
     /// Human-readable cause.
     pub reason: String,
+}
+
+impl FatalError {
+    /// A failure in `component` with a human-readable `reason`. Code outside
+    /// this crate builds one here, as the struct is `#[non_exhaustive]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::error::FatalError;
+    ///
+    /// let e = FatalError::new("sink", "schema mismatch");
+    /// assert_eq!(e.to_string(), "fatal error in sink: schema mismatch");
+    /// ```
+    #[must_use]
+    pub fn new(component: impl Into<String>, reason: impl Into<String>) -> FatalError {
+        FatalError {
+            component: component.into(),
+            reason: reason.into(),
+        }
+    }
 }
 
 /// A payload could not be deserialized.

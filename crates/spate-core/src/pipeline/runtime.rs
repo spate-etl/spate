@@ -2,14 +2,16 @@
 
 use super::controller::{CLOSE_SHARE, ControllerContext, ControllerSignal, run_controller};
 use super::driver::{DriverContext, DriverExit, DriverParams, backpressure_params, run_driver};
-use super::{DriverEvent, ExitReport, ExitState, FatalErrorReport, SinkRuntime, ThreadControl};
+use super::{DriverEvent, ExitReport, ExitState, SinkRuntime, ThreadControl};
 use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, SystemClock, deadline_after};
 use crate::config::{
-    HANDING_BACK_DRAIN_TIMEOUT, MetricsExporter, PinningMode, PipelineConfig, check_duration,
+    ConfigError, HANDING_BACK_DRAIN_TIMEOUT, MetricsExporter, PinningMode, PipelineConfig,
+    check_duration,
 };
+use crate::error::FatalError;
 use crate::feed::memory::{self, MemoryFeed};
 use crate::feed::{
     DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, Feed, FeedMetricsCtx, FeedOrigin, MeteredFeed,
@@ -17,8 +19,8 @@ use crate::feed::{
 };
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter, FeedMetrics,
-    InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,
-    MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsError,
+    MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::sink::SinkProbeFn;
@@ -166,11 +168,12 @@ impl std::fmt::Debug for StopRequest {
 #[non_exhaustive]
 pub enum StartError {
     /// Invalid effective configuration.
-    #[error("invalid runtime configuration: {0}")]
-    Config(String),
-    /// The metrics exporter could not be installed.
-    #[error("metrics: {0}")]
-    Metrics(String),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The metrics exporter could not be installed, or another live handle
+    /// set already owns a metric series this pipeline would publish.
+    #[error(transparent)]
+    Metrics(#[from] MetricsError),
     /// The admin server could not take its address. Set `admin.listen` to a
     /// free address, or to `none` for a pipeline that needs no server.
     #[error("admin.listen: cannot bind {addr}: {source}")]
@@ -180,7 +183,8 @@ pub enum StartError {
         /// Why the kernel refused it.
         source: std::io::Error,
     },
-    /// The I/O runtime or a pipeline thread could not start.
+    /// The I/O runtime, a pipeline thread or the controller thread could not
+    /// start.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -401,46 +405,43 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         cpu::log_once();
         let threads = self.thread_count();
         if threads == 0 {
-            return Err(StartError::Config(
-                "pipeline.threads: must be at least 1".into(),
-            ));
+            return Err(
+                ConfigError::Validation("pipeline.threads: must be at least 1".into()).into(),
+            );
         }
         if self.config.pipeline.io_threads == 0 {
-            return Err(StartError::Config(
-                "pipeline.io_threads: must be at least 1".into(),
-            ));
+            return Err(
+                ConfigError::Validation("pipeline.io_threads: must be at least 1".into()).into(),
+            );
         }
         if self.options.max_records == 0 {
-            return Err(StartError::Config(
+            return Err(ConfigError::Validation(
                 "`RuntimeOptions::max_records` must be at least 1".into(),
-            ));
+            )
+            .into());
         }
         if self.io.as_ref().is_some_and(|io| {
             io.handle().runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
         }) {
-            return Err(StartError::Config(
+            return Err(ConfigError::Validation(
                 "the I/O runtime must be multi-thread: a current-thread runtime runs no \
                  spawned task while `run` waits on the controller"
                     .into(),
-            ));
+            )
+            .into());
         }
-        self.config
-            .reject_keys_on_memory()
-            .map_err(|e| StartError::Config(e.to_string()))?;
-        self.config
-            .reject_bad_settling_window()
-            .map_err(|e| StartError::Config(e.to_string()))?;
-        self.config
-            .reject_checkpoint_above_a_day()
-            .map_err(|e| StartError::Config(e.to_string()))?;
+        self.config.reject_keys_on_memory()?;
+        self.config.reject_bad_settling_window()?;
+        self.config.reject_checkpoint_above_a_day()?;
         if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
             let named = section.backend().type_tag();
             if feed.backend() != named {
-                return Err(StartError::Config(format!(
+                return Err(ConfigError::Validation(format!(
                     "the feed passed to `{}` is `{}`, but `feed:` names `{named}`",
                     passed_to(*origin),
                     feed.backend()
-                )));
+                ))
+                .into());
             }
         }
         let mut resolved_feed = None;
@@ -449,16 +450,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 let (feed, origin) = match given {
                     Some(given) => given,
                     None if section.backend().type_tag() == memory::BACKEND => {
-                        let feed = MemoryFeed::from_section(section)
-                            .map_err(|e| StartError::Config(e.to_string()))?;
+                        let feed = MemoryFeed::from_section(section)?;
                         (Arc::new(feed) as Arc<dyn Feed>, FeedOrigin::Section)
                     }
                     None => {
-                        return Err(StartError::Config(format!(
+                        return Err(ConfigError::Validation(format!(
                             "the `{}` feed backend is built in code: build it from the `feed:` \
                              section and pass it to `Pipeline::feed`",
                             section.backend().type_tag()
-                        )));
+                        ))
+                        .into());
                     }
                 };
                 if feed.hands_back() {
@@ -467,7 +468,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         HANDING_BACK_DRAIN_TIMEOUT,
                     )
                     .map_err(|e| {
-                        StartError::Config(format!(
+                        ConfigError::Validation(format!(
                             "checkpoint.drain_timeout: {e}: the `{}` feed stops reading {} \
                              before the drain deadline to hand its units back",
                             feed.backend(),
@@ -478,10 +479,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 resolved_feed = Some((section, feed, origin));
             }
             (None, Some((_, origin))) => {
-                return Err(StartError::Config(format!(
+                return Err(ConfigError::Validation(format!(
                     "a feed was given with `{}`, but the file has no `feed:` section naming it",
                     passed_to(origin)
-                )));
+                ))
+                .into());
             }
             (None, None) => {}
         }
@@ -505,8 +507,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // Fallible: a second live pipeline of this name in one process would
         // publish state and lifecycle gauges over this one's (see "Series
         // ownership" in `docs/METRICS.md`). Refuse to start instead.
-        let pipeline_metrics = PipelineMetrics::try_new(&runtime_labels, &self.options.version)
-            .map_err(|e| StartError::Metrics(e.to_string()))?;
+        let pipeline_metrics = PipelineMetrics::try_new(&runtime_labels, &self.options.version)?;
         pipeline_metrics.set_state(PipelineState::Starting);
         pipeline_metrics.set_threads(threads);
 
@@ -517,27 +518,21 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let checkpoint_metrics = CheckpointMetrics::try_new(
             &ComponentLabels::new(pipeline_name.clone(), "checkpoint", "checkpoint"),
             self.config.metrics.per_partition_detail,
-        )
-        .map_err(|e| StartError::Metrics(e.to_string()))?;
+        )?;
         // The owner of the budget gauge. One series per pipeline; the
         // drivers' `BackpressureMetrics` carry the pause series per thread.
-        let budget_metrics = InflightBudgetMetrics::try_new(&runtime_labels)
-            .map_err(|e| StartError::Metrics(e.to_string()))?;
+        let budget_metrics = InflightBudgetMetrics::try_new(&runtime_labels)?;
         // The owner of the I/O busy gauge, which this thread samples while it
         // waits on the controller below.
-        let io_busy_metrics = IoRuntimeMetrics::try_new(&runtime_labels)
-            .map_err(|e| StartError::Metrics(e.to_string()))?;
+        let io_busy_metrics = IoRuntimeMetrics::try_new(&runtime_labels)?;
         // The owner of the source series. It publishes active lanes, and its
         // clone goes to the source, which is the only thing that can measure
         // lag. The per-thread instances are shadows of this one.
-        let controller_source_metrics = Arc::new(
-            SourceMetrics::try_new(&ComponentLabels::new(
-                pipeline_name.clone(),
-                "source",
-                source_ct.clone(),
-            ))
-            .map_err(|e| StartError::Metrics(e.to_string()))?,
-        );
+        let controller_source_metrics = Arc::new(SourceMetrics::try_new(&ComponentLabels::new(
+            pipeline_name.clone(),
+            "source",
+            source_ct.clone(),
+        ))?);
 
         // The feed's handles, and those its backend resolves from its `Meter`,
         // bind to the recorder installed above, so the feed is wrapped and
@@ -548,8 +543,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     pipeline_name.clone(),
                     "feed",
                     feed.backend().to_owned(),
-                ))
-                .map_err(|e| StartError::Metrics(e.to_string()))?;
+                ))?;
                 let feed = Arc::new(MeteredFeed::new(feed, metrics, Arc::clone(&self.clock)));
                 feed.attach_metrics(
                     FeedMetricsCtx::new(Meter::for_component(
@@ -561,8 +555,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     .with_partition_detail(self.config.metrics.per_partition_detail),
                 );
                 self.source
-                    .configure_feed(section, Arc::clone(&feed) as Arc<dyn Feed>, origin)
-                    .map_err(|e| StartError::Config(e.to_string()))?;
+                    .configure_feed(section, Arc::clone(&feed) as Arc<dyn Feed>, origin)?;
                 Some(feed)
             }
             None => None,
@@ -574,9 +567,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let mut chains = Vec::with_capacity(threads);
         for i in 0..threads {
             let chain = (self.chains)(i);
-            chain
-                .check_source_framing(source_framing)
-                .map_err(|e| StartError::Config(e.to_string()))?;
+            chain.check_source_framing(source_framing)?;
             chains.push(chain);
         }
 
@@ -843,7 +834,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // Main: wait for the controller's choreography.
         let mut sink_drain = None;
-        let mut driver_failure: Option<FatalErrorReport> = None;
+        let mut driver_failure: Option<FatalError> = None;
         let sink_runtime = self.sink;
         let mut drain_fn = Some(sink_runtime.drain);
         drop(sink_runtime.queues);
@@ -922,7 +913,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         sink_drain = Some(io.block_on(drain(drain_timeout)));
                     }
                     break (
-                        ExitState::Failed(FatalErrorReport {
+                        ExitState::Failed(FatalError {
                             component: "controller".into(),
                             reason: "controller thread panicked".into(),
                         }),
@@ -1148,7 +1139,7 @@ fn join_drivers(
     by: Instant,
     clock: &dyn Clock,
     health: &HealthState,
-) -> Option<FatalErrorReport> {
+) -> Option<FatalError> {
     let mut failure = None;
     for (thread, handle) in handles.into_iter().enumerate() {
         let reason = match handle.join_by(by, clock) {
@@ -1167,7 +1158,7 @@ fn join_drivers(
                 )
             }
         };
-        failure.get_or_insert(FatalErrorReport {
+        failure.get_or_insert(FatalError {
             component: format!("driver-{thread}"),
             reason,
         });
@@ -1179,10 +1170,10 @@ fn join_drivers(
 /// already owns the process. The pipeline keeps running against the
 /// existing recorder with a detached (empty-rendering) handle for the
 /// admin server. Shared by the runtime and the pipeline builder.
-pub(crate) fn install_or_reuse(settings: &MetricsSettings) -> Result<MetricsHandle, StartError> {
+pub(crate) fn install_or_reuse(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError> {
     match metrics::install(settings) {
         Ok(h) => Ok(h),
-        Err(metrics::MetricsError::AlreadyInstalled) => {
+        Err(MetricsError::AlreadyInstalled) => {
             tracing::warn!(
                 "a metrics recorder is already installed; continuing \
                  with the existing one and a detached render handle"
@@ -1191,9 +1182,8 @@ pub(crate) fn install_or_reuse(settings: &MetricsSettings) -> Result<MetricsHand
                 exporter: Exporter::None,
                 ..settings.clone()
             })
-            .map_err(|e| StartError::Metrics(e.to_string()))
         }
-        Err(e) => Err(StartError::Metrics(e.to_string())),
+        Err(e) => Err(e),
     }
 }
 

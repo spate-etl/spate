@@ -108,6 +108,7 @@ impl<'a> UrlRule<'a> {
 /// key in front of it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
+#[non_exhaustive]
 pub struct UrlRuleError(Refusal);
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -117,6 +117,7 @@ fn exact(key: &str) -> Cow<'_, str> {
 /// the value.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{path}.\"{written}\" cannot be overridden: {why}{}", Spelling(self))]
+#[non_exhaustive]
 pub struct ReservedKeyError {
     path: String,
     written: String,

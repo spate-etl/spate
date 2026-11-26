@@ -135,7 +135,6 @@ One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
 A meaning that belongs to one role, such as `NotReady` on a deserializer, stays on that role.
 
 **Departs:** core's role error types have other shapes, and the ClickHouse sink returns its own `SchemaError` and `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)).
-The `FatalError` type is not `#[non_exhaustive]` ([#1605](https://github.com/spate-etl/spate/issues/1605)).
 Until core's types change, a connector uses them as they are.
 
 **Checked by:** review.

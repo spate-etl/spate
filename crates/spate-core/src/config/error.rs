@@ -60,7 +60,10 @@ pub enum ConfigError {
         message: String,
     },
 
-    /// The YAML parsed but violates a cross-field rule.
+    /// The YAML parsed but violates a cross-field rule, or a configuration
+    /// built in code breaks a rule the runtime checks at start, such as a
+    /// zero [`RuntimeOptions::max_records`](crate::pipeline::RuntimeOptions::max_records)
+    /// or a feed passed in code that the `feed:` section does not name.
     #[error("invalid configuration: {0}")]
     Validation(String),
 }

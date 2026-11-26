@@ -174,7 +174,10 @@ pub enum MetricsError {
     #[error("failed to build the metrics exporter: {0}")]
     Build(String),
     /// Another live handle set already owns this gauge series (two pipelines,
-    /// or two components sharing a name, in one process).
+    /// or two components sharing a name, in one process). Gauge series cannot
+    /// be shared, so assembly stops here rather than letting one of the two
+    /// publish readings the other overwrites. A pipeline rebuilt
+    /// *sequentially* is fine: drop the old one first.
     #[error(
         "metric series {0} already has a live owner in this process; \
          gauge series cannot be shared (rename the component or the pipeline)"

@@ -63,7 +63,7 @@ pub enum SchemaError {
     Mismatch(String),
     /// A replica answered the `SELECT 1` that carries `deduplicate_insert` and
     /// the `settings` passthrough with an error, or gave no answer within
-    /// `timeouts.startup`. The usual cause is a setting it refuses, by name
+    /// `startup_timeout`. The usual cause is a setting it refuses, by name
     /// or by value, or a constraint pinning `deduplicate_insert`.
     #[error("sink.clickhouse: replica {url} failed the settings check: {reason}")]
     Settings {

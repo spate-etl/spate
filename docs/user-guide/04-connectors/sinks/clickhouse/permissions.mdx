@@ -10,8 +10,8 @@ conditional: the default configuration needs a single `INSERT`, and each extra
 grant is pulled in only by a specific feature.
 
 Everything runs over the **HTTP interface** with the account named by the
-`user:`/`password:` config fields. Grant these to that account (directly or via
-a role), on **every replica of every shard** in the `shards:` list; the sink
+`username:`/`password:` config fields. Grant these to that account (directly or
+via a role), on **every replica of every shard** in the `shards:` list; the sink
 writes direct-to-shard, so each node sees the traffic first-hand.
 
 :::note Your own table grants are assumed
@@ -116,8 +116,8 @@ tables above. An account with only the grants on this page, and no
 
 ## Related
 
-- [ClickHouse sink](./README.mdx) — the full config reference; `user`/`password`
-  name the account these grants apply to.
+- [ClickHouse sink](./README.mdx) — the full config reference;
+  `username`/`password` name the account these grants apply to.
 - [Schema validation](./schema-validation.mdx) — the `system.columns` read the
   `INSERT` grant already covers.
 - [Native format](./native-format.mdx) — `format: native`, which reads the

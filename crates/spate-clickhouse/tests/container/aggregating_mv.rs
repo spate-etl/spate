@@ -108,7 +108,7 @@ async fn null_sink(url: &str) -> config::ClickHouseSink {
     sink_with::<Owned<OrderRollup>>(
         url,
         "orders_null",
-        "user: default\npassword: agg-secret\n\
+        "username: default\npassword: agg-secret\n\
          settings: { deduplicate_blocks_in_dependent_materialized_views: \"1\" }",
     )
     .await
@@ -240,7 +240,7 @@ async fn direct_insert_into_aggregate_function_column_is_rejected() {
     let err = try_sink_with::<Owned<AggDirectRow>>(
         &srv.url,
         "orders_agg",
-        "user: default\npassword: agg-secret\n",
+        "username: default\npassword: agg-secret\n",
     )
     .await
     .expect_err("the sink must refuse to write aggregate states directly");

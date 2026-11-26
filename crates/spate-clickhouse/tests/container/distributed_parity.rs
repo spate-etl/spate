@@ -437,7 +437,7 @@ async fn parity_sink(
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         "table: {table}\n\
          shards:\n{shard_lines}\
-         user: default\n\
+         username: default\n\
          password: {pw}\n\
          {check}",
         check = check.unwrap_or_default(),

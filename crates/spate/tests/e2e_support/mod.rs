@@ -703,7 +703,7 @@ sink:
   clickhouse:
     table: {table}
     shards:
-{shards_yaml}    user: default
+{shards_yaml}    username: default
     password: {password}
 "#,
             name = self.name,

@@ -34,7 +34,7 @@ sink:
     table: ${CLICKHOUSE_TABLE:-orders_null}
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-    user: ${CLICKHOUSE_USER:-default}
+    username: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
     # Repointing this at the AggregatingMergeTree fails fast when the sink is
     # built: it cannot write aggregate states directly.

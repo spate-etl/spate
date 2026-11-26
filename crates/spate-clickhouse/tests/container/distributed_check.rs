@@ -41,7 +41,7 @@ async fn checked_sink(url: &str, cluster: &str, dist_table: &str) -> config::Cli
 table: orders
 shards:
   - replicas: ["{url}"]
-user: default
+username: default
 password: {PW}
 distributed_check:
   cluster: {cluster}

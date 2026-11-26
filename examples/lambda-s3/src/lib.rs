@@ -42,7 +42,7 @@ sink:
     format: native
     shards:
       - replicas: ["${CLICKHOUSE_URL}"]
-    user: ${CLICKHOUSE_USER:-default}
+    username: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
 # ANCHOR_END: config
 "#;

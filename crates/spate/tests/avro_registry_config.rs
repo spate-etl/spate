@@ -24,8 +24,8 @@ fn avro_registry_credentials_rejected_at_configuration_load() {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "deserializer.avro.registry.url: carries userinfo; set them in registry.username \
-             and registry.password"
+            "deserializer.avro.registry.url: carries userinfo; set them in \
+             `registry.username` and `registry.password`"
         );
         for printed in [error.to_string(), format!("{error:?}")] {
             for field in ["registry.url", "registry.username", "registry.password"] {

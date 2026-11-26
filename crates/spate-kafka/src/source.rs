@@ -1524,8 +1524,8 @@ impl KafkaSource {
                     ) {
                         tracing::error!(error = %e, "seek for main-queue rewind failed");
                     }
-                    // The rewind leaves a partition the runtime paused, or one
-                    // waiting for its seek, paused.
+                    // The rewind leaves a partition whose pause reached the
+                    // client, or one waiting for its seek, paused.
                     let resume = self.members[k].resumable([msg.partition()]);
                     if let Err(e) = consumer.resume(&self.tpl_for(resume)) {
                         tracing::error!(error = %e, "resume for main-queue rewind failed");
@@ -2840,6 +2840,25 @@ mod tests {
             Some(EnginePause::Due(_))
         ));
         clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 1), Some(EnginePause::Landed));
+    }
+
+    /// After a landing, the earliest of the pauses still due decides the
+    /// next pass, so each lands at its own instant.
+    #[test]
+    fn the_earliest_remaining_pause_decides_the_next_landing() {
+        let mut source = opened_source(&[(0, 0), (1, 1), (2, 2)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 4);
+        source.pause(&[LaneId(1)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 4);
+        source.pause(&[LaneId(2)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+        clock.advance(CLIENT_PAUSE_WAIT / 4);
         poll_quiet(&mut source);
         assert_eq!(client_pause(&source, 1), Some(EnginePause::Landed));
     }

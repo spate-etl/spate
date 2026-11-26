@@ -70,7 +70,8 @@ struct Harness {
     /// sink worker.
     sink_failures: SinkFailures,
     shutdown: super::runtime::ShutdownHandle,
-    /// Every line at INFO and above that `run` logged on its own thread.
+    /// Every line at INFO and above that `run` logged on its own thread and
+    /// on the pipeline threads it spawned.
     logs: LogCapture,
     /// The budget each sink drain was given.
     sink_budgets: Arc<Mutex<Vec<Duration>>>,
@@ -4865,6 +4866,298 @@ fn joined(h: &Harness) {
     wait_until(Duration::from_secs(10), "run() to return", || {
         h.join.is_finished()
     });
+}
+
+/// A run that holds pipeline threads past their deadline.
+struct StuckRun {
+    h: Harness,
+    /// The pipeline clock, frozen at the start, and the stop clock that reads
+    /// it.
+    clock: Arc<RunClock>,
+    /// Each sender releases one held poll when it fires or drops.
+    release: Vec<mpsc::Sender<()>>,
+    /// Chain flushes before the run was told to stop.
+    flushes_before: usize,
+}
+
+/// Start a run of `threads` pipeline threads on a frozen clock with a 100 ms
+/// drain timeout, where a lane on each of the first `held` threads blocks in
+/// its first poll as a lane that ignores its timeout does, and wait until each
+/// is held. The threads past `held` have no lane.
+fn start_stuck(
+    threads: usize,
+    held: u32,
+    mode_factory: fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain,
+) -> StuckRun {
+    let mut cfg = stop_config(Duration::from_millis(100));
+    cfg.pipeline.threads = Some(threads);
+    let clock = Arc::new(RunClock {
+        clock: crate::clock::TestClock::frozen(),
+        reader: Mutex::new(None),
+        reads: AtomicUsize::new(0),
+    });
+    let (reached_tx, reached) = mpsc::channel();
+    let mut release = Vec::new();
+    let mut polls = Vec::new();
+    for lane in 0..held {
+        let (go, go_rx) = mpsc::channel();
+        release.push(go);
+        polls.push((LaneId(lane), (reached_tx.clone(), go_rx)));
+    }
+    let run_clock = Arc::clone(&clock);
+    let h = start_prepared(
+        cfg,
+        test_options(),
+        move |log| {
+            log.log_lane_drops = true;
+            log.held_polls.extend(polls);
+        },
+        move |runtime, _| {
+            runtime
+                .with_clock(Arc::clone(&run_clock.clock) as _)
+                .with_stop_clock(run_clock)
+        },
+        mode_factory,
+    );
+    *clock.reader.lock().unwrap() = Some(h.join.thread().id());
+    // Lanes go to the least-loaded thread, the lowest index first.
+    h.script.lock().unwrap().push_back(Script::Assign(
+        (0..held)
+            .map(|lane| LaneSpec {
+                id: LaneId(lane),
+                partition: PartitionId(lane),
+                batches: Vec::new(),
+            })
+            .collect(),
+    ));
+    for _ in 0..held {
+        reached
+            .recv_timeout(spate_test::HANG)
+            .expect("each lane's poll is held");
+    }
+    let flushes_before = h.chain.flushes.load(Ordering::Relaxed);
+    StuckRun {
+        h,
+        clock,
+        release,
+        flushes_before,
+    }
+}
+
+// Redundant for the compiler. cargo-mutants skips an item under exactly
+// `cfg(test)`, and a mutant here only empties or hangs the waits of the tests
+// that call it.
+#[cfg(test)]
+impl StuckRun {
+    /// Wait for a thread with no lane to flush on its `Shutdown`. On a frozen
+    /// clock no other flush runs, and the drivers' deadline was read before
+    /// the `Shutdown` was sent, while the clock was still at the start.
+    fn wait_for_shutdown(&self) {
+        wait_until(
+            spate_test::HANG,
+            "a thread with no lane to flush on its Shutdown",
+            || self.h.chain.flushes.load(Ordering::Relaxed) > self.flushes_before,
+        );
+    }
+
+    /// Release every held poll and wait for each held thread to drop its lane
+    /// on its way out, so none outlives the test, then return the run's
+    /// result.
+    fn release_and_join(self) -> Result<ExitReport, super::runtime::StartError> {
+        let held = self.release.len();
+        drop(self.release);
+        wait_until(
+            spate_test::HANG,
+            "each held thread to drop its lane",
+            || {
+                let log = self.h.shared.lock().unwrap();
+                log.log.iter().filter(|e| *e == "lane-dropped").count() == held
+            },
+        );
+        self.h.join.join().unwrap()
+    }
+
+    /// The lines that say `run` gave up on a pipeline thread.
+    fn abandon_lines(&self) -> Vec<String> {
+        self.h
+            .logs
+            .lines()
+            .into_iter()
+            .filter(|line| line.contains("had not stopped"))
+            .collect()
+    }
+}
+
+/// Pipeline threads that never take their `Shutdown`, here held in a lane poll
+/// that ignores its timeout, do not hold `run`. It gives up on both 500 ms
+/// past their deadline, logs each with its heartbeat age, drains the sink with
+/// no budget left, and fails the run on the first. Regression for #2399.
+#[test]
+fn a_thread_that_never_stops_does_not_hold_run() {
+    let run = start_stuck(3, 2, ok_chain);
+    run.h.shutdown.trigger();
+    run.wait_for_shutdown();
+    run.clock.advance(Duration::from_millis(600));
+    wait_until(spate_test::HANG, "run to return", || {
+        run.h.join.is_finished()
+    });
+    let abandoned = run.abandon_lines();
+    let budgets = run.h.sink_budgets.lock().unwrap().clone();
+    let report = run.release_and_join().expect("the run starts");
+    let ExitState::Failed(failure) = report.state else {
+        panic!(
+            "a thread that never stopped fails the run: {:?}",
+            report.state
+        );
+    };
+    assert_eq!(
+        (failure.component.as_str(), failure.reason.as_str()),
+        (
+            "driver-0",
+            "pipeline thread did not stop within 500ms after its deadline"
+        )
+    );
+    assert_eq!(abandoned.len(), 2, "{abandoned:?}");
+    for (thread, line) in abandoned.iter().enumerate() {
+        assert!(line.trim_start().starts_with("ERROR"), "{line}");
+        assert!(
+            line.contains(&format!("thread={thread} heartbeat_age=600ms")),
+            "{line}"
+        );
+    }
+    assert_eq!(budgets, vec![Duration::ZERO]);
+}
+
+/// A pipeline thread that ends before the grace past its deadline runs out is
+/// joined, and the run completes.
+#[test]
+fn a_thread_that_stops_within_the_grace_is_joined() {
+    let run = start_stuck(2, 1, ok_chain);
+    run.h.shutdown.trigger();
+    run.wait_for_shutdown();
+    run.clock.advance(Duration::from_millis(599));
+    // Past the drivers' deadline, so the controller stops waiting for the
+    // thread and `run` starts its join. Between the stop and the join, `run`
+    // reads the stop clock nowhere else.
+    run.clock.wait_for_reads();
+    let abandoned = run.abandon_lines();
+    let report = run.release_and_join().expect("the run starts");
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
+    assert_eq!(abandoned, Vec::<String>::new());
+}
+
+/// After a controller panic, `run` gives up on a pipeline thread that never
+/// takes its `Shutdown` 500 ms past the deadline it stopped the threads by,
+/// and the run fails on the controller.
+#[test]
+fn a_controller_panic_does_not_wait_on_a_thread_that_never_stops() {
+    let run = start_stuck(2, 1, ok_chain);
+    run.h.script.lock().unwrap().push_back(Script::PanicPoll);
+    run.wait_for_shutdown();
+    run.clock.advance(Duration::from_millis(600));
+    wait_until(spate_test::HANG, "run to return", || {
+        run.h.join.is_finished()
+    });
+    let abandoned = run.abandon_lines();
+    let report = run.release_and_join().expect("the run starts");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a controller panic fails the run: {:?}", report.state);
+    };
+    assert_eq!(failure.component, "controller");
+    assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+    assert!(
+        abandoned[0].contains("thread=0 heartbeat_age=600ms"),
+        "{abandoned:?}"
+    );
+}
+
+/// After a controller panic, a pipeline thread that ends before the grace past
+/// the deadline it was stopped by runs out is joined, and nothing is logged as
+/// abandoned.
+#[test]
+fn a_controller_panic_joins_a_thread_that_stops_within_the_grace() {
+    let run = start_stuck(2, 1, ok_chain);
+    run.h.script.lock().unwrap().push_back(Script::PanicPoll);
+    run.wait_for_shutdown();
+    run.clock.advance(Duration::from_millis(599));
+    // Between the panic and the join, `run` reads the stop clock only to set
+    // the threads' deadline, so two more reads mean it is in the join.
+    run.clock.wait_for_reads();
+    let abandoned = run.abandon_lines();
+    let report = run.release_and_join().expect("the run starts");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a controller panic fails the run: {:?}", report.state);
+    };
+    assert_eq!(failure.component, "controller");
+    assert_eq!(abandoned, Vec::<String>::new());
+}
+
+/// A pipeline thread logs to the subscriber that is the default on the thread
+/// that calls `run`: the driver's line for a stop flush still blocked at its
+/// deadline reaches the run's capture.
+#[test]
+fn a_pipeline_thread_logs_to_the_subscriber_run_was_called_under() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_on_clock_with(
+        stop_config(Duration::from_millis(100)),
+        no_idle_flush(),
+        &clock,
+        |runtime| runtime,
+        blocked_flush_chain,
+    );
+    let flushed = flushes(&h);
+    h.shutdown.trigger();
+    // The stop's flush retries from here, after the drivers' deadline was set.
+    wait_until(spate_test::HANG, "the stop's flush to block", || {
+        flushes(&h) > flushed
+    });
+    clock.advance(Duration::from_millis(100));
+    let line = h.logs.wait_for_line(
+        spate_test::HANG,
+        "drain deadline exceeded with the chain still blocked",
+    );
+    assert!(line.trim_start().starts_with("ERROR"), "{line}");
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
+}
+
+/// A pipeline thread that panics outside the batch guard, here in its
+/// `Shutdown` flush, fails a run whose drain otherwise completed.
+#[test]
+fn a_driver_panic_outside_the_batch_guard_fails_the_run() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_on_clock(
+        stop_config(Duration::from_millis(100)),
+        &clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::PanicOnFlush,
+            batches_seen: 0,
+        },
+    );
+    h.shutdown.trigger();
+    wait_until(spate_test::HANG, "the Shutdown flush", || {
+        logged(&h, "flush")
+    });
+    // Past the deadline, so the drain barrier the thread never reaches ends.
+    clock.advance(Duration::from_millis(100));
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
+    let report = h.join.join().unwrap().expect("the run starts");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a driver panic fails the run: {:?}", report.state);
+    };
+    assert_eq!(
+        (failure.component.as_str(), failure.reason.as_str()),
+        (
+            "driver-0",
+            "pipeline thread panicked outside the batch guard"
+        )
+    );
 }
 
 /// Pins that startup refuses a drain timeout no longer than the stop reserve

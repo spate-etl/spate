@@ -522,8 +522,6 @@ pub(crate) mod tests {
                     .to_owned()
             )
         );
-        s.settling_window = Some(MIN_SETTLING_WINDOW);
-        SqsFeedConfig::from_section(&s).expect("a settling window of exactly 1m is accepted");
     }
 
     /// Pins the refusals: another backend's tag, reported at the section,

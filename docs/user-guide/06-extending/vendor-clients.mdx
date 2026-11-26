@@ -147,8 +147,11 @@ your client reads. `UrlRule::check` returns the parsed URL. It refuses a value
 that is not a URL or has no `//` after its scheme, a scheme off the list, and a
 URL that carries a user or a password, so a credential written into a URL fails
 at load, before a client can log it. Pass its error to `SectionPath::invalid`
-with the key, such as
-``sink.example.endpoint: carries userinfo; set them in `username` and `password` ``.
+with the key. The refusal then reads:
+
+```text
+sink.example.endpoint: carries userinfo; set them in `username` and `password`
+```
 
 [Securing connections](../03-guides/securing-connections.mdx) describes what
 an operator then sees.

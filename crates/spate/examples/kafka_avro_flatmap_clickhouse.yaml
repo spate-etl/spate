@@ -90,5 +90,5 @@ sink:
     #   cluster: storefront
     #   table: order_lines_dist
     #   sharding_key: order_id
-    user: ${CLICKHOUSE_USER:-default}
+    username: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}

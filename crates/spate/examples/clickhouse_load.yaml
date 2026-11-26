@@ -87,5 +87,5 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-    user: ${CLICKHOUSE_USER:-default}
+    username: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}

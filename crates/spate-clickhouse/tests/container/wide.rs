@@ -219,7 +219,7 @@ async fn wide_type_table_round_trips() {
     let sink = sink_with::<Owned<WideRow>>(
         &srv.url,
         "wide",
-        "user: default\npassword: wide-secret\n\
+        "username: default\npassword: wide-secret\n\
              settings: { input_format_binary_read_json_as_string: \"1\" }",
     )
     .await;

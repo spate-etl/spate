@@ -64,7 +64,7 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
     )
 }
 
-/// The `timeouts.startup` bound on each request a sink sends a replica at
+/// The `startup_timeout` bound on each request a sink sends a replica at
 /// startup.
 ///
 /// A [`ThreadBound`] times it, so it fires on a runtime built without its
@@ -98,7 +98,7 @@ impl StartupBound {
         match bound.run(request).await {
             Ok(answer) => answer.map_err(|e| error_reason(&e)),
             Err(BoundError::Elapsed) => Err(format!(
-                "no answer within {limit:?}, the `timeouts.startup` bound"
+                "no answer within {limit:?}, the `startup_timeout` bound"
             )),
             Err(other) => Err(other.to_string()),
         }
@@ -151,7 +151,7 @@ mod tests {
         });
         assert_eq!(
             reason,
-            Err("no answer within 30s, the `timeouts.startup` bound".to_owned())
+            Err("no answer within 30s, the `startup_timeout` bound".to_owned())
         );
         for limit in [Some(limit), Some(Duration::MAX), None] {
             let answered = std::future::ready::<Answer>(Ok(7));

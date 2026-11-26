@@ -43,8 +43,6 @@ A datagen `Clock` would otherwise share its name with core's `Clock` trait.
 
 **Follow:** `JsonFraming` in [`crates/spate-json/src/config.rs`](repo:crates/spate-json/src/config.rs).
 
-**Departs:** ClickHouse's `TimeoutSection` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
-
 **Checked by:** review.
 
 ### Name each type a role uses for the trait it implements
@@ -88,7 +86,7 @@ The type's own crate already reaches it from every connector.
 
 **Follow:** [`crates/spate-s3/src/lib.rs`](repo:crates/spate-s3/src/lib.rs).
 
-**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, `KafkaCompression`, `ClickHouseShardSection`, and ClickHouse's `TimeoutSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** `KafkaFeed`, `KafkaFeedPublisher`, `KafkaEndpoint`, `KafkaCompression`, and `ClickHouseShardSection`, each reachable only through a submodule ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 
@@ -173,7 +171,7 @@ Word a zero or empty value by what the key holds:
 
 **Follow:** `SinkPoolConfigError` in [`crates/spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs).
 
-**Departs:** messages in the ClickHouse, Kafka, S3, Avro, datagen and SQS crates that name another key without backticks or word a zero another way ([#1604](https://github.com/spate-etl/spate/issues/1604)).
+**Departs:** messages in the Kafka, S3, Avro, datagen and SQS crates that name another key without backticks or word a zero another way ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 `visibility` on `sqs` and the stop reserve on `checkpoint.drain_timeout`, two bounds `check_duration` cannot state yet, are checked by hand in wording of their own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
 
 **Checked by:** review.
@@ -202,8 +200,6 @@ Some timeouts must stay bounded, such as the Kafka sink's `delivery_timeout`, wh
 A duration that bounds a state, such as how long a watermark may stay stalled, is named for what it measures, as `checkpoint.stalled_fail_after` and `feed.settling_window` are.
 
 **Follow:** `startup_timeout` in [`crates/spate-kafka/src/config.rs`](repo:crates/spate-kafka/src/config.rs).
-
-**Departs:** the ClickHouse sink's nested `timeouts:` block, where null turns a timeout off ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 
@@ -251,8 +247,6 @@ Name the typed keys that carry a login `username` and `password`, and print `pas
 **Why:** a user then sets a login with the same two keys in every connector.
 
 **Follow:** `AvroRegistrySection` in [`crates/spate-avro/src/config.rs`](repo:crates/spate-avro/src/config.rs).
-
-**Departs:** the ClickHouse sink's `user` ([#1604](https://github.com/spate-etl/spate/issues/1604)).
 
 **Checked by:** review.
 

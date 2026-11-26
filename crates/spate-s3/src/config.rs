@@ -191,18 +191,18 @@ impl S3SourceConfig {
     /// # Errors
     ///
     /// [`ConfigError::Component`] naming the refused key under `source.s3`,
-    /// such as `source.s3.chunk_bytes: must not be zero`.
+    /// such as `source.s3.chunk_bytes: must be greater than zero`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::source(TAG);
         let url = parse_url(&at, "url", &self.url)?;
         if self.chunk_bytes.as_u64() == 0 {
-            return Err(at.invalid("chunk_bytes", "must not be zero"));
+            return Err(at.invalid("chunk_bytes", "must be greater than zero"));
         }
         if self.prefetch_bytes.as_u64() < self.chunk_bytes.as_u64() {
             return Err(at.invalid(
                 "prefetch_bytes",
                 format!(
-                    "({}) must be at least chunk_bytes ({})",
+                    "({}) must be at least `chunk_bytes` ({})",
                     self.prefetch_bytes, self.chunk_bytes
                 ),
             ));
@@ -537,11 +537,11 @@ mod tests {
             ),
             (
                 format!("{}  chunk_bytes: 0\n", minimal()),
-                "chunk_bytes: must not be zero".to_owned(),
+                "chunk_bytes: must be greater than zero".to_owned(),
             ),
             (
                 format!("{}  chunk_bytes: 2MiB\n  prefetch_bytes: 1MiB\n", minimal()),
-                "prefetch_bytes: (1.0 MiB) must be at least chunk_bytes (2.0 MiB)".to_owned(),
+                "prefetch_bytes: (1.0 MiB) must be at least `chunk_bytes` (2.0 MiB)".to_owned(),
             ),
             (
                 format!("{}  split_target_bytes: 64KiB\n", minimal()),
@@ -644,7 +644,7 @@ mod tests {
         let mut built = S3SourceConfig::new("s3://bucket/exports/");
         built.chunk_bytes = ByteSize::b(0);
         assert_eq!(loaded, refusal(built.validate()));
-        assert_eq!(loaded, "source.s3.chunk_bytes: must not be zero");
+        assert_eq!(loaded, "source.s3.chunk_bytes: must be greater than zero");
     }
 
     #[test]

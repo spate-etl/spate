@@ -214,7 +214,7 @@ pub enum RetrySectionError {
     #[error("retry.max: must be greater than zero")]
     ZeroMax,
     /// `initial` is larger than the ceiling it grows towards.
-    #[error("retry.initial: ({initial:?}) must not exceed `retry.max` ({max:?})")]
+    #[error("retry.initial: must not exceed `retry.max` ({max:?}); found {initial:?}")]
     InitialExceedsMax {
         /// The configured first delay.
         initial: Duration,
@@ -626,7 +626,7 @@ mod tests {
                 max: Duration::from_secs(1),
             }
             .to_string(),
-            "retry.initial: (10s) must not exceed `retry.max` (1s)"
+            "retry.initial: must not exceed `retry.max` (1s); found 10s"
         );
     }
 

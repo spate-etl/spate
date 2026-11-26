@@ -83,8 +83,15 @@ const IO_BUSY_INTERVAL: Duration = Duration::from_secs(5);
 /// teardown's start when that is later, as after a final commit past the
 /// deadline or a controller panic, which leaves no deadline. At the defaults the drain deadline leaves 5 s before an
 /// orchestrator's kill; the pool's backstop takes 1 s of it, and this leaves
-/// 1 s of the rest to the final commit.
+/// 1 s of the rest to the final commit. A pipeline thread given up on at
+/// [`DRIVER_JOIN_GRACE`] takes 500 ms of that second.
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
+
+/// How long past their own deadline `run` waits for the pipeline threads to
+/// end before it returns without the ones still running. The pool's backstop
+/// then fires 1.5 s past that deadline, inside the controller's 2 s wait for
+/// the sink drain.
+const DRIVER_JOIN_GRACE: Duration = Duration::from_millis(500);
 
 /// Triggers a graceful drain from anywhere (tests, custom signal wiring).
 #[derive(Clone, Debug)]
@@ -366,6 +373,14 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// the deadline or a controller panic. A teardown still running then is
     /// logged at `WARN` and left to finish on a thread of its own, holding the
     /// source, the feed and the I/O runtime, and `run` returns.
+    ///
+    /// `run` waits for each pipeline thread until 500ms past the deadline it
+    /// gave them to stop. A thread still running then is logged at `ERROR` and
+    /// left running, holding its lanes, its chain and the pipeline's
+    /// shard-queue metrics, and a run that had completed returns
+    /// [`ExitState::Failed`]. Building another pipeline with the same name in
+    /// the process fails until that thread ends. Pipeline threads log to the
+    /// `tracing` subscriber that is the default on the thread that calls `run`.
     ///
     /// The first call in a process logs the SIMD features the build compiles
     /// in and the ones the CPU reports, at `INFO` under `cpu features`.
@@ -680,20 +695,14 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 stop_clock: Arc::clone(&self.stop_clock),
             };
             let core = core_ids.get(i).copied().flatten();
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "`run` joins every driver thread, on each early return too"
-            )]
-            let spawned = std::thread::Builder::new()
-                .name(format!("spate-pipeline-{i}"))
-                .spawn(move || {
-                    if let Some(core) = core
-                        && !core_affinity::set_for_current(core)
-                    {
-                        tracing::warn!(core = core.id, "failed to pin pipeline thread");
-                    }
-                    run_driver(ctx)
-                });
+            let spawned = task::spawn_named_thread(format!("spate-pipeline-{i}"), move || {
+                if let Some(core) = core
+                    && !core_affinity::set_for_current(core)
+                {
+                    tracing::warn!(core = core.id, "failed to pin pipeline thread");
+                }
+                run_driver(ctx)
+            });
             match spawned {
                 Ok(handle) => driver_handles.push(handle),
                 Err(e) => {
@@ -704,6 +713,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         driver_handles,
                         drain_timeout,
                         &*self.stop_clock,
+                        &health,
                     );
                     return Err(StartError::Io(e));
                 }
@@ -735,6 +745,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                             driver_handles,
                             drain_timeout,
                             &*self.stop_clock,
+                            &health,
                         );
                         return Err(StartError::AdminBind { addr, source });
                     }
@@ -808,6 +819,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     driver_handles,
                     drain_timeout,
                     &*self.stop_clock,
+                    &health,
                 );
                 return Err(StartError::Io(e));
             }
@@ -815,7 +827,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // Main: wait for the controller's choreography.
         let mut sink_drain = None;
-        let mut driver_panic: Option<FatalErrorReport> = None;
+        let mut driver_failure: Option<FatalErrorReport> = None;
         let sink_runtime = self.sink;
         let mut drain_fn = Some(sink_runtime.drain);
         drop(sink_runtime.queues);
@@ -851,14 +863,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             }
             match to_main_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(ControllerSignal::LanesDrained { sink_deadline }) => {
-                    for (i, h) in driver_handles.drain(..).enumerate() {
-                        if h.join().is_err() {
-                            driver_panic.get_or_insert(FatalErrorReport {
-                                component: format!("driver-{i}"),
-                                reason: "pipeline thread panicked outside the batch guard".into(),
-                            });
-                        }
-                    }
+                    // A thread still running holds its shard queues open; the
+                    // sink drain below then has no budget left and abandons
+                    // what the workers hold, as at any drain deadline.
+                    let failure = join_drivers(
+                        std::mem::take(&mut driver_handles),
+                        driver_join_deadline(sink_deadline),
+                        &*self.stop_clock,
+                        &health,
+                    );
+                    driver_failure = driver_failure.or(failure);
                     if let Some(drain) = drain_fn.take() {
                         let budget = sink_deadline.saturating_duration_since(self.stop_clock.now());
                         sink_drain = Some(io.block_on(drain(budget)));
@@ -886,6 +900,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         std::mem::take(&mut driver_handles),
                         drain_timeout,
                         &*self.stop_clock,
+                        &health,
                     );
                     if let Some(drain) = drain_fn.take() {
                         sink_drain = Some(io.block_on(drain(drain_timeout)));
@@ -901,14 +916,19 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 }
             }
         };
-        // Drivers are already joined on the drain path; on the
-        // controller-died path make a best effort not to leak them.
-        for h in driver_handles {
-            let _ = h.join();
-        }
-        // A driver that panicked outside the batch guard is a bug worth
-        // failing the run over, even if the drain otherwise completed.
-        if let (ExitState::Completed, Some(report)) = (&state, driver_panic) {
+        // Both arms above take the handles, so this joins none. It keeps a
+        // handle that is left from joining with no bound when it drops.
+        let failure = join_drivers(
+            driver_handles,
+            driver_join_deadline(self.stop_clock.now()),
+            &*self.stop_clock,
+            &health,
+        );
+        driver_failure = driver_failure.or(failure);
+        // A driver that panicked outside the batch guard, or that did not
+        // stop, is a bug worth failing the run over, even if the drain
+        // otherwise completed.
+        if let (ExitState::Completed, Some(report)) = (&state, driver_failure) {
             state = ExitState::Failed(report);
         }
 
@@ -1061,19 +1081,22 @@ fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
 
 /// Set the shutdown flag, tell every driver thread to stop within a bounded
 /// drain barrier, and join them. Shared by the startup-error paths and the
-/// controller-death path so an early failure or a controller panic never
-/// leaves running pipeline threads behind (`run` is a library API).
+/// controller-death path, so an early failure or a controller panic leaves no
+/// pipeline thread running unless it ignores its `Shutdown` (`run` is a
+/// library API).
 ///
-/// Joining bounds this. A driver observes the shutdown flag (abandoning any
-/// blocked batch) and the `Shutdown` control message (flushing within
-/// `grace`), then exits and drops its chain, closing the shard queues so the
-/// sink can drain afterwards.
+/// A driver observes the shutdown flag (abandoning any blocked batch) and the
+/// `Shutdown` control message (flushing within `grace`), then exits and drops
+/// its chain, closing the shard queues so the sink can drain afterwards. One
+/// still running [`DRIVER_JOIN_GRACE`] past that deadline is logged and left
+/// running. Every caller fails the run, so the report is not returned.
 fn stop_drivers<L>(
     shutdown: &AtomicBool,
     control_txs: &[crossbeam_channel::Sender<ThreadControl<L>>],
-    driver_handles: Vec<std::thread::JoinHandle<DriverExit>>,
+    driver_handles: Vec<task::ThreadHandle<DriverExit>>,
     grace: Duration,
     stop_clock: &dyn Clock,
+    health: &HealthState,
 ) {
     shutdown.store(true, Ordering::Relaxed);
     let deadline = stop_clock.now() + grace;
@@ -1084,9 +1107,56 @@ fn stop_drivers<L>(
             deadline,
         });
     }
-    for handle in driver_handles {
-        let _ = handle.join();
+    let _ = join_drivers(
+        driver_handles,
+        driver_join_deadline(deadline),
+        stop_clock,
+        health,
+    );
+}
+
+/// When `run` stops waiting for pipeline threads whose own deadline is
+/// `deadline`.
+fn driver_join_deadline(deadline: Instant) -> Instant {
+    deadline_after(deadline, DRIVER_JOIN_GRACE)
+}
+
+/// Join each pipeline thread in `handles`, indexed by its position, until
+/// `clock` reads `by`, and return the first failure. A thread that panicked
+/// outside the batch guard is one. So is a thread still running at `by`, which
+/// is logged with how long ago it last beat and left running: a recent beat
+/// means it loops without taking its `Shutdown`, an old one that it is held in
+/// a call.
+fn join_drivers(
+    handles: Vec<task::ThreadHandle<DriverExit>>,
+    by: Instant,
+    clock: &dyn Clock,
+    health: &HealthState,
+) -> Option<FatalErrorReport> {
+    let mut failure = None;
+    for (thread, handle) in handles.into_iter().enumerate() {
+        let reason = match handle.join_by(by, clock) {
+            Some(Ok(_)) => continue,
+            Some(Err(_)) => "pipeline thread panicked outside the batch guard".to_owned(),
+            None => {
+                tracing::error!(
+                    thread,
+                    heartbeat_age = health.heartbeat_age(thread).map(tracing::field::debug),
+                    grace = ?DRIVER_JOIN_GRACE,
+                    "pipeline thread had not stopped within the grace after its deadline; \
+                     run returns while it runs on, holding its lanes and shard queues"
+                );
+                format!(
+                    "pipeline thread did not stop within {DRIVER_JOIN_GRACE:?} after its deadline"
+                )
+            }
+        };
+        failure.get_or_insert(FatalErrorReport {
+            component: format!("driver-{thread}"),
+            reason,
+        });
     }
+    failure
 }
 
 /// Install the exporter, degrading gracefully when a foreign recorder
@@ -1201,6 +1271,16 @@ async fn wait_for_signal() {
 mod tests {
     use super::*;
     use crate::pipeline::fakes::{FakeSource, test_config};
+
+    /// `run` waits for the pipeline threads until 500 ms past their deadline.
+    #[test]
+    fn the_driver_joins_end_500_ms_past_the_drivers_deadline() {
+        let deadline = Instant::now();
+        assert_eq!(
+            driver_join_deadline(deadline),
+            deadline + Duration::from_millis(500)
+        );
+    }
 
     /// A runtime samples the I/O busy ratio every 5 s over the sampler's
     /// 5-minute window unless a test overrides both.

@@ -2,7 +2,7 @@
 description: "The Kafka source pauses a partition at the consumer once its lane has stayed paused for 2 s, so a short pause keeps the prefetch and fetches nothing again."
 ---
 
-# ADR-0114 — A Kafka source pauses its client only after a lane has stayed paused for 2 s
+# ADR-0115 — A Kafka source pauses its client only after a lane has stayed paused for 2 s
 
 - **Status:** accepted
 - **Date:** 2026-11-26

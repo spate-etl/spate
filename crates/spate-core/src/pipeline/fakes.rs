@@ -64,6 +64,9 @@ pub(crate) struct SourceLog {
     pub(crate) finished_calls: BTreeMap<LaneId, usize>,
     /// When set, blocks one `finished()` read; see [`FinishedHook`].
     pub(crate) finished_hook: Option<FinishedHook>,
+    /// Lanes whose next poll signals the sender and blocks until the receiver
+    /// fires or disconnects, as a lane that ignores its timeout does.
+    pub(crate) held_polls: BTreeMap<LaneId, (mpsc::Sender<()>, mpsc::Receiver<()>)>,
     /// The previous `finished()` read: the lane and its answer.
     pub(crate) last_finished_read: Option<(LaneId, bool)>,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
@@ -437,14 +440,21 @@ impl SourceLane for FakeLane {
         _max_records: usize,
         timeout: Duration,
     ) -> Result<Option<FakeBatch<'_>>, SourceError> {
-        let finishing = {
+        let (finishing, held) = {
             let mut log = self.log.lock().unwrap();
             log.lane_polls.push((self.id, timeout));
             if let Some(e) = log.lane_poll_errors.pop_front() {
                 return Err(e);
             }
-            log.finishing.contains(&self.id)
+            (
+                log.finishing.contains(&self.id),
+                log.held_polls.remove(&self.id),
+            )
         };
+        if let Some((reached, go)) = held {
+            let _ = reached.send(());
+            let _ = go.recv();
+        }
         match self.batches.pop_front() {
             Some(batch) => {
                 self.current = batch;
@@ -672,6 +682,8 @@ pub(crate) enum ChainMode {
     BlockEveryOtherPush(AtomicBool),
     /// Take every batch, and block every other flush, starting with the first.
     BlockEveryOtherFlush(AtomicBool),
+    /// Panic in every flush, which runs outside the driver's batch guard.
+    PanicOnFlush,
 }
 
 pub(crate) struct FakeChain {
@@ -747,6 +759,10 @@ impl RunnableChain for FakeChain {
     fn flush(&mut self) -> PushOutcome {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
+        assert!(
+            !matches!(self.mode, ChainMode::PanicOnFlush),
+            "the chain panicked in a flush"
+        );
         let every_other = matches!(&self.mode, ChainMode::BlockEveryOtherFlush(blocked) if !blocked.fetch_xor(true, Ordering::Relaxed));
         if every_other || matches!(self.mode, ChainMode::FlushBlocked) {
             return PushOutcome::Blocked {

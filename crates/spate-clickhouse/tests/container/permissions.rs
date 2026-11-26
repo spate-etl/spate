@@ -30,8 +30,12 @@ async fn insert_alone_reaches_system_columns() {
     }
 
     let as_writer = async |table: &str| {
-        try_sink_with::<Owned<Order>>(&srv.url, table, "username: writer\npassword: writer-secret\n")
-            .await
+        try_sink_with::<Owned<Order>>(
+            &srv.url,
+            table,
+            "username: writer\npassword: writer-secret\n",
+        )
+        .await
     };
 
     // The grant it holds: the fetch reads the table's columns and validates.

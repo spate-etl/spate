@@ -394,8 +394,8 @@ The runtime also pauses a partition that has stayed at
 once acknowledgments retire batches. This pause reaches the consumer 2 seconds
 after the runtime asks for it, or sooner when the lane was not polled since an
 earlier pause. From the ceiling that is up to `min_pause` plus 2 seconds, and
-longer when a pass of the source's control loop runs long. From then the client holds nothing for the partition while it
-is paused.
+longer when a pass of the source's control loop runs long. From then the client
+holds nothing for the partition while it is paused.
 
 Neither pause covers a pipeline thread that is retrying a batch its chain
 reported as [not ready](../../../06-extending/contracts.mdx). That thread

@@ -7,7 +7,8 @@ description: "The Kafka source pauses a partition at the consumer once its lane 
 - **Status:** superseded
 - **Date:** 2026-11-26
 - **Supersedes:** —
-- **Superseded by:** [ADR-0116](0116-a-kafka-source-counts-unpolled-time-toward-its-client-pause.md)
+- **Superseded by:**
+  [ADR-0116](0116-a-kafka-source-counts-unpolled-time-toward-its-client-pause.md)
 
 ## Context and problem statement
 

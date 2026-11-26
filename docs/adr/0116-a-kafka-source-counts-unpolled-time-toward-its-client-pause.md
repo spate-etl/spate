@@ -6,7 +6,8 @@ description: "The Kafka source pauses a partition at the consumer once its lane 
 
 - **Status:** accepted
 - **Date:** 2026-11-26
-- **Supersedes:** [ADR-0115](0115-a-kafka-source-pauses-its-client-after-two-seconds.md)
+- **Supersedes:**
+  [ADR-0115](0115-a-kafka-source-pauses-its-client-after-two-seconds.md)
 - **Superseded by:** —
 
 ## Context and problem statement

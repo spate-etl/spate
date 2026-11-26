@@ -62,8 +62,8 @@ sink: {{ capture: {{}} }}
         .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "invalid runtime configuration: deserializer.json: splits each payload as \
-         `JsonFraming::Array`, but the source already frames one record per payload; build \
+        "deserializer.json: splits each payload as `JsonFraming::Array`, but the source \
+         already frames one record per payload; build \
          the deserializer with `JsonDeserializerBuilder::framing(JsonFraming::Single)`, or use \
          a source that leaves framing to the deserializer"
     );

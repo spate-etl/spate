@@ -64,7 +64,7 @@ use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig, SectionPath, SinkSection};
 use crate::feed::{Feed, FeedOrigin};
 use crate::metrics::{
-    ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
+    ComponentLabels, Meter, MetricRole, MetricsError, MetricsHandle, SharedString, SinkShardMetrics,
 };
 use crate::ops::{ChunkConfig, RunnableChain, SplitTarget};
 use crate::pipeline::ExitReport;
@@ -85,11 +85,12 @@ pub enum BuildError {
     /// The configuration failed to load or validate.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// The metrics exporter failed to install.
-    #[error("metrics: {0}")]
-    Metrics(String),
+    /// The metrics exporter failed to install, or another live handle set
+    /// already owns a metric series this pipeline or sink would publish.
+    #[error(transparent)]
+    Metrics(#[from] MetricsError),
     /// The I/O runtime failed to build.
-    #[error("io runtime: {0}")]
+    #[error("io: {0}")]
     Io(#[from] std::io::Error),
     /// The sink bundle's topology or labels are unusable.
     #[error("sink: {0}")]
@@ -98,14 +99,6 @@ pub enum BuildError {
     /// bare [`Pipeline::sink`] collides on the reserved `"default"` name).
     #[error("a sink named {0:?} is already installed")]
     DuplicateSinkName(String),
-    /// Another live handle set in this process already owns a metric series
-    /// this sink would publish, usually a second pipeline with the same
-    /// pipeline and sink name. Gauge series cannot be shared, so assembly
-    /// stops here rather than letting one of the two publish readings the
-    /// other overwrites. A pipeline rebuilt *sequentially* is fine: drop the
-    /// old one first.
-    #[error("{0}")]
-    DuplicateSeries(String),
     /// [`Pipeline::into_runtime`]/[`Pipeline::run`] without a sink.
     #[error("no sink installed (call Pipeline::sink or Pipeline::add_sink first)")]
     MissingSink,
@@ -571,10 +564,7 @@ impl Pipeline {
         // inside it, so this check runs here too.
         config.reject_body_chunk().map_err(BuildError::Config)?;
         telemetry::init(LogFormat::Json, "info");
-        let metrics = install_or_reuse(&metrics_settings(&config)).map_err(|e| match e {
-            StartError::Metrics(m) => BuildError::Metrics(m),
-            other => BuildError::Metrics(other.to_string()),
-        })?;
+        let metrics = install_or_reuse(&metrics_settings(&config))?;
         let io = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(config.pipeline.io_threads)
             .thread_name("spate-io")
@@ -675,7 +665,8 @@ impl Pipeline {
     /// default sink's metric label), an empty or ragged topology, or label
     /// shapes that do not match it;
     /// [`BuildError::Config`] when [`SinkOptions::resolve`] fails;
-    /// [`BuildError::DuplicateSeries`] when its metric series are already
+    /// [`BuildError::Metrics`] holding
+    /// [`MetricsError::DuplicateSeries`] when its metric series are already
     /// claimed.
     pub fn add_sink_with<B: SinkBundle>(
         mut self,
@@ -749,9 +740,7 @@ impl Pipeline {
         );
         // Pre-register the queue-edge handles before `queues` is cloned into
         // any terminal, so every producer shares the same `spate_queue_*` series.
-        queues
-            .attach_metrics(&sink_labels)
-            .map_err(|e| BuildError::DuplicateSeries(e.to_string()))?;
+        queues.attach_metrics(&sink_labels)?;
         // Before any clone, like the metrics: every chain's terminal makes its
         // own codec instance from these queues.
         if let Some(codec) = parts.frame_codec {
@@ -773,9 +762,8 @@ impl Pipeline {
                     e2e_basis,
                 )
                 .map(|m| m.with_queue(queues.metrics(), shard))
-                .map_err(|e| BuildError::DuplicateSeries(e.to_string()))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, MetricsError>>()?;
         let mut writer = parts.writer;
         writer.attach_metrics(SinkMetricsCtx::new(sink_meter));
         let pool = SinkPool::spawn(
@@ -1230,11 +1218,15 @@ mod tests {
 
         let collision = Pipeline::from_config(named())
             .expect("builder")
-            .sink(null_sink(2));
-        assert!(
-            matches!(collision.err(), Some(BuildError::DuplicateSeries(msg)) if msg.contains("spate_")),
-            "a second live pipeline on the same name must fail on the series claim"
-        );
+            .sink(null_sink(2))
+            .expect_err("a second live pipeline on the same name must fail on the series claim");
+        let BuildError::Metrics(inner @ crate::metrics::MetricsError::DuplicateSeries(series)) =
+            &collision
+        else {
+            panic!("expected a duplicate series, got {collision:?}");
+        };
+        assert!(series.contains("spate_"), "{series}");
+        assert_eq!(collision.to_string(), inner.to_string());
 
         // Drop the first, freeing its claims, and rebuild: the series is
         // available again.

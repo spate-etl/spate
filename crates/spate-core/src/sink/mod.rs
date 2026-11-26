@@ -110,7 +110,9 @@ use std::time::Instant;
 /// (a closed queue, an aborted worker, a parked chunk at teardown) fails
 /// its batches so their offsets never commit; only a completed durable
 /// write delivers them.
-#[derive(Debug)]
+///
+/// Its `Debug` gives `frame` as a length, so formatting a chunk never prints
+/// record content.
 pub struct EncodedChunk {
     /// Encoded rows in the sink's wire format, after the sink's
     /// [`FrameCodec`] when it has one.
@@ -132,6 +134,19 @@ pub struct EncodedChunk {
     /// or [`crate::record::NO_EVENT_TIME_MS`] when no record in `frame` has
     /// one (event-basis end-to-end latency).
     pub oldest_event_ms: i64,
+}
+
+impl std::fmt::Debug for EncodedChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncodedChunk")
+            .field("frame_len", &self.frame.len())
+            .field("raw_len", &self.raw_len)
+            .field("rows", &self.rows)
+            .field("acks", &self.acks)
+            .field("oldest_ingest", &self.oldest_ingest)
+            .field("oldest_event_ms", &self.oldest_event_ms)
+            .finish()
+    }
 }
 
 /// The CPU half of a sink connector: encodes one record into the sink's

@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 
 /// A rejected chunk, handed back so the terminal stage can park it and
 /// report `Blocked` upstream.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("the shard queue is full or closed; the chunk is handed back")]
+#[non_exhaustive]
 pub struct ChunkSendError(pub EncodedChunk);
 
 /// Sending side of every shard queue, shared by pipeline threads.
@@ -159,6 +161,35 @@ pub(crate) fn test_chunk() -> EncodedChunk {
 mod tests {
     use super::test_chunk as chunk;
     use super::*;
+
+    /// A chunk's `Debug`, alone or inside a `ChunkSendError`, gives the
+    /// frame's length and never its bytes, so a logged error carries no
+    /// record content.
+    #[test]
+    fn a_rejected_chunk_formats_without_its_frame() {
+        let marker = "record-content-marker";
+        let mut c = chunk();
+        c.frame = bytes::Bytes::from_static(b"record-content-marker");
+        c.raw_len = marker.len();
+        let alone = format!("{c:?}");
+        let err = ChunkSendError(c);
+        let wrapped = format!("{err:?}");
+        for shown in [&alone, &wrapped, &err.to_string()] {
+            assert!(!shown.contains(marker), "{shown}");
+        }
+        assert!(
+            alone.starts_with("EncodedChunk { frame_len: 21, raw_len: 21, rows: 1, acks: "),
+            "{alone}"
+        );
+        assert!(
+            wrapped.starts_with("ChunkSendError(EncodedChunk { frame_len: 21, "),
+            "{wrapped}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "the shard queue is full or closed; the chunk is handed back"
+        );
+    }
 
     #[test]
     fn try_send_never_blocks_and_returns_the_chunk_when_full() {

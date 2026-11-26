@@ -137,6 +137,7 @@ impl DurationBounds {
 /// the meaning of `0s` after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("must be {}; found {}", Range(.bounds), format_duration(*.value))]
+#[non_exhaustive]
 pub struct DurationBoundsError {
     value: Duration,
     bounds: DurationBounds,

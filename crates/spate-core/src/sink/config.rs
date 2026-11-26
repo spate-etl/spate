@@ -203,10 +203,10 @@ pub enum RetrySectionError {
     /// asks for a shrinking delay, which the backoff holds at `max` from the
     /// second delay on.
     #[error("retry.multiplier: must be a finite number in [1.0, 1e9] (got {0})")]
-    Multiplier(f64),
+    MultiplierOutOfRange(f64),
     /// `jitter` is not a finite fraction in `[0.0, 1.0]`.
     #[error("retry.jitter: must be a finite fraction in [0.0, 1.0] (got {0})")]
-    Jitter(f64),
+    JitterOutOfRange(f64),
     /// `initial` is zero, leaving no delay to sleep at all.
     #[error("retry.initial: must be greater than zero")]
     ZeroInitial,
@@ -253,14 +253,14 @@ impl RetrySection {
     ///
     /// let mut hot_loop = RetrySection::default();
     /// hot_loop.multiplier = 0.5;
-    /// assert_eq!(hot_loop.validate(), Err(RetrySectionError::Multiplier(0.5)));
+    /// assert_eq!(hot_loop.validate(), Err(RetrySectionError::MultiplierOutOfRange(0.5)));
     /// ```
     pub fn validate(&self) -> Result<(), RetrySectionError> {
         if !self.multiplier.is_finite() || !(1.0..=1e9).contains(&self.multiplier) {
-            return Err(RetrySectionError::Multiplier(self.multiplier));
+            return Err(RetrySectionError::MultiplierOutOfRange(self.multiplier));
         }
         if !self.jitter.is_finite() || !(0.0..=1.0).contains(&self.jitter) {
-            return Err(RetrySectionError::Jitter(self.jitter));
+            return Err(RetrySectionError::JitterOutOfRange(self.jitter));
         }
         if self.initial.is_zero() {
             return Err(RetrySectionError::ZeroInitial);
@@ -604,11 +604,11 @@ mod tests {
     fn the_error_messages_survived_the_move_into_the_framework() {
         // Pins each retry rule's whole message, led by its key.
         assert_eq!(
-            RetrySectionError::Multiplier(0.5).to_string(),
+            RetrySectionError::MultiplierOutOfRange(0.5).to_string(),
             "retry.multiplier: must be a finite number in [1.0, 1e9] (got 0.5)"
         );
         assert_eq!(
-            RetrySectionError::Jitter(1.5).to_string(),
+            RetrySectionError::JitterOutOfRange(1.5).to_string(),
             "retry.jitter: must be a finite fraction in [0.0, 1.0] (got 1.5)"
         );
         assert_eq!(
@@ -904,7 +904,7 @@ mod tests {
                 ),
             ),
             (
-                SinkPoolConfigError::Retry(RetrySectionError::Multiplier(0.5)),
+                SinkPoolConfigError::Retry(RetrySectionError::MultiplierOutOfRange(0.5)),
                 "retry.multiplier: must be a finite number in [1.0, 1e9] (got 0.5)",
             ),
         ];

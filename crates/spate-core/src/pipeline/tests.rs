@@ -3168,7 +3168,7 @@ fn zero_max_records_is_refused_at_start() {
     let err = config_error_before_open(h);
     assert_eq!(
         err,
-        "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1"
+        "invalid configuration: `RuntimeOptions::max_records` must be at least 1"
     );
 }
 
@@ -3229,10 +3229,7 @@ fn a_chain_that_refuses_the_source_framing_stops_the_start() {
         },
     );
     let err = config_error_before_open(h);
-    assert_eq!(
-        err,
-        "invalid runtime configuration: deserializer.probe: frames each payload"
-    );
+    assert_eq!(err, "deserializer.probe: frames each payload");
     assert_eq!(
         *asked.lock().unwrap(),
         [FramingContract::PerRecord, FramingContract::PerRecord],
@@ -3443,8 +3440,7 @@ fn a_zero_settling_window_passed_in_is_refused() {
     let h = start_with_config(cfg, ok_chain);
     assert_eq!(
         config_error_before_open(h),
-        "invalid runtime configuration: invalid configuration: feed.settling_window: must be \
-         from 20s to 1day; found 0s"
+        "invalid configuration: feed.settling_window: must be from 20s to 1day; found 0s"
     );
 }
 
@@ -3460,8 +3456,7 @@ fn a_settling_window_above_a_day_passed_in_is_refused() {
     let err = config_error_before_open(h);
     assert!(
         err.starts_with(
-            "invalid runtime configuration: invalid configuration: feed.settling_window: must \
-             be from 20s to 1day; found "
+            "invalid configuration: feed.settling_window: must be from 20s to 1day; found "
         ),
         "{err}"
     );
@@ -4882,13 +4877,13 @@ fn a_zero_thread_count_passed_in_is_refused() {
     cfg.pipeline.threads = Some(0);
     assert_eq!(
         config_error_before_open(start_with_config(cfg, ok_chain)),
-        "invalid runtime configuration: pipeline.threads: must be at least 1"
+        "invalid configuration: pipeline.threads: must be at least 1"
     );
     let mut cfg = test_config(1);
     cfg.pipeline.io_threads = 0;
     assert_eq!(
         config_error_before_open(start_with_config(cfg, ok_chain)),
-        "invalid runtime configuration: pipeline.io_threads: must be at least 1"
+        "invalid configuration: pipeline.io_threads: must be at least 1"
     );
 }
 
@@ -5201,7 +5196,7 @@ fn a_feed_refuses_a_drain_timeout_within_the_read_reserve() {
         assert_eq!(
             config_error_before_open(h),
             format!(
-                "invalid runtime configuration: checkpoint.drain_timeout: must be more than 5s \
+                "invalid configuration: checkpoint.drain_timeout: must be more than 5s \
                  and at most 1day; found 5s: the `{backend}` feed stops reading 5s before the \
                  drain deadline to hand its units back"
             )
@@ -7857,11 +7852,14 @@ fn an_abandoned_feed_drop_keeps_its_series_claimed() {
     let started = second.join.join().unwrap();
     drop(release);
     run.wait_for_the_teardown();
-    assert!(
-        matches!(started, Err(super::runtime::StartError::Metrics(_))),
-        "{:?}",
-        started.map(|report| report.state)
-    );
+    let err = match started {
+        Err(err) => err,
+        Ok(report) => panic!("expected a refused start, got {:?}", report.state),
+    };
+    let StartError::Metrics(inner @ crate::metrics::MetricsError::DuplicateSeries(_)) = &err else {
+        panic!("expected a duplicate series, got {err:?}");
+    };
+    assert_eq!(err.to_string(), inner.to_string());
 }
 
 /// A source `Drop` that outlasts `run` still has the I/O runtime: work it
@@ -7997,4 +7995,46 @@ fn the_io_tasks_stop_before_a_teardown_that_outlasts_run() {
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
     run.wait_for_the_teardown();
+}
+
+/// `StartError` and `BuildError` hand the wrapped error through whole: its
+/// text with no prefix of their own, and its `source()`.
+#[test]
+fn start_and_build_errors_wrap_a_config_error_transparently() {
+    let config = || ConfigError::Io {
+        path: "pipeline.yaml".into(),
+        source: std::io::Error::other("disk gone"),
+    };
+    let want = config().to_string();
+    for err in [
+        &StartError::from(config()) as &(dyn std::error::Error + 'static),
+        &BuildError::from(config()),
+    ] {
+        assert_eq!(err.to_string(), want);
+        let source = err.source().expect("the I/O error survives the wrap");
+        assert!(
+            source.downcast_ref::<std::io::Error>().is_some(),
+            "{source:?}"
+        );
+    }
+}
+
+/// Both I/O variants read `io: ` and the I/O error.
+#[test]
+fn start_and_build_io_errors_share_one_prefix() {
+    let io = || std::io::Error::other("no threads left");
+    assert_eq!(StartError::from(io()).to_string(), "io: no threads left");
+    assert_eq!(BuildError::from(io()).to_string(), "io: no threads left");
+}
+
+/// A failed run's report converts to the `FatalError` that stopped it.
+#[test]
+fn a_failed_report_converts_to_its_fatal_error() {
+    let report = ExitReport {
+        state: ExitState::Failed(FatalError::new("sink", "boom")),
+        sink_drain: None,
+        final_watermarks: Vec::new(),
+    };
+    let err = report.ok().expect_err("a failed run is an error");
+    assert_eq!(err.to_string(), "fatal error in sink: boom");
 }

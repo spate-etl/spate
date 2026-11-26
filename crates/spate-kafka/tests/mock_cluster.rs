@@ -155,8 +155,10 @@ fn a_lane_releases_its_messages_when_its_batch_is_finished() {
     assert!(format!("{lane:?}").contains("held: 0"), "{lane:?}");
 }
 
-/// A paused lane delivers nothing while its consumer keeps fetching the
-/// lane beside it, and on resume it delivers every record gap-free.
+/// A paused lane keeps fetching until it has stayed paused for the wait
+/// before a client pause, then delivers nothing while its consumer keeps
+/// fetching the lane beside it, and on resume it delivers every record
+/// gap-free.
 #[test]
 fn pause_stops_delivery_and_resume_recovers_gapless() {
     let cluster = MockKafka::new();
@@ -170,7 +172,10 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     // Statistics feed the warning for a held partition that stops fetching.
     cfg.statistics_interval = Duration::from_millis(250);
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg).expect("the config validates");
+    let clock = TestClock::frozen();
+    let mut source = KafkaSource::new(cfg)
+        .expect("the config validates")
+        .with_clock(Arc::clone(&clock) as _);
     let meter = spate_core::metrics::Meter::with_namespace("kafka", "pause", "source", "kafka");
     source
         .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
@@ -184,7 +189,6 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
         .expect("a lane on partition 0");
 
     source.pause(&[lanes[paused].id()]).expect("pause");
-    produce(&brokers, TOPIC, 5, 1, "b");
 
     // A failure from here on carries the source's warnings: a main-queue
     // rewind, librdkafka's errors, and a held partition that is not fetching,
@@ -192,26 +196,40 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     spate_test::show_logs(tracing::Level::WARN, || {
         let mut errors = Vec::new();
         // One Fetch is in flight per broker, and its reply is queued before
-        // the next is sent, so the second Fetch from here means one sent after
-        // the produce has been answered.
-        let fetched = cluster.received(RDKafkaApiKey::Fetch);
-        wait_until(HANG, "a Fetch sent after the produce is answered", || {
-            serve_events(&mut source, &mut errors);
-            cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
-        });
-        // Pause also purges what was prefetched.
+        // the next is sent, so the second Fetch after a produce means one sent
+        // after the produce has been answered.
+        let mut produce_and_fetch = |source: &mut KafkaSource, prefix: &str| {
+            produce(&brokers, TOPIC, 5, 1, prefix);
+            let fetched = cluster.received(RDKafkaApiKey::Fetch);
+            wait_until(HANG, "a Fetch sent after the produce is answered", || {
+                serve_events(source, &mut errors);
+                cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
+            });
+        };
+
+        // Short of the wait, the partition is still fetched.
+        clock.advance(Duration::from_millis(1999));
+        produce_and_fetch(&mut source, "b");
+        let early = drain_lane(&mut source, &mut lanes[paused], 5, HANG);
+        let offsets: Vec<i64> = early.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, (0..5).collect::<Vec<_>>());
+
+        // At the wait the pause reaches the client, and nothing more is
+        // fetched for the lane.
+        clock.advance(Duration::from_millis(1));
+        produce_and_fetch(&mut source, "c");
         assert!(
             lanes[paused]
                 .poll(64, Duration::ZERO)
                 .expect("poll")
                 .is_none(),
-            "paused lane must not deliver; retryable errors: {errors:?}"
+            "paused lane must not deliver"
         );
 
         source.resume(&[lanes[paused].id()]).expect("resume");
         let rows = drain_lane(&mut source, &mut lanes[paused], 5, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
-        assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
+        assert_eq!(offsets, (5..10).collect::<Vec<_>>(), "gap-free redelivery");
     });
 }
 
@@ -239,12 +257,18 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
     let mut cfg = config(&brokers, "fetch-start");
     cfg.rdkafka.insert("debug".into(), "topic".into());
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg).expect("the config validates");
+    let clock = TestClock::frozen();
+    let mut source = KafkaSource::new(cfg)
+        .expect("the config validates")
+        .with_clock(Arc::clone(&clock) as _);
 
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         source.pause(&[lanes[0].id()]).expect("pause");
+        // The pause reaches librdkafka once it has lasted the wait.
+        clock.advance(Duration::from_secs(2));
+        serve_events(&mut source, &mut Vec::new());
         source.resume(&[lanes[0].id()]).expect("resume");
         let rows = drain_lane(&mut source, &mut lanes[0], 5, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
@@ -1563,7 +1587,13 @@ fn pause_reaches_the_owning_consumer() {
     let mut cfg = consumers_config(&brokers, "pause-owner", 2);
     cfg.rdkafka
         .insert("partition.assignment.strategy".into(), "range".into());
-    let mut driver = Driver::open(cfg);
+    let clock = TestClock::frozen();
+    let mut driver = Driver::open_with(
+        KafkaSource::new(cfg)
+            .expect("the config validates")
+            .with_clock(Arc::clone(&clock) as _),
+        |ctx| ctx,
+    );
     driver.settle(4);
     let paused: Vec<_> = driver
         .lanes
@@ -1572,6 +1602,9 @@ fn pause_reaches_the_owning_consumer() {
         .map(SourceLane::id)
         .collect();
     driver.source.pause(&paused).expect("pause");
+    // The pause reaches each client once it has lasted the wait.
+    clock.advance(Duration::from_secs(2));
+    driver.step(Duration::ZERO);
     produce(&brokers, TOPIC, 5, 4, "p");
 
     // One Fetch is in flight per broker connection, and its reply is queued
@@ -3997,4 +4030,109 @@ fn a_message_with_no_timestamp_reports_no_event_time() {
         seen.len() >= 2
     });
     assert_eq!(seen, [(0, NO_EVENT_TIME_MS), (1, 5)]);
+}
+
+/// A poll of the lane between two short pauses starts the wait before a
+/// client pause again, so two pauses that together outlast it keep the
+/// prefetch.
+#[test]
+fn a_poll_between_short_pauses_keeps_the_prefetch() {
+    const RECORDS: usize = 1000;
+    // Three quarters of the 2 s wait before a client pause.
+    const SHORT: Duration = Duration::from_millis(1500);
+    let cluster = MockKafka::new();
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, RECORDS, 1, "p");
+    let clock = TestClock::frozen();
+    let mut w = Watched::open_on(
+        config(&brokers, "poll-between-pauses"),
+        Some(Arc::clone(&clock) as _),
+    );
+    let first = w.read(0, 1);
+    let pipeline = w.pipeline.clone();
+    let labels = [("pipeline", pipeline.as_str())];
+    let metric =
+        |rendered: &str, name: &str| spate_test::metric_sum(rendered, name, &labels).unwrap_or(0.0);
+    // Reads the messages received from a statistics snapshot taken after this
+    // call.
+    let received = |w: &mut Watched| {
+        let before = metric(&w.rendered(), "spate_kafka_rx_responses_total");
+        wait_until(HANG, "a newer statistics snapshot", || {
+            w.serve();
+            metric(&w.rendered(), "spate_kafka_rx_responses_total") > before
+        });
+        metric(&w.rendered(), "spate_kafka_rx_messages_total")
+    };
+    wait_until(HANG, "the rest is prefetched", || {
+        w.serve();
+        support::fetch_queue_entries(&w.rendered(), &pipeline) >= (RECORDS - first.len()) as f64
+    });
+    let prefetched = received(&mut w);
+    let lane = w.lanes[0].id();
+    w.source.pause(&[lane]).expect("pause");
+    clock.advance(SHORT);
+    w.serve();
+    w.source.resume(&[lane]).expect("resume");
+    let second = w.read(0, 1);
+    w.source.pause(&[lane]).expect("pause");
+    clock.advance(SHORT);
+    w.serve();
+    w.source.resume(&[lane]).expect("resume");
+    let rest = w.read(0, RECORDS - first.len() - second.len());
+    assert_eq!(first.len() + second.len() + rest.len(), RECORDS);
+    assert_eq!(
+        received(&mut w),
+        prefetched,
+        "the client fetched the partition again after the second pause"
+    );
+}
+
+/// A pause the runtime lifts before it has lasted the wait before a client
+/// pause leaves the partition's prefetch in place: the client receives each
+/// message once.
+#[test]
+fn a_short_pause_keeps_the_prefetch() {
+    const RECORDS: usize = 1000;
+    let cluster = MockKafka::new();
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, RECORDS, 1, "p");
+    let mut w = Watched::open_on(
+        config(&brokers, "short-pause"),
+        Some(TestClock::frozen() as _),
+    );
+    let first = w.read(0, 1);
+    let pipeline = w.pipeline.clone();
+    let labels = [("pipeline", pipeline.as_str())];
+    let metric =
+        |rendered: &str, name: &str| spate_test::metric_sum(rendered, name, &labels).unwrap_or(0.0);
+    // Reads the messages received from a statistics snapshot taken after this
+    // call.
+    let received = |w: &mut Watched| {
+        let before = metric(&w.rendered(), "spate_kafka_rx_responses_total");
+        wait_until(HANG, "a newer statistics snapshot", || {
+            w.serve();
+            metric(&w.rendered(), "spate_kafka_rx_responses_total") > before
+        });
+        metric(&w.rendered(), "spate_kafka_rx_messages_total")
+    };
+    // Everything not yet delivered sits in the partition's fetch queue.
+    wait_until(HANG, "the rest is prefetched", || {
+        w.serve();
+        support::fetch_queue_entries(&w.rendered(), &pipeline) >= (RECORDS - first.len()) as f64
+    });
+    // Counted from here, so a fetch made before the pause is left out.
+    let prefetched = received(&mut w);
+    let lane = w.lanes[0].id();
+    w.source.pause(&[lane]).expect("pause");
+    w.serve();
+    w.source.resume(&[lane]).expect("resume");
+    let rest = w.read(0, RECORDS - first.len());
+    assert_eq!(first.len() + rest.len(), RECORDS);
+    assert_eq!(
+        received(&mut w),
+        prefetched,
+        "the client fetched the partition again after the pause"
+    );
 }

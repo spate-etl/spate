@@ -473,9 +473,9 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     // ---- Drain sequence (shutdown or failure; see graceful-shutdown.mdx) ----
     // Every drain sets the drivers' flag here, a stop's only once its reading
     // ends, so a batch blocked during the reading keeps retrying. Drivers
-    // wedged in the blocked-batch retry loop only observe that flag, and main
-    // joins them without a timeout, so without this store a chain failure
-    // elsewhere leaves a blocked driver spinning forever.
+    // wedged in the blocked-batch retry loop only observe that flag, so
+    // without this store a chain failure elsewhere leaves a blocked driver
+    // spinning until main gives up on it.
     shutdown.store(true, Ordering::Relaxed);
     // The drain's commits, the final one included, run with the signal clear.
     stop_signal.close();
@@ -529,8 +529,9 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         pipeline_metrics.set_state(PipelineState::Failed);
     }
 
-    // Hand over to main, which joins the driver threads (dropping
-    // their chains closes the shard queues) and drains the sink.
+    // Hand over to main, which joins the driver threads (dropping their
+    // chains closes the shard queues) until shortly past `lanes_by`, and
+    // drains the sink.
     let _ = to_main.send(ControllerSignal::LanesDrained {
         sink_deadline: lanes_by,
     });

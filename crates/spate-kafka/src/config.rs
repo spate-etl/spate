@@ -395,7 +395,7 @@ impl KafkaSourceConfig {
         {
             return Err(at.invalid(
                 "rdkafka",
-                "sets both \"auto.offset.reset\" and \"topic.auto.offset.reset\": \
+                "sets both `auto.offset.reset` and `topic.auto.offset.reset`: \
                  librdkafka reads them as one property and applies them in no set \
                  order; set one",
             ));
@@ -602,9 +602,12 @@ mod tests {
             minimal()
         );
         let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("\"auto.offset.reset\""), "{msg}");
-        assert!(msg.contains("\"topic.auto.offset.reset\""), "{msg}");
+        assert_eq!(
+            err.to_string(),
+            "source.kafka.rdkafka: sets both `auto.offset.reset` and \
+             `topic.auto.offset.reset`: librdkafka reads them as one property and applies \
+             them in no set order; set one"
+        );
     }
 
     #[test]

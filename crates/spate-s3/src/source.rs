@@ -491,7 +491,7 @@ impl S3Source {
         };
         if let Some(key) = self.config.store.keys().find(|k| s3_store_key(k).is_none()) {
             return Err(refuse(format!(
-                "source.s3.store.\"{key}\" is not an object_store S3 option, and the \
+                "`source.s3.store.\"{key}\"` is not an object_store S3 option, and the \
                  location's store is built from it"
             )));
         }
@@ -1936,7 +1936,11 @@ mod tests {
             .parse_location("s3://ops/jobs/a/")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("\"endpont\""), "{err}");
+        assert_eq!(
+            err,
+            "feed: `location` s3://ops/jobs/a/: `source.s3.store.\"endpont\"` is not an \
+             object_store S3 option, and the location's store is built from it"
+        );
         let (source, _rt) = source_with_store("  endpont: \"http://127.0.0.1:9000\"\n");
         let dir = tempfile::tempdir().unwrap();
         source

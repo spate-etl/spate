@@ -360,25 +360,37 @@ liveness never depends on the controller, because every lane poll resets
 ## Backpressure: pause and resume
 
 When the in-flight budget crosses its high watermark, or a shard queue rejects
-while its sink is the limit, the runtime pauses the affected lanes' partitions
-at the consumer **and keeps polling**. A paused partition fetches nothing but
-the poll loop stays live for rebalance callbacks and liveness. Resume happens
-under hysteresis (low watermark + `backpressure.min_pause`), because pausing a
-Kafka partition purges its prefetch buffer, so resume is not free and flapping
-would thrash the fetch pipeline.
+while its sink is the limit, the runtime pauses the affected lanes **and keeps
+polling**. The pipeline thread stops taking records from a paused lane at once.
+Once a lane has stayed paused for 2 seconds, the source pauses its partition at
+the consumer. A partition paused at the consumer fetches nothing, but the poll
+loop stays live for rebalance callbacks and liveness. Resume happens under
+hysteresis (low watermark + `backpressure.min_pause`), because a pause at the
+consumer purges the partition's prefetch buffer, so resume is not free and
+flapping would thrash the fetch pipeline.
+
+A pause the runtime lifts within 2 seconds never reaches the consumer. The
+partition keeps its prefetch buffer and is not fetched again. A pause that lasts
+longer purges the buffer, and on resume the partition is fetched from the
+offset after the last record the pipeline took. Until a pause reaches the
+consumer, the partition keeps fetching up to `queued.min.messages` and
+`queued.max.messages.kbytes`. On a topic that carries aborted transactions
+those limits do not count the aborted records, so for those 2 seconds the
+client can take in more than the limits.
 
 A pause raised while the sink is the limit, with the budget under its high
 watermark, ends once no shard waits for a write permit, without
-`backpressure.min_pause`. Each of those pauses purges
-the prefetch buffer too. Under a sink at its limit with many write permits,
-these pauses repeat as permits free, and the consumer refetches on each one.
+`backpressure.min_pause`. Under a sink at its limit with many write permits,
+these pauses repeat as permits free, and each one that ends within 2 seconds
+leaves the prefetch buffer in place.
 
 The runtime also pauses a partition that has stayed at
 `checkpoint.max_pending_batches` for `backpressure.min_pause`, and resumes it
-once acknowledgments retire batches. This pause purges the prefetch buffer in
-the same way, so the client holds nothing for the partition while it is
-paused. On resume the partition is fetched from the offset after the last
-record the pipeline took.
+once acknowledgments retire batches. This pause reaches the consumer 2 seconds
+after the runtime asks for it: at least `min_pause` plus 2 seconds after the
+partition reaches the ceiling, and later when a pass of the source's control
+loop runs long. From then the client holds nothing for the partition while it
+is paused.
 
 Neither pause covers a pipeline thread that is retrying a batch its chain
 reported as [not ready](../../../06-extending/contracts.mdx). That thread

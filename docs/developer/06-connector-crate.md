@@ -158,6 +158,7 @@ A rule checked on a whole section after it loads, such as the sink pool rules at
 A rule about several keys is a sentence that names each one in backticks, as the `backpressure` ratio rule does.
 Put any other key the rule names in backticks.
 When a component refuses a key of another section, the refusal names that section, a colon, then the key in backticks: ``feed: `location` must not be empty``.
+A feed backend that refuses a key of `feed:` itself names `feed.<backend>`, so the refusal says which backend refuses it: ``feed.sqs: `attempt_cap` does not apply to `sqs`: …``.
 A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka: rdkafka."group.id" cannot be overridden: …`.
 
 Word a zero or empty value by what the key holds:
@@ -171,8 +172,7 @@ Word a zero or empty value by what the key holds:
 
 **Follow:** `SinkPoolConfigError` in [`crates/spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs).
 
-**Departs:** messages in the SQS crate that name another key without backticks or word a zero another way ([#1604](https://github.com/spate-etl/spate/issues/1604)).
-`visibility` on `sqs` and the stop reserve on `checkpoint.drain_timeout`, two bounds `check_duration` cannot state yet, are checked by hand in wording of their own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
+**Departs:** `visibility` on `sqs` and the stop reserve on `checkpoint.drain_timeout`, two bounds `check_duration` cannot state yet, are checked by hand in wording of their own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
 
 **Checked by:** review.
 

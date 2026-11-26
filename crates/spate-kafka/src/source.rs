@@ -2839,6 +2839,19 @@ mod tests {
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
     }
 
+    /// A pause of a lane whose pause has reached the client leaves it there,
+    /// so the next resume reaches the client too.
+    #[test]
+    fn a_pause_after_one_that_landed_stays_landed() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT);
+        poll_quiet(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+    }
+
     /// A pause lands on the first poll after it falls due, however late that
     /// poll comes.
     #[test]

@@ -361,9 +361,9 @@ impl KafkaSourceConfig {
             return Err(at.invalid(
                 "consumers",
                 format!(
-                    "above 1 cannot be combined with rdkafka.\"{key}\": every \
+                    "above 1 cannot be combined with `rdkafka.\"{key}\"`: every \
                      consumer would join as the same static member and fence the \
-                     others; set consumers: 1 or remove the static member id"
+                     others; set `consumers` to 1 or remove the static member id"
                 ),
             ));
         }
@@ -395,7 +395,7 @@ impl KafkaSourceConfig {
         {
             return Err(at.invalid(
                 "rdkafka",
-                "sets both \"auto.offset.reset\" and \"topic.auto.offset.reset\": \
+                "sets both `auto.offset.reset` and `topic.auto.offset.reset`: \
                  librdkafka reads them as one property and applies them in no set \
                  order; set one",
             ));
@@ -602,9 +602,12 @@ mod tests {
             minimal()
         );
         let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("\"auto.offset.reset\""), "{msg}");
-        assert!(msg.contains("\"topic.auto.offset.reset\""), "{msg}");
+        assert_eq!(
+            err.to_string(),
+            "source.kafka.rdkafka: sets both `auto.offset.reset` and \
+             `topic.auto.offset.reset`: librdkafka reads them as one property and applies \
+             them in no set order; set one"
+        );
     }
 
     #[test]
@@ -967,9 +970,13 @@ mod tests {
     fn static_membership_with_several_consumers_is_refused() {
         let id = "  rdkafka:\n    group.instance.id: w-secret\n";
         let err = with_consumers("2", id).unwrap_err().to_string();
-        assert!(err.contains("source.kafka.consumers"), "{err}");
-        assert!(err.contains("group.instance.id"), "{err}");
-        assert!(!err.contains("w-secret"), "{err}");
+        assert_eq!(
+            err,
+            "source.kafka.consumers: above 1 cannot be combined with \
+             `rdkafka.\"group.instance.id\"`: every consumer would join as the same \
+             static member and fence the others; set `consumers` to 1 or remove the \
+             static member id"
+        );
         with_consumers("1", id).expect("one consumer may be a static member");
         with_consumers("2", "  rdkafka:\n    group.instance.id: \"\"\n")
             .expect("an empty id is no static membership");

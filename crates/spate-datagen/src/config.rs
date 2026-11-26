@@ -424,7 +424,7 @@ mod tests {
             DatagenSourceConfig::from_component_config(&section("  partitions: 8\n  count: 4\n"))
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("count / partitions"), "{err}");
+        assert!(err.contains("`count` / `partitions`"), "{err}");
         assert!(err.contains("4 lane(s) would be born exhausted"), "{err}");
     }
 

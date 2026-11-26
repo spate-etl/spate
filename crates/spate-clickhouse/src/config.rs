@@ -42,9 +42,11 @@ pub(crate) const TAG: &str = "clickhouse";
 ///     shards:
 ///       - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
 ///       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
-///     user: default
+///     username: default
 ///     password: ${CLICKHOUSE_PASSWORD}
-///     timeouts: { send: 30s, end: 180s, startup: 30s }
+///     send_timeout: 30s              # 0s turns a timeout off
+///     end_timeout: 180s
+///     startup_timeout: 30s
 ///     compression: lz4               # none | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
@@ -67,7 +69,7 @@ pub struct ClickHouseSinkConfig {
     pub database: Option<String>,
     /// Username (interpolate secrets upstream via `${VAR}`).
     #[serde(default)]
-    pub user: Option<String>,
+    pub username: Option<String>,
     /// Password (interpolate secrets upstream via `${VAR}`).
     #[serde(default)]
     pub password: Option<String>,
@@ -79,9 +81,20 @@ pub struct ClickHouseSinkConfig {
     /// settings this sink always sets).
     #[serde(default)]
     pub settings: BTreeMap<String, String>,
-    /// Client-side timeouts for one insert, and for one startup request.
-    #[serde(default)]
-    pub timeouts: TimeoutSection,
+    /// How long one frame of an insert may take to reach the socket. `0s`
+    /// turns the timeout off.
+    #[serde(with = "humantime_serde", default = "default_send_timeout")]
+    pub send_timeout: Duration,
+    /// How long the server may take to finish an insert, materialized views
+    /// included. `0s` turns the timeout off, and a write is then bounded only
+    /// by the pipeline's `checkpoint.drain_timeout` at shutdown.
+    #[serde(with = "humantime_serde", default = "default_end_timeout")]
+    pub end_timeout: Duration,
+    /// How long each request the sink sends a replica while it is built may
+    /// take: the schema read, the settings check and the `distributed_check`
+    /// queries. `0s` turns the timeout off.
+    #[serde(with = "humantime_serde", default = "default_startup_timeout")]
+    pub startup_timeout: Duration,
     /// Transport compression of insert bodies. `lz4` by
     /// default (see [`ClickHouseCompression`]).
     #[serde(default)]
@@ -107,11 +120,13 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
             table,
             shards,
             database,
-            user,
+            username,
             password,
             tls,
             settings,
-            timeouts,
+            send_timeout,
+            end_timeout,
+            startup_timeout,
             compression,
             format,
             distributed_check,
@@ -120,11 +135,13 @@ impl std::fmt::Debug for ClickHouseSinkConfig {
             .field("table", table)
             .field("shards", shards)
             .field("database", database)
-            .field("user", user)
+            .field("username", username)
             .field("password", &redact::option(password))
             .field("tls", tls)
             .field("settings", &redact::map(settings.keys()))
-            .field("timeouts", timeouts)
+            .field("send_timeout", send_timeout)
+            .field("end_timeout", end_timeout)
+            .field("startup_timeout", startup_timeout)
             .field("compression", compression)
             .field("format", format)
             .field("distributed_check", distributed_check)
@@ -257,11 +274,13 @@ impl ClickHouseSinkConfig {
             table: table.into(),
             shards,
             database: None,
-            user: None,
+            username: None,
             password: None,
             tls: TlsSection::default(),
             settings: BTreeMap::new(),
-            timeouts: TimeoutSection::default(),
+            send_timeout: default_send_timeout(),
+            end_timeout: default_end_timeout(),
+            startup_timeout: default_startup_timeout(),
             compression: ClickHouseCompression::default(),
             format: ClickHouseFormat::default(),
             distributed_check: None,
@@ -302,7 +321,7 @@ impl ClickHouseSinkConfig {
     /// [`validate`](Self::validate), with each error starting at `at`.
     fn validate_at(&self, at: &SectionPath) -> Result<(), ConfigError> {
         if self.shards.is_empty() {
-            return Err(at.invalid("shards", "at least one shard is required"));
+            return Err(at.invalid("shards", "must not be empty"));
         }
         for (i, shard) in self.shards.iter().enumerate() {
             if shard.replicas.is_empty() {
@@ -381,7 +400,7 @@ impl ClickHouseSinkConfig {
                 (Some(_), Some(_)) | (None, None) => {
                     return Err(at.invalid(
                         "distributed_check",
-                        "set exactly one of sharding_key or sharding_expr",
+                        "set exactly one of `sharding_key` or `sharding_expr`",
                     ));
                 }
                 (Some(key), None) if !is_identifier(key) => {
@@ -404,7 +423,7 @@ impl ClickHouseSinkConfig {
         if self.tls.root_ca.is_some() && !Schemes::of(self).https {
             return Err(at.invalid(
                 "tls.root_ca",
-                "is set, but no replica or distributed_check.endpoint is https://",
+                "is set, but no replica or `distributed_check.endpoint` is https://",
             ));
         }
         Ok(())
@@ -421,7 +440,7 @@ impl ClickHouseSinkConfig {
 #[non_exhaustive]
 pub struct ClickHouseShardSection {
     /// HTTP(S) URLs of this shard's replicas. A URL with credentials is
-    /// rejected; set them in `user` and `password`.
+    /// rejected; set them in `username` and `password`.
     pub replicas: Vec<String>,
     /// Distributed-parity weight: must equal this shard's `<weight>` in
     /// the cluster's `remote_servers` entry (ClickHouse's default is 1).
@@ -549,37 +568,21 @@ impl ClickHouseDistributedCheckSection {
     }
 }
 
-/// Client-side timeouts for one insert, and for one startup request.
-///
-/// Construct with [`TimeoutSection::default`] and set the fields. The
-/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
-/// callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct TimeoutSection {
-    /// Per-`send` timeout (one frame reaching the socket).
-    #[serde(with = "humantime_serde")]
-    pub send: Option<Duration>,
-    /// `end` timeout: the server fully processing the insert,
-    /// materialized views included.
-    #[serde(with = "humantime_serde")]
-    pub end: Option<Duration>,
-    /// Timeout of each request the sink sends a replica while it is built:
-    /// the schema read, the settings check and the `distributed_check`
-    /// queries.
-    #[serde(with = "humantime_serde")]
-    pub startup: Option<Duration>,
+fn default_send_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
-impl Default for TimeoutSection {
-    fn default() -> Self {
-        TimeoutSection {
-            send: Some(Duration::from_secs(30)),
-            end: Some(Duration::from_secs(180)),
-            startup: Some(Duration::from_secs(30)),
-        }
-    }
+fn default_end_timeout() -> Duration {
+    Duration::from_secs(180)
+}
+
+fn default_startup_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+/// A configured timeout as the client reads it, where `None` is off.
+fn off_at_zero(timeout: Duration) -> Option<Duration> {
+    (!timeout.is_zero()).then_some(timeout)
 }
 
 /// A validated sink configuration with no row type yet.
@@ -684,7 +687,7 @@ impl ClickHouseSinkBuilder {
     /// Native format does not support, and [`SchemaError::Settings`] when a
     /// replica answers the
     /// settings check with an error. A replica that gives a request no
-    /// answer within `timeouts.startup` fails that request's variant,
+    /// answer within `startup_timeout` fails that request's variant,
     /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
     pub async fn connect<F: crate::ClickHouseRowFamily>(
         self,
@@ -731,8 +734,8 @@ impl ClickHouseSinkBuilder {
             header,
             BlockMethod::of(self.cfg.compression),
             self.cfg.settings.clone().into_iter().collect(),
-            self.cfg.timeouts.send,
-            self.cfg.timeouts.end,
+            off_at_zero(self.cfg.send_timeout),
+            off_at_zero(self.cfg.end_timeout),
         );
         for endpoint in self.endpoints.iter().flatten() {
             self.startup
@@ -931,7 +934,7 @@ fn build_with(
     let probe_endpoints = Arc::new(make_endpoints(&cfg, &tls));
 
     let shard_weights: Arc<[u32]> = cfg.shards.iter().map(|s| s.weight).collect();
-    let startup = StartupBound::new(cfg.timeouts.startup);
+    let startup = StartupBound::new(off_at_zero(cfg.startup_timeout));
     let distributed = cfg.distributed_check.as_ref().map(|section| {
         let url = section
             .endpoint
@@ -981,8 +984,8 @@ fn client_for(url: &str, cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> clic
     if let Some(db) = &cfg.database {
         client = client.with_database(db);
     }
-    if let Some(user) = &cfg.user {
-        client = client.with_user(user);
+    if let Some(username) = &cfg.username {
+        client = client.with_user(username);
     }
     if let Some(password) = &cfg.password {
         client = client.with_password(password);
@@ -1010,7 +1013,7 @@ fn make_endpoints(cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> Vec<Vec<Cli
 /// The rule each replica and `distributed_check.endpoint` URL meets. The
 /// `clickhouse` client parses its URL with the same parser.
 const ENDPOINT: UrlRule<'static> =
-    UrlRule::new("set them in user and password").schemes(&["http", "https"]);
+    UrlRule::new("set them in `username` and `password`").schemes(&["http", "https"]);
 
 /// The schemes of the replica and `distributed_check.endpoint` URLs, in any
 /// case. A `distributed_check` with no endpoint queries the first replica,
@@ -1235,7 +1238,7 @@ shards:
     }
 
     /// A replica or `distributed_check.endpoint` URL with userinfo fails at load
-    /// with an error that names `user` and `password` and omits the secret.
+    /// with an error that names `username` and `password` and omits the secret.
     /// Regression for #765.
     #[test]
     fn url_credentials_are_rejected_at_load() {
@@ -1272,7 +1275,9 @@ shards:
             )));
             assert_eq!(
                 err,
-                format!("sink.clickhouse.{key}: carries userinfo; set them in user and password")
+                format!(
+                    "sink.clickhouse.{key}: carries userinfo; set them in `username` and `password`"
+                )
             );
         }
 
@@ -1287,8 +1292,9 @@ shards:
     /// and keeps the user and setting names. Regression for #754.
     #[test]
     fn debug_never_prints_password_or_settings_values() {
-        let yaml =
-            format!("{MINIMAL}user: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n");
+        let yaml = format!(
+            "{MINIMAL}username: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n"
+        );
         let builder = ClickHouseSinkBuilder::from_component_config(&component(&yaml)).unwrap();
         let printed = format!("{builder:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
@@ -1325,7 +1331,8 @@ table: analytics.orders
 shards:
   - replicas: ["http://a:8123", "http://b:8123"]
   - replicas: ["http://c:8123"]
-timeouts: { send: 5s, end: 60s }
+send_timeout: 5s
+end_timeout: 60s
 settings: { insert_quorum: "auto" }
 "#,
         ))
@@ -1451,9 +1458,8 @@ settings: { insert_quorum: "auto" }
     /// A builder for table `t` on one replica at `url`, with a 7 s startup
     /// bound on `clock` and `extra` appended to its section.
     fn bounded_builder(url: &str, clock: &SyncClock, extra: &str) -> ClickHouseSinkBuilder {
-        let section = format!(
-            "table: t\nshards: [{{replicas: [\"{url}\"]}}]\ntimeouts: {{ startup: 7s }}\n{extra}"
-        );
+        let section =
+            format!("table: t\nshards: [{{replicas: [\"{url}\"]}}]\nstartup_timeout: 7s\n{extra}");
         on_clock(
             ClickHouseSinkBuilder::from_component_config(&component(&section)).unwrap(),
             clock,
@@ -1461,14 +1467,14 @@ settings: { insert_quorum: "auto" }
     }
 
     const STARTUP: Duration = Duration::from_secs(7);
-    const NO_ANSWER: &str = "no answer within 7s, the `timeouts.startup` bound";
+    const NO_ANSWER: &str = "no answer within 7s, the `startup_timeout` bound";
 
     fn id_column() -> Vec<crate::schema::ColumnRow> {
         crate::testing::system_columns(&[("id", "UInt64", "")])
     }
 
     /// A replica that accepts the schema read and never answers it fails the
-    /// build once `timeouts.startup` has passed, with an error naming the
+    /// build once `startup_timeout` has passed, with an error naming the
     /// replica and the bound. Regression for #1953.
     #[test]
     fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
@@ -1574,19 +1580,83 @@ settings: { insert_quorum: "auto" }
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
     }
 
-    /// The startup bound is 30 s unless `timeouts.startup` sets it.
-    #[test]
-    fn the_startup_bound_defaults_to_thirty_seconds() {
-        assert_eq!(
-            TimeoutSection::default().startup,
-            Some(Duration::from_secs(30))
+    /// The writer's `Debug` for a sink connected to a mock replica, with
+    /// `extra` appended to its section.
+    async fn connected_writer(extra: &str) -> String {
+        let mock = Mock::new();
+        mock.add(handlers::provide(id_column()));
+        mock.add(handlers::provide::<u8>([1u8]));
+        let section = format!(
+            "table: t\nshards: [{{replicas: [\"{}\"]}}]\n{extra}",
+            mock.url()
         );
-        let sink = ClickHouseSinkBuilder::from_component_config(&component(
-            "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\ntimeouts: { startup: 5s }",
-        ))
+        let sink = ClickHouseSinkBuilder::from_component_config(&component(&section))
+            .unwrap()
+            .connect::<spate_core::deser::Owned<IdOnly>>()
+            .await
+            .expect("the mock answers the schema read and the settings check");
+        format!("{:?}", sink.writer)
+    }
+
+    /// Pins the timeout defaults, 30 s, 180 s and 30 s, on the YAML path and
+    /// from `new`, and that each reaches the client as a bound.
+    #[tokio::test]
+    async fn the_timeouts_default_to_30s_180s_and_30s() {
+        let loaded = ClickHouseSinkBuilder::from_component_config(&component(MINIMAL)).unwrap();
+        let built = ClickHouseSinkConfig::new("t", Vec::new());
+        for cfg in [&loaded.cfg, &built] {
+            assert_eq!(
+                (cfg.send_timeout, cfg.end_timeout, cfg.startup_timeout),
+                (
+                    Duration::from_secs(30),
+                    Duration::from_secs(180),
+                    Duration::from_secs(30)
+                )
+            );
+        }
+        assert_eq!(loaded.startup.limit, Some(Duration::from_secs(30)));
+        let writer = connected_writer("").await;
+        assert!(
+            writer.contains("send_timeout: Some(30s), end_timeout: Some(180s)"),
+            "{writer}"
+        );
+    }
+
+    /// `0s` turns each timeout off: the client reads `None` as no timeout,
+    /// and a zero duration as a deadline already past.
+    #[tokio::test]
+    async fn a_zero_timeout_turns_it_off() {
+        let off = "send_timeout: 0s\nend_timeout: 0s\nstartup_timeout: 0s\n";
+        let builder = ClickHouseSinkBuilder::from_component_config(&component(&format!(
+            "table: t\nshards: [{{replicas: [\"http://a:8123\"]}}]\n{off}"
+        )))
         .unwrap();
-        assert_eq!(sink.cfg.timeouts.startup, Some(Duration::from_secs(5)));
-        assert_eq!(sink.cfg.timeouts.send, Some(Duration::from_secs(30)));
+        assert_eq!(builder.startup.limit, None);
+        let writer = connected_writer(off).await;
+        assert!(
+            writer.contains("send_timeout: None, end_timeout: None"),
+            "{writer}"
+        );
+    }
+
+    /// The `timeouts:` block and the `user` key are refused as unknown
+    /// fields, so a section written for an earlier version fails at load.
+    #[test]
+    fn the_earlier_timeouts_block_and_user_key_are_refused() {
+        for (key, line) in [
+            ("timeouts", "timeouts: { send: 5s }"),
+            ("user", "user: svc"),
+        ] {
+            let err = ClickHouseSinkConfig::from_component_config(&component(&format!(
+                "{MINIMAL}{line}\n"
+            )))
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.starts_with(&format!("sink.clickhouse.{key}: unknown field `{key}`")),
+                "{err}"
+            );
+        }
     }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record
@@ -1669,10 +1739,14 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn unknown_fields_are_rejected_with_a_path() {
         let err = ClickHouseSinkBuilder::from_component_config(&component(
-            "table: orders\nshards: [{replicas: [\"http://a\"]}]\ntimeouts: {sendd: 5s}",
+            "table: orders\nshards: [{replicas: [\"http://a\"]}]\ntls: {root_caa: ca.pem}",
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("sendd"), "{err}");
+        assert!(
+            err.to_string()
+                .starts_with("sink.clickhouse.tls.root_caa: unknown field `root_caa`"),
+            "{err}"
+        );
     }
 
     /// A YAML still holding the removed `columns` key fails to load, naming
@@ -2275,10 +2349,7 @@ settings: { insert_quorum: "auto" }
         let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
             "table: t\nshards: []\n",
         )));
-        assert_eq!(
-            err,
-            "sinks.eu.clickhouse.shards: at least one shard is required"
-        );
+        assert_eq!(err, "sinks.eu.clickhouse.shards: must not be empty");
 
         let err = refusal(ClickHouseSinkBuilder::from_component_config(&sinks_entry(
             &format!("{MINIMAL}settings: {{insert_deduplicate: \"0\"}}\n"),
@@ -2313,7 +2384,7 @@ settings: { insert_quorum: "auto" }
         let section = spate_test::component_config(TAG, "table: t\nshards: []\n");
         assert_eq!(
             refusal(ClickHouseSinkBuilder::from_component_config(&section)),
-            "clickhouse.shards: at least one shard is required"
+            "clickhouse.shards: must not be empty"
         );
     }
 
@@ -2324,13 +2395,13 @@ settings: { insert_quorum: "auto" }
         let unplaced = spate_test::component_config(TAG, "table: t\nshards: []\n");
         assert_eq!(
             refusal(ClickHouseSinkConfig::from_component_config(&unplaced)),
-            "clickhouse.shards: at least one shard is required"
+            "clickhouse.shards: must not be empty"
         );
         assert_eq!(
             refusal(ClickHouseSinkConfig::from_component_config(&sinks_entry(
                 "table: t\nshards: []\n"
             ))),
-            "sinks.eu.clickhouse.shards: at least one shard is required"
+            "sinks.eu.clickhouse.shards: must not be empty"
         );
     }
 
@@ -2341,7 +2412,7 @@ settings: { insert_quorum: "auto" }
         let no_shards = ClickHouseSinkConfig::new("t", Vec::new());
         assert_eq!(
             refusal(no_shards.validate()),
-            "sink.clickhouse.shards: at least one shard is required"
+            "sink.clickhouse.shards: must not be empty"
         );
 
         let mut missing_ca = ClickHouseSinkConfig::new(
@@ -2394,7 +2465,7 @@ settings: { insert_quorum: "auto" }
             ),
             (
                 check("cluster: c, table: d, sharding_key: id, sharding_expr: id"),
-                "distributed_check: set exactly one of sharding_key or sharding_expr",
+                "distributed_check: set exactly one of `sharding_key` or `sharding_expr`",
             ),
             (
                 check("cluster: c, table: d, sharding_key: \"bad-k\""),
@@ -2410,7 +2481,7 @@ settings: { insert_quorum: "auto" }
             ),
             (
                 "shards: [{replicas: [\"http://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n".to_owned(),
-                "tls.root_ca: is set, but no replica or distributed_check.endpoint is https://",
+                "tls.root_ca: is set, but no replica or `distributed_check.endpoint` is https://",
             ),
             (
                 "shards: [{replicas: [\"http://u:hunter2@exa mple:8123\"]}]\n".to_owned(),

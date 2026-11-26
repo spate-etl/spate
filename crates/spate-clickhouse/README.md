@@ -31,28 +31,30 @@ sink:
       - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
         weight: 1                  # Distributed-parity weight, at least 1
       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
-    user: spate
+    username: spate
     password: ${CLICKHOUSE_PASSWORD}
     compression: lz4               # none | lz4 | zstd | zstd:<1-22>
     format: rowbinary              # rowbinary | native
-    timeouts: { send: 30s, end: 180s, startup: 30s }
+    send_timeout: 30s              # 0s turns a timeout off
+    end_timeout: 180s
+    startup_timeout: 30s
     settings: { insert_quorum: "auto" }   # extra per-insert settings
 ```
 
-`weight`, `compression`, `format` and `timeouts` show their defaults. The
-framework's sink keys, such as `batch` and `queue`, sit beside `clickhouse:` in
-the sink section, and the
+`weight`, `compression`, `format` and the three timeouts show their defaults.
+The framework's sink keys, such as `batch` and `queue`, sit beside `clickhouse:`
+in the sink section, and the
 [sink section reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-section)
 lists them.
 
 Loading fails when a shard has no replicas, a replica or
 `distributed_check.endpoint` URL does not parse, has a scheme other than `http`
 or `https` in any case, or carries credentials, a `weight` is 0, or `table` or
-`database` is not a plain identifier. It also fails when `settings` names a setting the sink
-manages (listed under [Writes and retries](#writes-and-retries)), when
-`tls.root_ca` is set and no URL is `https://`, and when a URL is `https://`
-and neither the system trust store nor `tls.root_ca` holds a usable
-certificate. `tls.root_ca` names a PEM bundle
+`database` is not a plain identifier. It also fails when `settings` names a
+setting the sink manages (listed under
+[Writes and retries](#writes-and-retries)), when `tls.root_ca` is set and no URL
+is `https://`, and when a URL is `https://` and neither the system trust store
+nor `tls.root_ca` holds a usable certificate. `tls.root_ca` names a PEM bundle
 of CAs trusted beside the system store.
 
 A non-empty `password` with an `http://` replica or `distributed_check.endpoint`

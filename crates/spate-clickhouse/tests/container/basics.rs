@@ -71,7 +71,7 @@ async fn a_server_default_cannot_turn_deduplication_off() {
     let sink = sink_with::<Owned<Order>>(
         &srv.url,
         "orders",
-        "user: writer\npassword: writer-secret\n",
+        "username: writer\npassword: writer-secret\n",
     )
     .await;
     let batch = sealed(&orders(0..100), "server-default", 2);
@@ -100,7 +100,7 @@ async fn a_replica_that_pins_deduplication_off_fails_the_build() {
     let err = try_sink_with::<Owned<Order>>(
         &srv.url,
         "orders",
-        "user: writer\npassword: writer-secret\n",
+        "username: writer\npassword: writer-secret\n",
     )
     .await
     .expect_err("a replica that refuses deduplicate_insert");

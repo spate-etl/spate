@@ -63,7 +63,7 @@ pub(crate) struct DistributedCheck {
     /// The endpoint to query (`distributed_check.endpoint`, defaulting to
     /// the first replica of shard 0).
     pub(crate) endpoint: ClickHouseEndpoint,
-    /// The bound on each query, `timeouts.startup`.
+    /// The bound on each query, `startup_timeout`.
     pub(crate) startup: StartupBound,
     /// The cluster named by the `Distributed` DDL.
     pub(crate) cluster: String,

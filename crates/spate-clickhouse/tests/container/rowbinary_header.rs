@@ -41,7 +41,7 @@ async fn a_same_width_alter_is_rejected_rather_than_silently_miswritten() {
     let sink = sink_with::<Owned<DriftRow>>(
         &srv.url,
         "drifting",
-        "user: default\npassword: drift-secret\n",
+        "username: default\npassword: drift-secret\n",
     )
     .await;
     let mut encoder = sink.encoder::<Owned<DriftRow>>();

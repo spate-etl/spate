@@ -62,7 +62,7 @@ async fn nested_native_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_native",
-        &format!("format: native\nuser: default\npassword: {password}\n"),
+        &format!("format: native\nusername: default\npassword: {password}\n"),
     )
     .await;
     assert_eq!(
@@ -105,7 +105,7 @@ async fn nested_rowbinary_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_rowbinary",
-        &format!("format: rowbinary\nuser: default\npassword: {password}\n"),
+        &format!("format: rowbinary\nusername: default\npassword: {password}\n"),
     )
     .await;
     assert_eq!(

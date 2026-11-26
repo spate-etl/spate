@@ -74,7 +74,7 @@ sinks:
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-      user: ${CLICKHOUSE_USER:-default}
+      username: ${CLICKHOUSE_USER:-default}
       password: ${CLICKHOUSE_PASSWORD:-}
 
   refunds:
@@ -92,5 +92,5 @@ sinks:
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
-      user: ${CLICKHOUSE_USER:-default}
+      username: ${CLICKHOUSE_USER:-default}
       password: ${CLICKHOUSE_PASSWORD:-}

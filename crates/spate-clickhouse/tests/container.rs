@@ -46,7 +46,7 @@ const SERVER_PASSWORD: &str = "container-secret";
 
 /// The `settings` fragment naming [`SERVER_PASSWORD`], for the helpers that
 /// take one.
-const SERVER_CREDENTIALS: &str = "user: default\npassword: container-secret\n";
+const SERVER_CREDENTIALS: &str = "username: default\npassword: container-secret\n";
 
 /// The image pinned by the lane in `SPATE_CLICKHOUSE_LANE`, as `name` and
 /// `tag`, falling back to the lane named in `ci/clickhouse/PRIMARY`.

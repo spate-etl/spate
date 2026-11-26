@@ -68,7 +68,7 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
     let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        "user: default\npassword: partition-secret\n",
+        "username: default\npassword: partition-secret\n",
     )
     .await;
 
@@ -156,7 +156,7 @@ async fn single_partition_batch_forms_one_dedup_unit() {
     let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        "user: default\npassword: partition-secret\n\
+        "username: default\npassword: partition-secret\n\
              settings: { max_insert_block_size: \"10\", min_insert_block_size_rows: \"0\", \
              min_insert_block_size_bytes: \"0\" }",
     )

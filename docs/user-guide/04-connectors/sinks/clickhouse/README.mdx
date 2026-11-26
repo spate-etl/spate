@@ -62,9 +62,11 @@ sink:
     shards:
       - replicas: ["https://ch-0-0:8443", "https://ch-0-1:8443"]
       - replicas: ["https://ch-1-0:8443", "https://ch-1-1:8443"]
-    user: default
+    username: default
     password: ${CLICKHOUSE_PASSWORD}
-    timeouts: { send: 30s, end: 180s, startup: 30s }
+    send_timeout: 30s              # 0s turns a timeout off
+    end_timeout: 180s
+    startup_timeout: 30s
     compression: lz4               # none | lz4 | zstd | zstd:<1-22>
 ```
 
@@ -74,13 +76,13 @@ sink:
 | `shards` | list of `{ replicas: [url], weight }` | `required` | One entry per shard, each with its replica HTTP(S) URLs. |
 | `shards[].weight` | integer | `1` | Distributed-parity weight: must equal this shard's `<weight>` in the cluster's `remote_servers` entry. Rejected at load if zero. Consumed by the router — see [Distributed parity](./distributed-parity.mdx). |
 | `database` | string | `none` | Default database for unqualified tables. |
-| `user` | string | `none` | Username (interpolate secrets via `${VAR}`). |
+| `username` | string | `none` | Username (interpolate secrets via `${VAR}`). |
 | `password` | string | `none` | Password (interpolate secrets via `${VAR}`). Renders `<redacted>` in `Debug` output. |
 | `tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. See [Security](#security-tls). |
 | `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough-and-the-denylist). Values render `<redacted>` in `Debug` output. |
-| `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
-| `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
-| `timeouts.startup` | duration | `30s` | Timeout of each request the sink sends a replica at startup: the schema read, the settings check and the `distributed_check` queries. A replica that gives no answer within it fails startup with an error naming the replica. |
+| `send_timeout` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. `0s` turns it off. |
+| `end_timeout` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. `0s` turns it off, and an insert is then bounded only by `checkpoint.drain_timeout` at [shutdown](../../../03-guides/graceful-shutdown.mdx). |
+| `startup_timeout` | duration | `30s` | Timeout of each request the sink sends a replica at startup: the schema read, the settings check and the `distributed_check` queries. A replica that gives no answer within it fails startup with an error naming the replica. `0s` turns it off, and startup waits on each replica for as long as it takes. |
 | `compression` | string | `lz4` | Transport compression of insert bodies: `none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in `1..=22`. Insert bodies are compressed on the pipeline threads as each chunk seals, and sent with `decompress=1`. Unrelated to on-disk column codecs. |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
 | `distributed_check` | section | `none` | Opt-in startup parity check against the cluster topology and a `Distributed` table's DDL. Absent means no queries are issued. Its keys are on [Distributed parity](./distributed-parity.mdx). |
@@ -145,8 +147,9 @@ apply `format_binary_max_string_size`.
 ## Security (TLS)
 
 No feature flag is needed for TLS. Point a replica at an `https://` URL and the
-connection is encrypted (rustls is always compiled in), with `user`/`password`
-authenticating over it. Keep the password out of the file with `${VAR}`
+connection is encrypted (rustls is always compiled in), with
+`username`/`password` authenticating over it. Keep the password out of the file
+with `${VAR}`
 [interpolation](../../../03-guides/configuring-pipelines.mdx#environment-interpolation).
 A replica or `distributed_check.endpoint` URL that carries credentials is
 rejected at load.
@@ -168,7 +171,7 @@ sink:
   clickhouse:
     shards:
       - replicas: ["https://ch-1.internal:8443", "https://ch-2.internal:8443"]
-    user: spate
+    username: spate
     password: "${CLICKHOUSE_PASSWORD}"
     tls:
       root_ca: /etc/spate/clickhouse-ca.pem   # only for a private CA

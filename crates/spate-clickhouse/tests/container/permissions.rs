@@ -30,8 +30,12 @@ async fn insert_alone_reaches_system_columns() {
     }
 
     let as_writer = async |table: &str| {
-        try_sink_with::<Owned<Order>>(&srv.url, table, "user: writer\npassword: writer-secret\n")
-            .await
+        try_sink_with::<Owned<Order>>(
+            &srv.url,
+            table,
+            "username: writer\npassword: writer-secret\n",
+        )
+        .await
     };
 
     // The grant it holds: the fetch reads the table's columns and validates.
@@ -131,7 +135,7 @@ async fn distributed_check_sees_the_table_through_a_grant_on_it() {
             "orders",
             &format!(
                 r#"
-user: {user}
+username: {user}
 password: {user}-secret
 distributed_check:
   cluster: {cluster}
@@ -200,7 +204,7 @@ async fn insert_alone_passes_the_settings_check() {
     try_sink_with::<Owned<Order>>(
         &srv.url,
         "orders",
-        "user: writer\npassword: writer-secret\nsettings: { insert_quorum: \"0\" }\n",
+        "username: writer\npassword: writer-secret\nsettings: { insert_quorum: \"0\" }\n",
     )
     .await
     .expect("INSERT alone passes the settings check");

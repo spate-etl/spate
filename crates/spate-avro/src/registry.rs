@@ -144,7 +144,8 @@ impl Pending {
 
 /// The rule `registry.url` meets.
 const REGISTRY_URL: UrlRule<'static> =
-    UrlRule::new("set them in registry.username and registry.password").schemes(&["http", "https"]);
+    UrlRule::new("set them in `registry.username` and `registry.password`")
+        .schemes(&["http", "https"]);
 
 /// `registry.url` parsed and checked.
 ///
@@ -1368,8 +1369,8 @@ mod tests {
             ),
             (
                 "https://user:secret@sr",
-                "carries userinfo; set them in registry.username and \
-                 registry.password",
+                "carries userinfo; set them in `registry.username` and \
+                 `registry.password`",
             ),
         ] {
             let err = registry_url(url)

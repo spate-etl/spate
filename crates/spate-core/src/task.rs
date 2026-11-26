@@ -9,6 +9,7 @@
 //! thread.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -349,6 +350,23 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    spawn_named(Cow::Borrowed(name), f)
+}
+
+/// [`spawn_thread`] with a name built at run time.
+pub(crate) fn spawn_named_thread<F, T>(name: String, f: F) -> std::io::Result<ThreadHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    spawn_named(Cow::Owned(name), f)
+}
+
+fn spawn_named<F, T>(name: Cow<'static, str>, f: F) -> std::io::Result<ThreadHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
     // With no subscriber set, the thread looks the default up when it logs,
     // so a global subscriber installed after the spawn still applies.
     let dispatch = tracing::dispatcher::get_default(|d| {
@@ -360,7 +378,7 @@ where
         reason = "the returned `ThreadHandle` joins the thread when dropped"
     )]
     let inner = std::thread::Builder::new()
-        .name(name.to_owned())
+        .name(name.clone().into_owned())
         .spawn(move || {
             // Dropped when this closure returns or unwinds, which wakes `join_by`.
             let _finished = finished;
@@ -368,7 +386,7 @@ where
                 Ok(output) => output,
                 Err(payload) => {
                     tracing::error!(
-                        thread = name,
+                        thread = &*name,
                         panic = panic_text(&*payload),
                         "background thread panicked"
                     );

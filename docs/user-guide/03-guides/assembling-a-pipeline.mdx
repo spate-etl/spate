@@ -182,6 +182,7 @@ with the driver threads before the drain runs. A clone smuggled into
 long-lived state outside the returned chain outlives the drivers and turns
 a graceful drain into a deadline-bounded loud abandon (bounded by
 `checkpoint.drain_timeout`; see [Graceful shutdown](graceful-shutdown.mdx)).
+A pipeline thread that never stops holds its clone the same way.
 :::
 
 ## Step 5: `.runtime_options(...)` (optional)

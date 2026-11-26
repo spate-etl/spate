@@ -152,6 +152,19 @@ impl HealthState {
         }
     }
 
+    /// How long ago thread `thread` last beat, to the millisecond, on the
+    /// clock given at construction. `None` for an index out of range.
+    pub(crate) fn heartbeat_age(&self, thread: usize) -> Option<Duration> {
+        self.heartbeat_age_at(thread, self.clock.now())
+    }
+
+    fn heartbeat_age_at(&self, thread: usize, now: Instant) -> Option<Duration> {
+        let beat = self.heartbeats.get(thread)?.load(Ordering::Relaxed);
+        Some(Duration::from_millis(
+            self.millis_since_epoch(now).saturating_sub(beat),
+        ))
+    }
+
     /// Mark whether the source has received its (initial) assignment.
     pub fn set_assignment_received(&self, received: bool) {
         self.assignment_received.store(received, Ordering::Relaxed);
@@ -190,12 +203,10 @@ impl HealthState {
     /// Liveness as of `now` (injectable for tests).
     #[must_use]
     pub fn healthy_at(&self, now: Instant) -> bool {
-        let now_ms = self.millis_since_epoch(now);
-        let stale = u64::try_from(self.thresholds.heartbeat_stale.as_millis()).unwrap_or(u64::MAX);
-        let hearts_fresh = self
-            .heartbeats
-            .iter()
-            .all(|hb| now_ms.saturating_sub(hb.load(Ordering::Relaxed)) <= stale);
+        let hearts_fresh = (0..self.heartbeats.len()).all(|thread| {
+            self.heartbeat_age_at(thread, now)
+                .is_some_and(|age| age <= self.thresholds.heartbeat_stale)
+        });
 
         let stuck_ms =
             u64::try_from(self.thresholds.watermark_stuck.as_millis()).unwrap_or(u64::MAX);
@@ -480,6 +491,20 @@ mod tests {
         health.heartbeat(0);
         assert!(health.healthy_at(health.epoch + Duration::from_millis(1300)));
         assert!(!health.healthy_at(health.epoch + Duration::from_millis(1301)));
+    }
+
+    /// A thread's heartbeat age is the time since its last beat on the
+    /// injected clock, and an index past the thread count has none.
+    #[test]
+    fn a_heartbeat_age_counts_from_the_last_beat() {
+        let clock = crate::clock::TestClock::frozen();
+        let health = HealthState::with_clock(2, thresholds(1000, 60_000), clock.clone());
+        clock.advance(Duration::from_millis(300));
+        health.heartbeat(1);
+        clock.advance(Duration::from_millis(950));
+        assert_eq!(health.heartbeat_age(0), Some(Duration::from_millis(1250)));
+        assert_eq!(health.heartbeat_age(1), Some(Duration::from_millis(950)));
+        assert_eq!(health.heartbeat_age(2), None);
     }
 
     /// Liveness reads the injected clock: a heartbeat goes stale once that

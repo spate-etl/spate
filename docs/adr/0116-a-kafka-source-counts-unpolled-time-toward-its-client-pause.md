@@ -1,5 +1,5 @@
 ---
-description: "The Kafka source pauses a partition at the consumer once its lane has been paused for 2 s with no poll of the partition between pauses, so short pauses with no poll between them add up."
+description: "The Kafka source pauses a partition at the consumer once its lane has been paused for 2 s with no poll, counted across short pauses."
 ---
 
 # ADR-0116 — A Kafka source counts paused time with no poll toward its client pause

@@ -155,10 +155,8 @@ pub struct BackpressureParams {
     pub high_bytes: usize,
     /// Resume only once usage is at or below this many bytes.
     pub low_bytes: usize,
-    /// Minimum time to stay paused. Bounds the pause/resume flap rate and
-    /// amortizes the prefetch purge that pausing a source implies (a paused
-    /// Kafka partition drops its prefetched messages and refetches on
-    /// resume).
+    /// Minimum time to stay paused. Bounds the pause/resume flap rate, since
+    /// resuming a paused lane is not free for every source.
     ///
     /// A pause raised by a queue rejection while a shard worker waits for a
     /// write permit, with usage under `high_bytes`, does not wait it out.

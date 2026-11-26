@@ -414,8 +414,9 @@ pub trait Source: Send {
     /// and for a partition that has stayed at
     /// `checkpoint.max_pending_batches` for `backpressure.min_pause`. A lane
     /// paused for both is resumed once neither holds. A call that fails is
-    /// made again on a later commit tick. Optional capability: sources that
-    /// cannot pause rely on bounded-queue pushback alone.
+    /// made again on a later commit tick. A source may stop fetching some
+    /// time after the call, and documents how long. Optional capability:
+    /// sources that cannot pause rely on bounded-queue pushback alone.
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
         Ok(())

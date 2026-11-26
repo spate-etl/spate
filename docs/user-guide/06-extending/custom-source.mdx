@@ -71,6 +71,11 @@ What the framework holds you to:
   wait out `timeout`: the pipeline thread stops polling the lane, and a
   thread whose lanes have all finished waits on its control channel. A lane
   that never reports `finished` keeps the rule above.
+- **A poll returns by its `timeout`.** The pipeline thread takes its shutdown
+  message between polls. A poll that blocks past `timeout` keeps the thread
+  from stopping. `run` gives up on the thread 500ms after the deadline it set
+  for its threads to stop, and the run exits `Failed`; see
+  [Graceful shutdown](../03-guides/graceful-shutdown.mdx#a-pipeline-thread-that-does-not-stop).
 
 The batch type holds one poll's payloads and streams them out one at a time,
 all sharing the batch lifetime:
@@ -125,9 +130,10 @@ them wherever your source resumes from instead.
   specific lanes. The runtime calls them under backpressure, and for a
   partition that has stayed at `checkpoint.max_pending_batches` for
   `backpressure.min_pause`. A lane paused for both resumes once neither
-  holds, and a call that fails is made again on a later commit tick. Sources
-  that can't pause rely on bounded-queue pushback alone, but a pausable
-  source keeps memory flat under sink pressure.
+  holds, and a call that fails is made again on a later commit tick. If your
+  source stops fetching some time after the call, document how long. Sources
+  that can't pause rely on bounded-queue pushback alone, but a pausable source
+  keeps memory flat under sink pressure.
 - **`stalled`** (default no-op) names the partitions whose watermark is
   stalled behind a failed batch, such as one the sink abandoned. The runtime
   calls it on each commit tick while any partition is stalled. The stall lasts

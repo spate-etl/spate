@@ -357,7 +357,7 @@ impl AvroDeserializerConfig {
                 let Some(schema) = self.schema.as_ref() else {
                     return Err(at.invalid(
                         "schema",
-                        format!("is required in mode `{mode}` (inline or path)"),
+                        format!("is required in mode `{mode}` (`inline` or `path`)"),
                     ));
                 };
                 if self.registry.is_some() {
@@ -1103,7 +1103,7 @@ mod tests {
                     schema: None,
                     ..fixed(AvroMode::Raw)
                 },
-                "deserializer.avro.schema: is required in mode `raw` (inline or path)",
+                "deserializer.avro.schema: is required in mode `raw` (`inline` or `path`)",
             ),
             (
                 "single_object without schema",
@@ -1111,7 +1111,7 @@ mod tests {
                     schema: None,
                     ..fixed(AvroMode::SingleObject)
                 },
-                "deserializer.avro.schema: is required in mode `single_object` (inline or path)",
+                "deserializer.avro.schema: is required in mode `single_object` (`inline` or `path`)",
             ),
             (
                 "raw with registry",
@@ -1214,7 +1214,7 @@ mod tests {
             AvroDeserializerConfig::from_component_config(&component("mode: raw")).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "deserializer.avro.schema: is required in mode `raw` (inline or path)"
+            "deserializer.avro.schema: is required in mode `raw` (`inline` or `path`)"
         );
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
         };
         assert_eq!(
             refusal(build(&config, &rt)),
-            "deserializer.avro.schema: is required in mode `raw` (inline or path)"
+            "deserializer.avro.schema: is required in mode `raw` (`inline` or `path`)"
         );
     }
 

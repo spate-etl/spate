@@ -309,15 +309,17 @@ pub struct BackpressureSection {
     pub high_ratio: f64,
     /// Fraction of the budget below which sources may resume.
     pub low_ratio: f64,
-    /// Minimum pause duration before resuming (avoids flapping; pausing a
-    /// Kafka partition purges its prefetch, so resume is not free). A pause
+    /// Minimum pause duration before resuming (avoids flapping, since
+    /// resuming a paused lane is not free for every source). A pause
     /// raised while a shard waits for a write permit, with usage under the
     /// high watermark, ends once no shard waits, without this minimum.
     ///
     /// Also how long a partition stays at
     /// [`CheckpointSection::max_pending_batches`] before its lanes are paused
     /// at the source. Zero pauses them as soon as the partition reaches the
-    /// ceiling, and a longer value leaves the source fetching for that long.
+    /// ceiling, and a longer value leaves the source fetching for at least
+    /// that long. A source that stops fetching some time after the pause
+    /// documents how long.
     ///
     /// Also how long shard-queue rejections last, with no push or flush
     /// completing, before they pause the source while no shard waits for a

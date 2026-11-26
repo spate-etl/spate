@@ -69,8 +69,8 @@ ADR-0107 rules out. No evidence showed anyone needs to set the wait.
   `min_pause` plus 2 s after the partition reaches the ceiling, plus up to one
   controller pass. The source cannot tell that pause from a backpressure one,
   so the two waits run in series.
-- Bad, because `spate_checkpoint_ceiling_pauses_total` counts the runtime's
-  request, and a ceiling pause the runtime lifts within 2 s never reaches the
+- Bad, because `spate_checkpoint_ceiling_pauses_total` counts a ceiling pause
+  that the runtime lifts within 2 s, and such a pause never reaches the
   consumer. A debug line records each client pause.
 - Neutral, because INV-1 holds: a partition never paused at the consumer keeps
   its fetch position, and a paused one resumes from the position the pipeline

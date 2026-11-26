@@ -2812,6 +2812,18 @@ mod tests {
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
     }
 
+    /// A pause lands on the first poll after it falls due, however late that
+    /// poll comes.
+    #[test]
+    fn a_pause_lands_on_a_poll_after_its_instant() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT * 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+    }
+
     /// A pause that lands leaves one due later waiting for its own instant.
     #[test]
     fn a_landing_leaves_a_later_pause_due() {

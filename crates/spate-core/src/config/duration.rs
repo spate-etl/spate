@@ -10,18 +10,21 @@ use humantime_serde::re::humantime::format_duration;
 use std::fmt;
 use std::time::Duration;
 
-/// The range a duration must fall in: a floor, an optional ceiling, and
-/// whether `0s` is also accepted.
+/// The range a duration must fall in: a floor, an optional ceiling, whether
+/// `0s` is also accepted, and whether only whole seconds are.
 ///
-/// Both ends are inclusive. The comparison is on the whole [`Duration`], so a
-/// sub-millisecond part counts and nothing is truncated to a unit first. The
-/// fields are private so a later rule, such as whole seconds, can be added
-/// without breaking a caller.
+/// The floor is inclusive unless the bounds come from [`above`](Self::above),
+/// and the ceiling is inclusive. The comparison is on the whole [`Duration`],
+/// so a sub-millisecond part counts and nothing is truncated to a unit first.
+/// The fields are private so a later rule can be added without breaking a
+/// caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurationBounds {
     floor: Duration,
+    exclusive_floor: bool,
     ceiling: Option<Duration>,
     or_zero: bool,
+    whole_seconds: bool,
 }
 
 impl DurationBounds {
@@ -30,8 +33,29 @@ impl DurationBounds {
     pub const fn at_least(floor: Duration) -> Self {
         Self {
             floor,
+            exclusive_floor: false,
             ceiling: None,
             or_zero: false,
+            whole_seconds: false,
+        }
+    }
+
+    /// Bounds that accept anything longer than `floor`, and refuse `floor`
+    /// itself.
+    ///
+    /// # Panics
+    ///
+    /// If `floor` is [`Duration::MAX`], which no value is longer than. In a
+    /// `const` item this fails to compile.
+    #[must_use]
+    pub const fn above(floor: Duration) -> Self {
+        assert!(
+            floor.as_nanos() < Duration::MAX.as_nanos(),
+            "an exclusive duration floor must be below Duration::MAX"
+        );
+        Self {
+            exclusive_floor: true,
+            ..Self::at_least(floor)
         }
     }
 
@@ -39,14 +63,23 @@ impl DurationBounds {
     ///
     /// # Panics
     ///
-    /// If `ceiling` is shorter than the floor. In a `const` item this fails
-    /// to compile.
+    /// If `ceiling` is shorter than the floor, equal to a floor from
+    /// [`above`](Self::above), or not whole seconds in bounds that accept only
+    /// whole seconds. In a `const` item this fails to compile.
     #[must_use]
     pub const fn at_most(self, ceiling: Duration) -> Self {
         // `Duration`'s ordering is not usable in a `const fn`.
         assert!(
             self.floor.as_nanos() <= ceiling.as_nanos(),
             "a duration ceiling must not be below its floor"
+        );
+        assert!(
+            !self.exclusive_floor || self.floor.as_nanos() != ceiling.as_nanos(),
+            "a duration ceiling must be above an exclusive floor"
+        );
+        assert!(
+            !self.whole_seconds || ceiling.subsec_nanos() == 0,
+            "a whole-seconds ceiling must be whole seconds"
         );
         Self {
             ceiling: Some(ceiling),
@@ -59,16 +92,38 @@ impl DurationBounds {
     ///
     /// # Panics
     ///
-    /// If the floor is zero, which already accepts `0s`. In a `const` item
+    /// If the floor is zero: an inclusive zero floor already accepts `0s`,
+    /// and an exclusive one would then accept every value. In a `const` item
     /// this fails to compile.
     #[must_use]
     pub const fn or_zero(self) -> Self {
-        assert!(
-            !self.floor.is_zero(),
-            "or_zero needs a non-zero floor, since a zero floor accepts 0s"
-        );
+        assert!(!self.floor.is_zero(), "or_zero needs a non-zero floor");
         Self {
             or_zero: true,
+            ..self
+        }
+    }
+
+    /// These bounds, also refusing a value with a part below one second.
+    ///
+    /// # Panics
+    ///
+    /// If the floor or the ceiling is not whole seconds. In a `const` item
+    /// this fails to compile.
+    #[must_use]
+    pub const fn whole_seconds(self) -> Self {
+        assert!(
+            self.floor.subsec_nanos() == 0,
+            "a whole-seconds floor must be whole seconds"
+        );
+        if let Some(ceiling) = self.ceiling {
+            assert!(
+                ceiling.subsec_nanos() == 0,
+                "a whole-seconds ceiling must be whole seconds"
+            );
+        }
+        Self {
+            whole_seconds: true,
             ..self
         }
     }
@@ -94,14 +149,25 @@ impl fmt::Display for Range<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let DurationBounds {
             floor,
+            exclusive_floor,
             ceiling,
             or_zero,
+            whole_seconds,
         } = *self.0;
         let zero = if or_zero { "0s or " } else { "" };
+        let unit = if whole_seconds {
+            " in whole seconds"
+        } else {
+            ""
+        };
         let floor = format_duration(floor);
-        match ceiling {
-            Some(ceiling) => write!(f, "{zero}from {floor} to {}", format_duration(ceiling)),
-            None => write!(f, "{zero}at least {floor}"),
+        match (exclusive_floor, ceiling.map(format_duration)) {
+            (false, Some(ceiling)) => write!(f, "{zero}from {floor} to {ceiling}{unit}"),
+            (false, None) => write!(f, "{zero}at least {floor}{unit}"),
+            (true, Some(ceiling)) => {
+                write!(f, "{zero}more than {floor} and at most {ceiling}{unit}")
+            }
+            (true, None) => write!(f, "{zero}more than {floor}{unit}"),
         }
     }
 }
@@ -110,8 +176,10 @@ impl fmt::Display for Range<'_> {
 ///
 /// # Errors
 ///
-/// [`DurationBoundsError`] when `value` is below the floor or above the
-/// ceiling, unless it is `0s` and the bounds accept zero.
+/// [`DurationBoundsError`] when `value` is below the floor, equal to a floor
+/// from [`DurationBounds::above`], above the ceiling, or not whole seconds in
+/// bounds that accept only whole seconds, unless it is `0s` and the bounds
+/// accept zero.
 ///
 /// # Examples
 ///
@@ -133,7 +201,14 @@ pub fn check_duration(value: Duration, bounds: DurationBounds) -> Result<(), Dur
     if bounds.or_zero && value.is_zero() {
         return Ok(());
     }
-    if value < bounds.floor || bounds.ceiling.is_some_and(|ceiling| value > ceiling) {
+    let below = if bounds.exclusive_floor {
+        value <= bounds.floor
+    } else {
+        value < bounds.floor
+    };
+    let past_ceiling = bounds.ceiling.is_some_and(|ceiling| value > ceiling);
+    let fractional = bounds.whole_seconds && value.subsec_nanos() != 0;
+    if below || past_ceiling || fractional {
         return Err(DurationBoundsError { value, bounds });
     }
     Ok(())
@@ -157,8 +232,8 @@ mod tests {
         assert_eq!(check_duration(value, bounds), Ok(()), "{value:?}");
     }
 
-    /// Pins each end of each bounds shape, inclusive, on the whole
-    /// `Duration`, and the four message forms by equality.
+    /// Pins each end of each bounds shape, inclusive or exclusive, on the
+    /// whole `Duration`, and each message form by equality.
     #[test]
     fn check_duration_refuses_each_boundary_class() {
         const RANGE: DurationBounds =
@@ -231,6 +306,77 @@ mod tests {
             one_second,
             DurationBounds::at_least(one_second).at_most(one_second),
         );
+
+        const RESERVE: Duration = Duration::from_secs(5);
+        const ABOVE: DurationBounds = DurationBounds::above(RESERVE);
+        assert_eq!(refused(RESERVE, ABOVE), "must be more than 5s; found 5s");
+        accepted(RESERVE + NS, ABOVE);
+        accepted(Duration::MAX, ABOVE);
+        const ABOVE_TO_DAY: DurationBounds = DurationBounds::above(RESERVE).at_most(DAY);
+        assert_eq!(
+            refused(RESERVE, ABOVE_TO_DAY),
+            "must be more than 5s and at most 1day; found 5s"
+        );
+        accepted(DAY, ABOVE_TO_DAY);
+        assert_eq!(
+            refused(DAY + NS, ABOVE_TO_DAY),
+            "must be more than 5s and at most 1day; found 1day 1ns"
+        );
+        const ZERO_OR_ABOVE: DurationBounds = DurationBounds::above(RESERVE).or_zero();
+        accepted(Duration::ZERO, ZERO_OR_ABOVE);
+        assert_eq!(
+            refused(RESERVE, ZERO_OR_ABOVE),
+            "must be 0s or more than 5s; found 5s"
+        );
+    }
+
+    /// Pins that whole-seconds bounds refuse any part below a second at each
+    /// end and inside the range, with the rule stated after the range.
+    #[test]
+    fn whole_seconds_refuses_a_part_below_a_second() {
+        const HOUR: Duration = Duration::from_secs(60 * 60);
+        const THREE: Duration = Duration::from_secs(3);
+        const VISIBILITY: DurationBounds = DurationBounds::at_least(THREE)
+            .at_most(Duration::from_secs(12 * 60 * 60))
+            .whole_seconds();
+        accepted(THREE, VISIBILITY);
+        accepted(12 * HOUR, VISIBILITY);
+        for (value, found) in [
+            (Duration::from_secs(2), "2s"),
+            (12 * HOUR + Duration::from_secs(1), "12h 1s"),
+            (Duration::from_millis(2500), "2s 500ms"),
+            (THREE + NS, "3s 1ns"),
+            (12 * HOUR - NS, "11h 59m 59s 999ms 999us 999ns"),
+        ] {
+            assert_eq!(
+                refused(value, VISIBILITY),
+                format!("must be from 3s to 12h in whole seconds; found {found}")
+            );
+        }
+
+        const FLOOR: DurationBounds = DurationBounds::at_least(THREE).whole_seconds();
+        accepted(Duration::from_secs(4), FLOOR);
+        assert_eq!(
+            refused(Duration::from_millis(3500), FLOOR),
+            "must be at least 3s in whole seconds; found 3s 500ms"
+        );
+
+        const ABOVE: DurationBounds = DurationBounds::above(THREE).whole_seconds();
+        assert_eq!(
+            refused(THREE, ABOVE),
+            "must be more than 3s in whole seconds; found 3s"
+        );
+        accepted(Duration::from_secs(4), ABOVE);
+
+        const ZERO_OR: DurationBounds = DurationBounds::at_least(Duration::from_secs(1))
+            .at_most(HOUR)
+            .or_zero()
+            .whole_seconds();
+        accepted(Duration::ZERO, ZERO_OR);
+        assert_eq!(
+            refused(Duration::from_millis(500), ZERO_OR),
+            "must be 0s or from 1s to 1h in whole seconds; found 500ms"
+        );
     }
 
     /// Pins that a ceiling below its floor is refused when the bounds are
@@ -249,5 +395,63 @@ mod tests {
     fn or_zero_on_a_zero_floor_panics_at_construction() {
         let floor = Duration::ZERO;
         let _ = DurationBounds::at_least(floor).or_zero();
+    }
+
+    /// Pins that a ceiling equal to an exclusive floor is refused when the
+    /// bounds are built.
+    #[test]
+    #[should_panic(expected = "a duration ceiling must be above an exclusive floor")]
+    fn a_ceiling_at_an_exclusive_floor_panics_at_construction() {
+        let floor = Duration::from_secs(5);
+        let _ = DurationBounds::above(floor).at_most(floor);
+    }
+
+    /// Pins that an exclusive floor no value is longer than is refused when
+    /// the bounds are built.
+    #[test]
+    #[should_panic(expected = "an exclusive duration floor must be below Duration::MAX")]
+    fn an_exclusive_floor_at_the_maximum_panics_at_construction() {
+        let floor = Duration::MAX;
+        let _ = DurationBounds::above(floor);
+    }
+
+    /// Pins that `or_zero` on an exclusive zero floor, which would then accept
+    /// every value, is refused when the bounds are built.
+    #[test]
+    #[should_panic(expected = "or_zero needs a non-zero floor")]
+    fn or_zero_above_zero_panics_at_construction() {
+        let floor = Duration::ZERO;
+        let _ = DurationBounds::above(floor).or_zero();
+    }
+
+    /// Pins that whole-seconds bounds refuse a floor with a part below a
+    /// second when they are built.
+    #[test]
+    #[should_panic(expected = "a whole-seconds floor must be whole seconds")]
+    fn whole_seconds_on_a_fractional_floor_panics_at_construction() {
+        let floor = Duration::from_millis(2500);
+        let _ = DurationBounds::at_least(floor).whole_seconds();
+    }
+
+    /// Pins that `whole_seconds` refuses a ceiling, set before it, with a
+    /// part below a second.
+    #[test]
+    #[should_panic(expected = "a whole-seconds ceiling must be whole seconds")]
+    fn whole_seconds_after_a_fractional_ceiling_panics_at_construction() {
+        let ceiling = Duration::from_secs(10) - NS;
+        let _ = DurationBounds::at_least(Duration::from_secs(3))
+            .at_most(ceiling)
+            .whole_seconds();
+    }
+
+    /// Pins that `at_most` refuses a ceiling with a part below a second in
+    /// bounds already set to whole seconds.
+    #[test]
+    #[should_panic(expected = "a whole-seconds ceiling must be whole seconds")]
+    fn a_fractional_ceiling_after_whole_seconds_panics_at_construction() {
+        let ceiling = Duration::from_secs(10) - NS;
+        let _ = DurationBounds::at_least(Duration::from_secs(3))
+            .whole_seconds()
+            .at_most(ceiling);
     }
 }

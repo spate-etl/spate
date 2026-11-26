@@ -124,6 +124,12 @@ const COMMIT_INTERVAL: DurationBounds =
 const DRAIN_TIMEOUT: DurationBounds =
     DurationBounds::at_least(Duration::from_nanos(1)).at_most(ONE_DAY);
 
+/// `checkpoint.drain_timeout` with a feed that hands back. Its source stops
+/// reading [`STOP_RESERVE`](crate::feed::STOP_RESERVE) before the drain
+/// deadline, so a timeout no longer than that leaves it no time to read.
+pub(crate) const HANDING_BACK_DRAIN_TIMEOUT: DurationBounds =
+    DurationBounds::above(crate::feed::STOP_RESERVE).at_most(ONE_DAY);
+
 /// Root of a pipeline's configuration file.
 ///
 /// One process runs one pipeline; one file configures one process.

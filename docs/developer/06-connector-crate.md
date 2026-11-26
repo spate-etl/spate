@@ -172,7 +172,7 @@ Word a zero or empty value by what the key holds:
 
 **Follow:** `SinkPoolConfigError` in [`crates/spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs).
 
-**Departs:** `visibility` on `sqs` and the stop reserve on `checkpoint.drain_timeout`, two bounds `check_duration` cannot state yet, are checked by hand in wording of their own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
+**Departs:** `visibility` on `sqs` is checked by hand in wording of its own ([#2414](https://github.com/spate-etl/spate/issues/2414)).
 
 **Checked by:** review.
 

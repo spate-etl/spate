@@ -4908,8 +4908,9 @@ fn a_feed_refuses_a_drain_timeout_within_the_read_reserve() {
         assert_eq!(
             config_error_before_open(h),
             format!(
-                "invalid runtime configuration: checkpoint.drain_timeout: must be more than 5s, \
-                 the stop reserve of the `{backend}` feed; found 5s"
+                "invalid runtime configuration: checkpoint.drain_timeout: must be more than 5s \
+                 and at most 1day; found 5s: the `{backend}` feed stops reading 5s before the \
+                 drain deadline to hand its units back"
             )
         );
     }

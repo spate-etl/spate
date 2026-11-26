@@ -7,7 +7,9 @@ use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, SystemClock, deadline_after};
-use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
+use crate::config::{
+    HANDING_BACK_DRAIN_TIMEOUT, MetricsExporter, PinningMode, PipelineConfig, check_duration,
+};
 use crate::feed::memory::{self, MemoryFeed};
 use crate::feed::{
     DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, Feed, FeedMetricsCtx, FeedOrigin, MeteredFeed,
@@ -23,6 +25,7 @@ use crate::sink::SinkProbeFn;
 use crate::source::{DrainBarrier, Source};
 use crate::task;
 use crate::telemetry::cpu;
+use humantime_serde::re::humantime::format_duration;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -443,13 +446,19 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         )));
                     }
                 };
-                let drain_timeout = self.config.checkpoint.drain_timeout;
-                if feed.hands_back() && drain_timeout <= STOP_RESERVE {
-                    return Err(StartError::Config(format!(
-                        "checkpoint.drain_timeout: must be more than {STOP_RESERVE:?}, the stop \
-                         reserve of the `{}` feed; found {drain_timeout:?}",
-                        feed.backend()
-                    )));
+                if feed.hands_back() {
+                    check_duration(
+                        self.config.checkpoint.drain_timeout,
+                        HANDING_BACK_DRAIN_TIMEOUT,
+                    )
+                    .map_err(|e| {
+                        StartError::Config(format!(
+                            "checkpoint.drain_timeout: {e}: the `{}` feed stops reading {} \
+                             before the drain deadline to hand its units back",
+                            feed.backend(),
+                            format_duration(STOP_RESERVE)
+                        ))
+                    })?;
                 }
                 resolved_feed = Some((section, feed, origin));
             }

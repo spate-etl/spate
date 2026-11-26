@@ -2994,6 +2994,22 @@ mod tests {
         ));
     }
 
+    /// A pause that takes back an instant already past lands on the next
+    /// poll, even after a poll that found nothing due.
+    #[test]
+    fn a_reclaimed_instant_lands_on_the_next_poll() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        source.resume(&[LaneId(0)]).expect("resume");
+        clock.advance(CLIENT_PAUSE_WAIT * 3 / 4);
+        poll_quiet(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+    }
+
     /// A poll of the partition between two pauses starts the wait again.
     #[test]
     fn a_poll_between_pauses_starts_the_wait_again() {

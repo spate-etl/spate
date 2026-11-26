@@ -2940,6 +2940,10 @@ mod tests {
     fn a_pause_with_no_poll_since_the_last_keeps_its_instant() {
         let mut source = opened_source(&[(0, 0)]);
         let clock = freeze(&mut source);
+        // Polled before the first pause, and not between the two.
+        let shared = Arc::new(Shared::new(None, -1));
+        shared.polls.fetch_add(1, Ordering::Relaxed);
+        source.members[0].watermarks.insert(0, shared);
         source.pause(&[LaneId(0)]).expect("pause");
         clock.advance(CLIENT_PAUSE_WAIT / 2);
         source.resume(&[LaneId(0)]).expect("resume");

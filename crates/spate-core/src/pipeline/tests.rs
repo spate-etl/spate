@@ -5096,6 +5096,34 @@ fn a_controller_panic_joins_a_thread_that_stops_within_the_grace() {
     assert_eq!(abandoned, Vec::<String>::new());
 }
 
+/// A pipeline thread logs to the subscriber that is the default on the thread
+/// that calls `run`: the driver's line for a stop flush still blocked at its
+/// deadline reaches the run's capture.
+#[test]
+fn a_pipeline_thread_logs_to_the_subscriber_run_was_called_under() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_on_clock_with(
+        stop_config(Duration::from_millis(100)),
+        no_idle_flush(),
+        &clock,
+        |runtime| runtime,
+        blocked_flush_chain,
+    );
+    let flushed = flushes(&h);
+    h.shutdown.trigger();
+    // The stop's flush retries from here, after the drivers' deadline was set.
+    wait_until(spate_test::HANG, "the stop's flush to block", || {
+        flushes(&h) > flushed
+    });
+    clock.advance(Duration::from_millis(100));
+    let line = h.logs.wait_for_line(
+        spate_test::HANG,
+        "drain deadline exceeded with the chain still blocked",
+    );
+    assert!(line.trim_start().starts_with("ERROR"), "{line}");
+    wait_until(spate_test::HANG, "run to return", || h.join.is_finished());
+}
+
 /// A pipeline thread that panics outside the batch guard, here in its
 /// `Shutdown` flush, fails a run whose drain otherwise completed.
 #[test]

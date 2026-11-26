@@ -196,8 +196,10 @@ means it is held in a call.
 
 The thread runs on with its lanes, its chain and its `ShardQueues` clone. The
 sink drain then starts with no time left, so the sink abandons what it holds,
-as at the drain deadline. The thread's batches are never acknowledged, so the
-final commit does not pass them and they replay after restart.
+as at the drain deadline. The batches the thread still holds are never
+acknowledged, so the final commit does not pass them and they replay after
+restart. Batches it pushed to the shard queues before it stopped responding
+are written and committed as usual.
 
 The drivers' deadline depends on how the drain started:
 
@@ -209,8 +211,9 @@ The drivers' deadline depends on how the drain started:
 - **After a controller panic**, there is no drain deadline. `run` tells the
   threads to stop within `drain_timeout` and gives up 500ms after that.
 
-The thread ends when it next returns from the call that held it, or when the
-process exits. Building another pipeline with the same name in the same
+A thread held in a call takes its shutdown message and ends once that call
+returns. A thread that loops without taking its message runs until the process
+exits. Building another pipeline with the same name in the same
 process fails until the old thread ends, because that thread still holds the
 pipeline's shard-queue metrics.
 

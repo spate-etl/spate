@@ -374,6 +374,14 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// logged at `WARN` and left to finish on a thread of its own, holding the
     /// source, the feed and the I/O runtime, and `run` returns.
     ///
+    /// `run` waits for each pipeline thread until 500ms past the deadline it
+    /// gave them to stop. A thread still running then is logged at `ERROR` and
+    /// left running, holding its lanes, its chain and the pipeline's
+    /// shard-queue metrics, and a run that had completed returns
+    /// [`ExitState::Failed`]. Building another pipeline with the same name in
+    /// the process fails until that thread ends. Pipeline threads log to the
+    /// `tracing` subscriber that is the default on the thread that calls `run`.
+    ///
     /// The first call in a process logs the SIMD features the build compiles
     /// in and the ones the CPU reports, at `INFO` under `cpu features`.
     ///

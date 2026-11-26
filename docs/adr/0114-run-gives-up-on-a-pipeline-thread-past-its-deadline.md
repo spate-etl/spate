@@ -98,15 +98,18 @@ fail a run whose thread is late only by a lane drop.
   close grace = 4.5 s of the 5 s gap at the defaults, which leaves 0.5 s for the
   final commit.
 - Bad, because a process that exits after `run` ends the thread wherever it is.
-- Neutral, because INV-1 holds: the thread's acknowledgements never resolve, so
-  no watermark passes them, and its data replays after restart.
+- Neutral, because INV-1 holds: the acknowledgements of the batches the thread
+  still holds never resolve, so no watermark passes them, and that data replays
+  after restart. Batches it pushed to the shard queues before are written and
+  acknowledged as usual.
 
 ### Confirmation
 
 The tests in `crates/spate-core/src/pipeline/tests.rs`:
 `a_thread_that_never_stops_does_not_hold_run`,
 `a_thread_that_stops_within_the_grace_is_joined`,
-`a_controller_panic_does_not_wait_on_a_thread_that_never_stops` and
+`a_controller_panic_does_not_wait_on_a_thread_that_never_stops`,
+`a_controller_panic_joins_a_thread_that_stops_within_the_grace` and
 `a_driver_panic_outside_the_batch_guard_fails_the_run`, and
 `the_driver_joins_end_500_ms_past_the_drivers_deadline` in
 `crates/spate-core/src/pipeline/runtime.rs`. The wait is

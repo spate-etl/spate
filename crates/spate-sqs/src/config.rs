@@ -23,6 +23,11 @@ const MIN_VISIBILITY: Duration = Duration::from_secs(3);
 /// The longest visibility period SQS accepts.
 const MAX_VISIBILITY: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// `visibility`, which SQS takes in whole seconds.
+const VISIBILITY: DurationBounds = DurationBounds::at_least(MIN_VISIBILITY)
+    .at_most(MAX_VISIBILITY)
+    .whole_seconds();
+
 /// The shortest settling window: AWS documents a queue's approximate counts
 /// as taking at least a minute to settle after its producers stop.
 const MIN_SETTLING_WINDOW: Duration = Duration::from_secs(60);
@@ -117,13 +122,8 @@ impl SqsFeedConfig {
 
     fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::feed(BACKEND);
-        let v = self.visibility;
-        if v.subsec_nanos() != 0 || !(MIN_VISIBILITY..=MAX_VISIBILITY).contains(&v) {
-            return Err(at.invalid(
-                "visibility",
-                format!("must be whole seconds from 3s to 12h; got {v:?}"),
-            ));
-        }
+        check_duration(self.visibility, VISIBILITY)
+            .map_err(|e| at.invalid("visibility", e.to_string()))?;
         let url = queue_url(&self.queue_url)?;
         if url.path().trim_end_matches('/').ends_with(".fifo") {
             return Err(at.invalid(
@@ -358,9 +358,14 @@ pub(crate) mod tests {
         };
         assert!(with("3s").is_ok());
         assert!(with("12h").is_ok());
-        for bad in ["2s", "43201s", "2500ms"] {
-            let err = with(bad).unwrap_err().to_string();
-            assert!(err.contains("whole seconds from 3s to 12h"), "{bad}: {err}");
+        for (bad, found) in [("2s", "2s"), ("43201s", "12h 1s"), ("2500ms", "2s 500ms")] {
+            assert_eq!(
+                with(bad).unwrap_err().to_string(),
+                format!(
+                    "feed.sqs.visibility: must be from 3s to 12h in whole seconds; found {found}"
+                ),
+                "{bad}"
+            );
         }
     }
 
@@ -403,7 +408,7 @@ pub(crate) mod tests {
             (
                 "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", visibility: 2s }",
                 at("visibility"),
-                "feed.sqs.visibility: must be whole seconds from 3s to 12h; got 2s",
+                "feed.sqs.visibility: must be from 3s to 12h in whole seconds; found 2s",
             ),
             (
                 "sqs: { queue_url: \"not a url\" }",

@@ -360,28 +360,27 @@ liveness never depends on the controller, because every lane poll resets
 ## Backpressure: pause and resume
 
 When the in-flight budget crosses its high watermark, or a shard queue rejects
-while its sink is the limit, the runtime pauses the affected lanes **and keeps
-polling**. The pipeline thread stops taking records from a paused lane at once.
-Once a lane has been paused for 2 seconds, the source pauses its partition at
-the consumer. Pauses the runtime lifted count toward the 2 seconds until the
-pipeline thread next polls the lane. A partition paused at the consumer
-fetches nothing, but the poll
-loop stays live for rebalance callbacks and liveness. Resume happens under
-hysteresis (low watermark + `backpressure.min_pause`), because a pause at the
-consumer purges the partition's prefetch buffer, so resume is not free and
-flapping would thrash the fetch pipeline.
+while its sink is the limit, the runtime pauses the affected lanes
+**and keeps polling**. The pipeline thread stops taking records from a paused
+lane at once. Two seconds after the runtime pauses a lane, the source pauses its
+partition at the consumer, unless the pipeline thread has polled the lane since.
+A resume does not reset the 2 seconds: a pause after one with no poll in between
+counts from the earlier pause. A partition paused at the consumer fetches
+nothing, but the poll loop stays live for rebalance callbacks and liveness.
+Resume happens under hysteresis (low watermark + `backpressure.min_pause`),
+because a pause at the consumer purges the partition's prefetch buffer, so
+resume is not free and flapping would thrash the fetch pipeline.
 
 A pause the runtime lifts within 2 seconds, with a poll of the lane before the
 next pause, never reaches the consumer. The partition keeps its prefetch buffer
-and is not fetched again. A pause that lasts
-longer purges the buffer, and on resume the partition is fetched from the
-offset after the last record the pipeline took. Until a pause reaches the
-consumer, the partition keeps fetching up to `queued.min.messages` and
-`queued.max.messages.kbytes`. On a topic that carries aborted transactions
-those limits do not count the aborted records, so for those 2 seconds the
-client can take in more than the limits. A poll of the lane frees what the
-aborted records held. A lane the runtime has resumed keeps fetching until the
-pipeline thread polls it.
+and is not fetched again. A pause that reaches the consumer purges the buffer,
+and on resume the partition is fetched from the offset after the last record the
+pipeline took. Until a pause reaches the consumer, the partition keeps fetching
+up to `queued.min.messages` and `queued.max.messages.kbytes`. On a topic that
+carries aborted transactions those limits do not count the aborted records, so
+for those 2 seconds the client can take in more than the limits. A poll of the
+lane frees what the aborted records held. A lane the runtime has resumed keeps
+fetching until the pipeline thread polls it.
 
 A pause raised while the sink is the limit, with the budget under its high
 watermark, ends once no shard waits for a write permit, without

@@ -131,8 +131,8 @@ The records of an aborted transaction are in the response and are not
 delivered, so on a topic that carries aborted transactions a partition can
 hold more than the formula gives while the pipeline polls it slowly. A
 partition that backpressure or the pending-batch ceiling has
-[paused](README.mdx#backpressure-pause-and-resume) for 2 seconds with no poll
-has its queue purged, and one paused for less keeps it.
+[paused](README.mdx#backpressure-pause-and-resume) has its queue purged once
+2 seconds pass with no poll, and one resumed and polled sooner keeps it.
 
 The formula holds whatever the [consumer count](#more-consumers-in-one-process):
 the caps apply per partition, and each partition belongs to one consumer. What
@@ -201,8 +201,8 @@ series are still worth reading, with their limits understood:
 `spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at
 or near **zero** means the pipeline is draining the queue as fast as the broker
 refills it, i.e. the source is **broker-bound** rather than chain- or
-sink-bound. A partition paused for 2 seconds or more with no poll adds nothing
-to it, because that pause purges the partition's queue, and one paused for less
+sink-bound. A partition whose pause has reached the consumer adds nothing to it,
+because that pause purges the partition's queue, and one whose pause has not
 keeps its queue in the count. It does *not* separate "prefetch is too shallow"
 from "prefetch is fine and the broker is the limit": in the source-ceiling study
 it reads ~0 both at the shallow depth that runs 22x slow *and* at the

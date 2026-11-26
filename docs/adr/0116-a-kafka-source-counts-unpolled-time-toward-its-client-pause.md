@@ -1,8 +1,8 @@
 ---
-description: "The Kafka source pauses a partition at the consumer once its lane has been paused for 2 s with no poll, counted across short pauses."
+description: "The Kafka source pauses a partition at the consumer 2 s after its lane is paused with no poll since, across pauses the runtime lifted."
 ---
 
-# ADR-0116 — A Kafka source counts paused time with no poll toward its client pause
+# ADR-0116 — A Kafka source counts unpolled time toward its client pause
 
 - **Status:** accepted
 - **Date:** 2026-11-26
@@ -32,32 +32,34 @@ The question was what the 2 s counts.
 
 ## Considered options
 
-- Time paused since the last poll of the partition, across pauses the runtime
-  lifted
+- Time since a pause began with no poll of the partition since, across pauses
+  the runtime lifted
 - Time paused in the current pause only, as ADR-0115 has it, with the gap
   documented
 - Measure process memory under cycling pauses before deciding
 
 ## Decision outcome
 
-Chosen option: "time paused since the last poll of the partition", because it
-bounds every stretch in which a partition is neither polled nor paused at the
-consumer by the same 2 s, and a pipeline that keeps polling its lanes still
-keeps the prefetch.
+Chosen option: "time since a pause began with no poll of the partition since",
+because it bounds every stretch in which a partition is neither polled nor
+paused at the consumer by the same 2 s, and a pipeline that keeps polling its
+lanes still keeps the prefetch.
 
-Each lane counts its polls in the state it shares with the source. A resume
-that finds a pause not yet at the consumer keeps it as lifted, with its instant
-and the count at the resume. A pause before the count moves takes that instant
-back, and one after it starts a new 2 s wait. Everything else is as ADR-0115
-decided.
+Each lane counts its polls in the state it shares with the source. A pause
+records its instant and the count when it begins, after which the pipeline
+thread polls the lane no more. A resume that finds the pause not yet at the
+consumer keeps both. A pause before the count moves takes that instant back, and
+one after it starts a new 2 s wait. Time the lane spends resumed but not yet
+polled counts, because the partition fetches unchecked then too. Everything else
+is as ADR-0115 decided.
 
 The measurement was not chosen: it could not become a test, and the bound this
 decision sets can be asserted directly.
 
 ### Consequences
 
-- Good, because a partition stops fetching once it has gone 2 s paused with no
-  poll, however many pauses that spans.
+- Good, because a partition stops fetching once 2 s have passed since a pause
+  with no poll, however many pauses that spans.
 - Good, because a lane polled between short pauses keeps its prefetch, as under
   ADR-0115.
 - Neutral, because a lane poll adds one relaxed atomic increment, once per

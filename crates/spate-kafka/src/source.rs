@@ -163,20 +163,21 @@ const START_RETRY_PACE: Duration = Duration::from_secs(1);
 /// `statistics_interval` cannot end it on two samples.
 const MIN_MISPLACED_SNAPSHOTS: u32 = 3;
 
-/// How long a lane stays paused by the runtime, with no poll of its partition,
-/// before the partition is paused at the client. A client pause drops the
+/// How long after the runtime pauses a lane, with no poll of its partition
+/// since, the partition is paused at the client. A client pause drops the
 /// partition's prefetch, so a pause the runtime lifts sooner keeps it.
 const CLIENT_PAUSE_WAIT: Duration = Duration::from_secs(2);
 
 /// Where the runtime's pause of one partition stands at the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EnginePause {
-    /// Not paused at the client yet; due then.
-    Due(Instant),
-    /// Resumed by the runtime before its pause reached the client, after
-    /// `polls` polls of the partition. A pause before the next poll keeps
-    /// `due`.
-    Lifted { due: Instant, polls: u64 },
+    /// Not paused at the client yet; due at `at`. `polls` is the partition's
+    /// poll count when the pause began, after which the pipeline thread polls
+    /// the lane no more.
+    Due { at: Instant, polls: u64 },
+    /// Resumed by the runtime before its pause reached the client. A pause
+    /// while the partition's poll count is still `polls` keeps `at`.
+    Lifted { at: Instant, polls: u64 },
     /// Paused at the client.
     Landed,
 }
@@ -2369,9 +2370,9 @@ impl Source for KafkaSource {
         first_error.map_or(Ok(()), Err)
     }
 
-    /// Records the pause; `poll_events` pauses the partitions at the client
-    /// once they have stayed paused for `CLIENT_PAUSE_WAIT`, counting an
-    /// earlier pause the runtime lifted with no poll of the partition since.
+    /// Records the pause; `poll_events` pauses each partition at the client
+    /// `CLIENT_PAUSE_WAIT` after it was paused, or after an earlier pause the
+    /// runtime lifted with no poll of the partition since.
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let fresh = self.clock.now() + CLIENT_PAUSE_WAIT;
         let mut earliest: Option<Instant> = None;
@@ -2380,13 +2381,16 @@ impl Source for KafkaSource {
                 let Some(&p) = member.assignment.get(l) else {
                     continue;
                 };
-                let due = match member.engine_paused.get(&p) {
-                    Some(EnginePause::Due(_) | EnginePause::Landed) => continue,
-                    Some(&EnginePause::Lifted { due, polls }) if member.polls(p) == polls => due,
-                    Some(EnginePause::Lifted { .. }) | None => fresh,
+                let now_polls = member.polls(p);
+                let (at, polls) = match member.engine_paused.get(&p) {
+                    Some(EnginePause::Due { .. } | EnginePause::Landed) => continue,
+                    Some(&EnginePause::Lifted { at, polls }) if now_polls == polls => (at, polls),
+                    Some(EnginePause::Lifted { .. }) | None => (fresh, now_polls),
                 };
-                member.engine_paused.insert(p, EnginePause::Due(due));
-                earliest = Some(earliest.map_or(due, |e| e.min(due)));
+                member
+                    .engine_paused
+                    .insert(p, EnginePause::Due { at, polls });
+                earliest = Some(earliest.map_or(at, |e| e.min(at)));
             }
         }
         if let Some(due) = earliest {
@@ -2403,11 +2407,10 @@ impl Source for KafkaSource {
                     // A pause that has not reached the client leaves nothing
                     // to resume there.
                     match member.engine_paused.get(&p) {
-                        Some(&EnginePause::Due(due)) => {
-                            let polls = member.polls(p);
+                        Some(&EnginePause::Due { at, polls }) => {
                             member
                                 .engine_paused
-                                .insert(p, EnginePause::Lifted { due, polls });
+                                .insert(p, EnginePause::Lifted { at, polls });
                             continue;
                         }
                         Some(EnginePause::Lifted { .. }) => continue,
@@ -2446,8 +2449,8 @@ impl KafkaSource {
             let mut ready = Vec::new();
             for (&p, state) in &member.engine_paused {
                 match *state {
-                    EnginePause::Due(at) if at <= now => ready.push(p),
-                    EnginePause::Due(at) => next = Some(next.map_or(at, |n| n.min(at))),
+                    EnginePause::Due { at, .. } if at <= now => ready.push(p),
+                    EnginePause::Due { at, .. } => next = Some(next.map_or(at, |n| n.min(at))),
                     EnginePause::Lifted { .. } | EnginePause::Landed => {}
                 }
             }
@@ -2877,7 +2880,7 @@ mod tests {
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
         assert!(matches!(
             client_pause(&source, 1),
-            Some(EnginePause::Due(_))
+            Some(EnginePause::Due { .. })
         ));
         clock.advance(CLIENT_PAUSE_WAIT / 2);
         poll_quiet(&mut source);
@@ -2930,7 +2933,7 @@ mod tests {
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
         assert!(matches!(
             client_pause(&source, 1),
-            Some(EnginePause::Due(_))
+            Some(EnginePause::Due { .. })
         ));
         source.resume(&[LaneId(0), LaneId(1)]).expect("resume");
         assert_eq!(client_pause(&source, 0), None);
@@ -2967,6 +2970,30 @@ mod tests {
         assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
     }
 
+    /// A poll the pipeline thread makes after it resumes, before the source
+    /// hears of the resume, starts the wait again: the poll count is taken
+    /// when the pause begins.
+    #[test]
+    fn a_poll_before_the_source_hears_of_the_resume_starts_the_wait_again() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        let shared = Arc::new(Shared::new(None, -1));
+        source.members[0].watermarks.insert(0, Arc::clone(&shared));
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        // The pipeline thread resumes on its own and polls the lane, then
+        // pauses again before the controller's next pass.
+        shared.polls.fetch_add(1, Ordering::Relaxed);
+        source.resume(&[LaneId(0)]).expect("resume");
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert!(matches!(
+            client_pause(&source, 0),
+            Some(EnginePause::Due { .. })
+        ));
+    }
+
     /// A poll of the partition between two pauses starts the wait again.
     #[test]
     fn a_poll_between_pauses_starts_the_wait_again() {
@@ -2984,7 +3011,7 @@ mod tests {
         poll_quiet(&mut source);
         assert!(matches!(
             client_pause(&source, 0),
-            Some(EnginePause::Due(_))
+            Some(EnginePause::Due { .. })
         ));
         clock.advance(CLIENT_PAUSE_WAIT * 3 / 4);
         poll_quiet(&mut source);
@@ -4174,7 +4201,7 @@ mod tests {
             assert!(source.members[0].validating.is_empty());
             assert!(matches!(
                 source.members[0].engine_paused.get(&0),
-                Some(EnginePause::Due(_))
+                Some(EnginePause::Due { .. })
             ));
             assert_eq!(source.members[0].resumable([0]), vec![0]);
             assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);

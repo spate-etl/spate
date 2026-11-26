@@ -101,8 +101,8 @@ ceiling still stops fetching aborted transactions once the wait has passed.
   every twentieth write four times slower, three reps per arm at `min_pause`
   500 ms and 50 ms. At 87f649c0 pauses averaged 0.21 to 0.24 s, 60 to 62 per
   30 s window, and the client received 1.78 to 2.02 messages per settled row.
-  The rig records only the mean pause, so it does not show what share of pauses
-  end within 2 s.
+  With this change it received 0.98 to 1.08. The rig records only the mean
+  pause, so it does not show what share of pauses end within 2 s.
 - Hand-recorded, one run each, Apache Kafka 4.4.0 in Docker, the ceiling test's
   rig on the real clock with a producer writing about 4.2 MB/s of aborted
   transactions: from the ceiling to the client pause the client took in

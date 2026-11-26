@@ -130,7 +130,7 @@ async fn native_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        "format: native\nuser: default\npassword: native-secret\n",
+        "format: native\nusername: default\npassword: native-secret\n",
     )
     .await;
     assert_eq!(
@@ -189,7 +189,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     let sink = sink_with::<Owned<MilliRow>>(
         &srv.url,
         "dt_micro",
-        "format: native\nuser: default\npassword: native-secret3\n",
+        "format: native\nusername: default\npassword: native-secret3\n",
     )
     .await;
     let mut enc = sink.encoder::<Owned<MilliRow>>();
@@ -259,7 +259,7 @@ async fn native_lowcardinality_composites_render_correctly() {
     let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        "format: native\nuser: default\npassword: native-secret2\n",
+        "format: native\nusername: default\npassword: native-secret2\n",
     )
     .await;
     let mut encoder = sink.encoder::<Owned<NativeRow>>();

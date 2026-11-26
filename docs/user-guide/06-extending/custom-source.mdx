@@ -125,9 +125,10 @@ them wherever your source resumes from instead.
   specific lanes. The runtime calls them under backpressure, and for a
   partition that has stayed at `checkpoint.max_pending_batches` for
   `backpressure.min_pause`. A lane paused for both resumes once neither
-  holds, and a call that fails is made again on a later commit tick. Sources
-  that can't pause rely on bounded-queue pushback alone, but a pausable
-  source keeps memory flat under sink pressure.
+  holds, and a call that fails is made again on a later commit tick. A source
+  may stop fetching some time after the call; its documentation then says how
+  long. Sources that can't pause rely on bounded-queue pushback alone, but a
+  pausable source keeps memory flat under sink pressure.
 - **`stalled`** (default no-op) names the partitions whose watermark is
   stalled behind a failed batch, such as one the sink abandoned. The runtime
   calls it on each commit tick while any partition is stalled. The stall lasts

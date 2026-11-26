@@ -51,9 +51,7 @@ impl Deserializer<Owned<SkuRow>> for LineDeser {
         out: &mut dyn EmitRecord<'buf, SkuRow>,
     ) -> Result<(), DeserError> {
         let sku = std::str::from_utf8(raw.bytes)
-            .map_err(|e| DeserError::Malformed {
-                reason: e.to_string(),
-            })?
+            .map_err(|e| DeserError::malformed(e.to_string()))?
             .to_string();
         let _ = out.emit(Record {
             payload: SkuRow { sku },

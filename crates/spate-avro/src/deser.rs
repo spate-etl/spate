@@ -2,11 +2,12 @@
 //!
 //! Every deserializer shares [`DecoderCore`]: framing → schema resolution →
 //! datum decode, with the backend-specific datum decode swapped on top of
-//! [`DecoderCore::resolve`]. Schema resolution never blocks a pipeline
-//! thread: on a registry cache miss the core triggers an asynchronous fetch
-//! and returns [`DeserError::NotReady`], which the chain converts into a
-//! retriable `Blocked` (see `spate-core`'s deserializer contract). Once the
-//! registry has rejected the client, a miss returns [`DeserError::Fatal`].
+//! [`DecoderCore::resolve`]. Schema resolution never blocks a pipeline thread:
+//! on a registry cache miss the core triggers an asynchronous fetch and returns
+//! [`DeserErrorKind::NotReady`](spate_core::error::DeserErrorKind::NotReady),
+//! which the chain converts into a retriable `Blocked` (see `spate-core`'s
+//! deserializer contract). Once the registry has rejected the client, a miss
+//! returns [`DeserErrorKind::Fatal`](spate_core::error::DeserErrorKind::Fatal).
 //!
 //! Empty payloads (Kafka tombstones) decode to **zero records** in every
 //! mode.
@@ -99,10 +100,8 @@ fn writer_schema(writer: &CompiledSchema) -> Result<&Schema, DeserError> {
     writer
         .schema
         .as_ref()
-        .map_err(|reason| DeserError::SchemaUnavailable {
-            // Pre-rendered in `CompiledSchema::compile`: clone, never format.
-            reason: reason.clone(),
-        })
+        // Pre-rendered in `CompiledSchema::compile`: clone, never format.
+        .map_err(|reason| DeserError::schema_unavailable(reason.clone()))
 }
 
 impl HeldReader {
@@ -124,16 +123,19 @@ impl HeldReader {
                 // `big-decimal`), so its index was not kept.
                 Err(_) => compile_names(writer_schema(writer)?)
                     .map(Cow::Owned)
-                    .map_err(|reason| DeserError::SchemaUnavailable {
-                        reason: format!("schema {}: {reason}", writer.id),
+                    .map_err(|reason| {
+                        DeserError::schema_unavailable(format!("schema {}: {reason}", writer.id))
                     }),
             },
             schema_builder: |writer| writer_schema(writer),
             reader_builder: |writer| {
                 GenericDatumReader::builder(writer_schema(writer)?)
                     .build()
-                    .map_err(|e| DeserError::SchemaUnavailable {
-                        reason: format!("schema {} cannot be resolved: {e}", writer.id),
+                    .map_err(|e| {
+                        DeserError::schema_unavailable(format!(
+                            "schema {} cannot be resolved: {e}",
+                            writer.id
+                        ))
                     })
             },
             resolution_builder: |reader_schema| {
@@ -142,8 +144,10 @@ impl HeldReader {
                 };
                 ResolvedSchema::new(reader)
                     .map(|names| Some((reader, names)))
-                    .map_err(|e| DeserError::SchemaUnavailable {
-                        reason: format!("schema {id} cannot be resolved: {e}"),
+                    .map_err(|e| {
+                        DeserError::schema_unavailable(format!(
+                            "schema {id} cannot be resolved: {e}"
+                        ))
                     })
             },
         }
@@ -221,11 +225,8 @@ impl Read for DatumReader<'_, '_> {
 /// reader schema once [`check_resolution`] has bounded what that costs.
 fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserError> {
     let side = held.borrow_reader_side().as_deref();
-    check_datum(held.borrow_schema(), held.borrow_names(), side, datum).map_err(|e| {
-        DeserError::Malformed {
-            reason: format!("avro datum refused: {e}"),
-        }
-    })?;
+    check_datum(held.borrow_schema(), held.borrow_names(), side, datum)
+        .map_err(|e| DeserError::malformed(format!("avro datum refused: {e}")))?;
     let payload = datum.len();
     let mut input = DatumReader {
         bytes: datum,
@@ -236,20 +237,15 @@ fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserEr
     // the resolution check nothing.
     let encoded = payload - input.bytes.len();
     if input.truncated {
-        return Err(DeserError::Malformed {
-            reason: "avro datum is truncated".into(),
-        });
+        return Err(DeserError::malformed("avro datum is truncated"));
     }
     let failed = |e: apache_avro::Error| refusal("avro datum decode failed", &e);
     let Some((reader, names)) = held.borrow_resolution() else {
         return result.map_err(failed);
     };
     let value = result.map_err(failed)?;
-    check_resolution(&value, encoded, reader, names.get_names()).map_err(|_| {
-        DeserError::Malformed {
-            reason: REFUSED.into(),
-        }
-    })?;
+    check_resolution(&value, encoded, reader, names.get_names())
+        .map_err(|_| DeserError::malformed(REFUSED))?;
     value
         .resolve_with_names(reader, names.get_names())
         .map_err(failed)
@@ -268,7 +264,7 @@ fn refusal(lead: &str, e: &apache_avro::Error) -> DeserError {
         }
         _ => lead.to_owned(),
     };
-    DeserError::Malformed { reason }
+    DeserError::malformed(reason)
 }
 
 /// A resolved payload: the writer schema plus the datum slice, which borrows
@@ -309,17 +305,15 @@ impl DecoderCore {
                     Lookup::Ready(schema) => (schema, datum),
                     Lookup::Missing => {
                         if let Some(reason) = registry.rejection.get() {
-                            return Err(DeserError::Fatal {
-                                reason: reason.clone(),
-                            });
+                            return Err(DeserError::fatal(reason.clone()));
                         }
                         registry.request(id);
-                        return Err(DeserError::NotReady {
-                            reason: format!("schema {id} is being fetched from the registry"),
-                        });
+                        return Err(DeserError::not_ready(format!(
+                            "schema {id} is being fetched from the registry"
+                        )));
                     }
                     Lookup::Failed(reason) => {
-                        return Err(DeserError::SchemaUnavailable { reason });
+                        return Err(DeserError::schema_unavailable(reason));
                     }
                 }
             }
@@ -330,13 +324,11 @@ impl DecoderCore {
             } => {
                 let (fp, datum) = wire::parse_single_object(raw.bytes)?;
                 if fp != *fingerprint {
-                    return Err(DeserError::SchemaUnavailable {
-                        reason: format!(
-                            "single-object fingerprint {fp:#018x} does not match the \
+                    return Err(DeserError::schema_unavailable(format!(
+                        "single-object fingerprint {fp:#018x} does not match the \
                              configured schema ({:#018x})",
-                            fingerprint
-                        ),
-                    });
+                        fingerprint
+                    )));
                 }
                 (Arc::clone(schema), datum)
             }
@@ -379,27 +371,29 @@ impl DecoderCore {
 /// # Limits
 ///
 /// Each datum is checked before it is decoded, and refused as
-/// [`DeserError::Malformed`] when it nests more than 32 levels deep, when its
-/// arrays and maps claim more than `max(payload length, 65 536)` items, or
-/// when its decoded [`AvroValue`] tree would take more than 1,024 bytes for
-/// each of those. A level is a record field, a collection item, a union
-/// branch, a named-type reference, or the bytes of a `decimal` or
-/// `big-decimal`, so a linked list of a recursive record decodes up to 10
-/// nodes deep. The size counts each value, the field names copied into every
-/// record, enum symbols, and string, bytes and map key contents. With a
-/// `reader_schema`, it also counts the fields, defaults and enum symbols that
-/// resolution into the reader schema adds.
+/// [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed)
+/// when it nests more than 32 levels deep, when its arrays and maps claim more
+/// than `max(payload length, 65 536)` items, or when its decoded [`AvroValue`]
+/// tree would take more than 1,024 bytes for each of those. A level is a record
+/// field, a collection item, a union branch, a named-type reference, or the
+/// bytes of a `decimal` or `big-decimal`, so a linked list of a recursive
+/// record decodes up to 10 nodes deep. The size counts each value, the field
+/// names copied into every record, enum symbols, and string, bytes and map key
+/// contents. With a `reader_schema`, it also counts the fields, defaults and
+/// enum symbols that resolution into the reader schema adds.
 ///
 /// # Resolution limit
 ///
-/// With a `reader_schema` that recurses through a union, each datum is
-/// weighed before it is resolved. A value weighs one, plus one for each 64
-/// bytes of content it holds, doubled for each time its path has already
-/// passed through the union it is under. A datum is refused as
-/// [`DeserError::Malformed`] when the doubling adds more than
-/// `max(3 × min(its weight with no doubling, its encoded bytes), 1 024)`. A list whose `next` field is `["null", "Node"]`
-/// resolves up to 9 nodes when its nodes have one other field, and up to 5
-/// when they have 40. A reader schema that does not recurse refuses nothing.
+/// With a `reader_schema` that recurses through a union, each datum is weighed
+/// before it is resolved. A value weighs one, plus one for each 64 bytes of
+/// content it holds, doubled for each time its path has already passed through
+/// the union it is under. A datum is refused as
+/// [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed)
+/// when the doubling adds more than
+/// `max(3 × min(its weight with no doubling, its encoded bytes), 1 024)`. A
+/// list whose `next` field is `["null", "Node"]` resolves up to 9 nodes when
+/// its nodes have one other field, and up to 5 when they have 40. A reader
+/// schema that does not recurse refuses nothing.
 #[derive(Clone, Debug)]
 pub struct AvroValueDeserializer {
     core: DecoderCore,
@@ -525,6 +519,7 @@ mod tests {
     use super::*;
     use apache_avro::to_avro_datum;
     use apache_avro::types::Value;
+    use spate_core::error::DeserErrorKind;
     use spate_test::EmitCollector;
 
     const WRITER_V1: &str = r#"{"type":"record","name":"Event","fields":[
@@ -625,10 +620,7 @@ mod tests {
             [2],
             "the reader of a held schema stays"
         );
-        assert!(matches!(
-            decode(&mut core, 1),
-            Err(DeserError::NotReady { .. })
-        ));
+        assert!(decode(&mut core, 1).is_err_and(|e| e.kind() == DeserErrorKind::NotReady));
     }
 
     /// At the ceiling an arriving id takes a resident id's place, so the cache
@@ -708,7 +700,7 @@ mod tests {
         };
         let err = core.decode(&raw_payload(&bytes)).unwrap_err();
         assert!(
-            matches!(err, DeserError::SchemaUnavailable { .. }),
+            err.kind() == DeserErrorKind::SchemaUnavailable,
             "got {err:?}"
         );
 
@@ -832,7 +824,7 @@ mod tests {
         let err = AvroValueDeserializer::new(raw_core(None))
             .deserialize(&raw_payload(&[0xFF, 0xFF, 0xFF]), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
     }
 
     #[test]
@@ -956,7 +948,7 @@ mod tests {
         let err = AvroValueDeserializer::new(core(fingerprint ^ 1))
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
     }
 
     #[test]
@@ -979,7 +971,7 @@ mod tests {
             .deserialize(&raw_payload(&datum(4, "poison")), &test_ack(), &mut out)
             .unwrap_err();
         assert!(
-            matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("nope")),
+            err.kind() == DeserErrorKind::SchemaUnavailable && err.reason().contains("nope"),
             "{err}"
         );
         assert!(out.records.is_empty());

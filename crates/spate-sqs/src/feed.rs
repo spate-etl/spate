@@ -393,7 +393,7 @@ impl Shared {
             )
         };
         if first {
-            tracing::error!(error = %error.reason, "the SQS feed stopped");
+            tracing::error!(error = %error.reason(), "the SQS feed stopped");
         }
         if let Some(close) = close {
             close.reject(error.clone());
@@ -403,7 +403,7 @@ impl Shared {
             format!(
                 "the feed stopped while the unit was being sent, so SQS may or may not \
                  have stored it: {}",
-                error.reason
+                error.reason()
             ),
         );
         for p in sending {

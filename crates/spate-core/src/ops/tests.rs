@@ -58,23 +58,18 @@ impl Deserializer<LogF> for LogDeser {
         out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
     ) -> Result<(), DeserError> {
         if raw.bytes.starts_with(b"ERR") {
-            return Err(DeserError::Malformed {
-                reason: "poison".into(),
-            });
+            return Err(DeserError::malformed("poison"));
         }
         if raw.bytes.starts_with(b"SKIP") {
             return Ok(());
         }
-        let pos =
-            raw.bytes
-                .iter()
-                .position(|&b| b == b':')
-                .ok_or_else(|| DeserError::Malformed {
-                    reason: "missing key separator".into(),
-                })?;
-        let key = std::str::from_utf8(&raw.bytes[..pos]).map_err(|_| DeserError::Malformed {
-            reason: "non-utf8 key".into(),
-        })?;
+        let pos = raw
+            .bytes
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or_else(|| DeserError::malformed("missing key separator"))?;
+        let key = std::str::from_utf8(&raw.bytes[..pos])
+            .map_err(|_| DeserError::malformed("non-utf8 key"))?;
         let _ = out.emit(Record {
             payload: LogEvent {
                 key,
@@ -102,9 +97,7 @@ impl Deserializer<SubF> for EmitThenFailDeser {
     ) -> Result<(), DeserError> {
         for chunk in raw.bytes.split(|&b| b == b'|') {
             if chunk == b"ERRTAIL" {
-                return Err(DeserError::Malformed {
-                    reason: "poison".into(),
-                });
+                return Err(DeserError::malformed("poison"));
             }
             let _ = out.emit(Record {
                 payload: SubEvent { chunk },
@@ -2972,9 +2965,7 @@ impl Deserializer<LogF> for FlakyDeser {
             self.attempts_on_flaky += 1;
             if self.not_ready_remaining > 0 {
                 self.not_ready_remaining -= 1;
-                return Err(DeserError::NotReady {
-                    reason: "schema fetch in flight".into(),
-                });
+                return Err(DeserError::not_ready("schema fetch in flight"));
             }
         }
         self.inner.deserialize(raw, ack, out)
@@ -3113,7 +3104,7 @@ fn abandon_batch_resets_mid_batch_state_for_the_next_batch() {
 // ---- fatal deserializer -----------------------------------------------------
 
 /// Wraps LogDeser; payloads ending in `|fatal` report NotReady
-/// `not_ready_first` times, then `DeserError::Fatal`.
+/// `not_ready_first` times, then `DeserErrorKind::Fatal`.
 struct FatalDeser {
     not_ready_first: u32,
 }
@@ -3128,13 +3119,9 @@ impl Deserializer<LogF> for FatalDeser {
         if raw.bytes.ends_with(b"|fatal") {
             if self.not_ready_first > 0 {
                 self.not_ready_first -= 1;
-                return Err(DeserError::NotReady {
-                    reason: "schema fetch in flight".into(),
-                });
+                return Err(DeserError::not_ready("schema fetch in flight"));
             }
-            return Err(DeserError::Fatal {
-                reason: "registry rejected the credentials".into(),
-            });
+            return Err(DeserError::fatal("registry rejected the credentials"));
         }
         LogDeser.deserialize(raw, ack, out)
     }
@@ -3186,6 +3173,103 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
         Some(0.0),
         "{rendered}"
     );
+}
+
+/// Wraps LogDeser; payloads ending in `|noschema` report a schema the
+/// deserializer cannot obtain.
+struct SchemaUnavailableDeser;
+
+impl Deserializer<LogF> for SchemaUnavailableDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
+    ) -> Result<(), DeserError> {
+        if raw.bytes.ends_with(b"|noschema") {
+            return Err(DeserError::schema_unavailable("schema 7 is not registered"));
+        }
+        LogDeser.deserialize(raw, ack, out)
+    }
+}
+
+/// A schema-unavailable payload follows the stage's policy: under `Skip` it
+/// is dropped and counted as an error and a skip drop, and the batch goes on.
+#[test]
+fn a_schema_unavailable_payload_is_dropped_and_counted_under_skip() {
+    let mut rows = Vec::new();
+    let mut ack_status = None;
+    let rendered = crate::metrics::render_local(|| {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = chain(SchemaUnavailableDeser)
+            .with_metrics("noschematest", "main")
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["a:x", "b:poison|noschema", "c:y"]);
+        let (mut batch, ack_rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        assert!(matches!(c.flush(), PushOutcome::Done));
+        rows = drain_rows(&mut rxs[0]);
+        drop(batch);
+        ack_status = Some(ack_rx.try_recv().expect("batch resolved").status);
+    });
+    assert_eq!(rows, vec![b"x".to_vec(), b"y".to_vec()]);
+    assert_eq!(ack_status, Some(AckStatus::Delivered));
+    assert_eq!(
+        spate_test::metric_value(
+            &rendered,
+            names::DESER_RECORDS_TOTAL,
+            &[("outcome", "error")]
+        ),
+        Some(1.0),
+        "{rendered}"
+    );
+    assert_eq!(
+        spate_test::metric_value(
+            &rendered,
+            names::DESER_RECORDS_DROPPED_TOTAL,
+            &[("reason", "skip_policy")]
+        ),
+        Some(1.0),
+        "{rendered}"
+    );
+}
+
+/// Under `Fail` a schema-unavailable payload stops the chain with the
+/// error's full text as the reason.
+#[test]
+fn a_schema_unavailable_payload_stops_the_chain_under_fail() {
+    let (queues, _rxs) = shard_queues(1, 64);
+    let mut c = chain(SchemaUnavailableDeser)
+        .deser_error_policy(ErrorPolicy::Fail)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["a:x", "b:poison|noschema", "c:y"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+        panic!("expected fatal under Fail");
+    };
+    assert_eq!(f.component, "deserializer");
+    assert_eq!(f.reason, "schema unavailable: schema 7 is not registered");
+    drop(batch);
+    drop(c);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
 }
 
 /// A payload that reports NotReady and then Fatal on replay fails the batch

@@ -208,7 +208,7 @@ pub(crate) fn poll_error(
     after_startup: bool,
     text: Option<&str>,
 ) -> SourceError {
-    SourceError::new(
+    SourceError::from_class(
         classify_poll_error(err, after_startup, text),
         poll_reason(prefix, err, text),
     )

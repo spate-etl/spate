@@ -313,7 +313,7 @@ pub(crate) fn run(
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(rejected) = offsets.serve(SERVE_WAIT) {
-                    core.latch(&rejected.reason);
+                    core.latch(rejected.reason());
                 }
                 continue;
             }
@@ -334,7 +334,7 @@ pub(crate) fn run(
         // rejection reaches this client's poll as the read's requests fail on
         // a timeout or a transport error.
         if let Some(rejected) = offsets.serve(SERVE_WAIT) {
-            core.latch(&rejected.reason);
+            core.latch(rejected.reason());
         }
         // A credential or TLS rejection latches the feed, and the depth read
         // then reports it, whatever the read itself returned.
@@ -1027,7 +1027,7 @@ mod tests {
         assert_eq!(read(Offset::Offset(2), 4, 5).unwrap().depth.visible, 3);
         for other in [Offset::Stored, Offset::End, Offset::Beginning] {
             let e = read(other, 0, 5).unwrap_err();
-            assert_eq!(e.kind, FeedErrorKind::Retryable, "{other:?}");
+            assert_eq!(e.kind(), FeedErrorKind::Retryable, "{other:?}");
         }
     }
 
@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(
             feed_depth(&offsets, &topics(), &mut Hold::default())
                 .unwrap_err()
-                .kind,
+                .kind(),
             FeedErrorKind::Fatal
         );
         let mut offsets = base();
@@ -1121,11 +1121,11 @@ mod tests {
         assert_eq!(
             feed_depth(&offsets, &topics(), &mut Hold::default())
                 .unwrap_err()
-                .kind,
+                .kind(),
             FeedErrorKind::Retryable
         );
         assert_eq!(
-            dead_letter_depth(&offsets, &topics()).unwrap_err().kind,
+            dead_letter_depth(&offsets, &topics()).unwrap_err().kind(),
             FeedErrorKind::Retryable
         );
     }
@@ -1169,7 +1169,7 @@ mod tests {
         );
         let reads = Brokers { consumer };
         let e = reads.committed(&[(Arc::from("work"), 9)]).unwrap_err();
-        assert!(e.reason.contains("`work` partition 9"), "{e}");
+        assert!(e.reason().contains("`work` partition 9"), "{e}");
     }
 
     /// Pins that serving the depth client hands its queued events to the
@@ -1251,8 +1251,8 @@ mod tests {
         );
         let reads = Brokers { consumer };
         let e = reads.partitions(&Arc::from("dead")).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-        assert!(e.reason.contains("`dead`"), "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason().contains("`dead`"), "{e}");
     }
 
     /// A panic on the depth thread latches the feed, so the run fails where
@@ -1282,8 +1282,8 @@ mod tests {
         };
         assert!(thread.join().is_err(), "the read panics");
         let latched = core.lock().signal.latched().cloned().expect("latched");
-        assert_eq!(latched.kind, FeedErrorKind::Fatal);
-        assert_eq!(latched.reason, "the Kafka feed's depth thread panicked");
+        assert_eq!(latched.kind(), FeedErrorKind::Fatal);
+        assert_eq!(latched.reason(), "the Kafka feed's depth thread panicked");
     }
 
     /// Pins that the depth thread reads nothing once the feed has stopped,
@@ -1300,7 +1300,7 @@ mod tests {
         run(&core, &offsets, &received);
         assert!(offsets.calls().is_empty(), "{:?}", offsets.calls());
         let e = reading.try_outcome().unwrap().unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Retryable);
+        assert_eq!(e.kind(), FeedErrorKind::Retryable);
     }
 
     /// Pins that a feed stopped during any request of a read, of the feed or
@@ -1361,8 +1361,8 @@ mod tests {
                     offsets.scripted.calls()
                 );
                 let e = reading.try_outcome().unwrap().unwrap_err();
-                assert_eq!(e.kind, FeedErrorKind::Retryable);
-                assert!(e.reason.contains("stopped during the read"), "{e}");
+                assert_eq!(e.kind(), FeedErrorKind::Retryable);
+                assert!(e.reason().contains("stopped during the read"), "{e}");
             }
         }
     }
@@ -1444,7 +1444,7 @@ mod tests {
             .expect("the read settled")
             .expect_err("the read failed on its held request");
         assert!(
-            e.reason.contains("reading the group's committed offsets"),
+            e.reason().contains("reading the group's committed offsets"),
             "{e}"
         );
     }
@@ -1483,8 +1483,8 @@ mod tests {
         drop(requests);
         run(&core, &Rejected, &received);
         let e = reading.try_outcome().unwrap().unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-        assert!(e.reason.contains("certificate verify failed"), "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason().contains("certificate verify failed"), "{e}");
         assert!(core.latched());
     }
 
@@ -1527,12 +1527,12 @@ mod tests {
     #[test]
     fn a_serve_returns_a_rejection_behind_a_retryable_error() {
         let mut queued = vec![
-            SourceError::new(ErrorClass::Fatal, "login refused"),
-            SourceError::new(ErrorClass::Retryable, "all brokers down"),
+            SourceError::from_class(ErrorClass::Fatal, "login refused"),
+            SourceError::from_class(ErrorClass::Retryable, "all brokers down"),
         ];
         let e = first_fatal(Duration::ZERO, |_| queued.pop()).expect("the rejection");
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-        assert_eq!(e.reason, "login refused");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+        assert_eq!(e.reason(), "login refused");
         assert!(queued.is_empty());
     }
 
@@ -1550,7 +1550,7 @@ mod tests {
         });
         let latched = core.lock().signal.latched().cloned().expect("latched");
         assert!(
-            latched.reason.contains("certificate verify failed"),
+            latched.reason().contains("certificate verify failed"),
             "{latched}"
         );
     }
@@ -1579,8 +1579,8 @@ mod tests {
             rejected.is_some()
         });
         let e = rejected.expect("a rejection");
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-        assert!(e.reason.contains("Authentication failed"), "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason().contains("Authentication failed"), "{e}");
     }
 
     /// The depth client's serve returns a broker certificate the client
@@ -1619,8 +1619,8 @@ mod tests {
             rejected.is_some()
         });
         let e = rejected.expect("a rejection");
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-        assert!(e.reason.contains("certificate verify failed"), "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason().contains("certificate verify failed"), "{e}");
     }
 
     /// Pins that a feed which has latched a Fatal error answers a depth read
@@ -1636,8 +1636,8 @@ mod tests {
         drop(requests);
         run(&core, &offsets, &received);
         let e = reading.try_outcome().unwrap().unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal);
-        assert!(e.reason.contains("rejected the credential"), "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal);
+        assert!(e.reason().contains("rejected the credential"), "{e}");
     }
 
     /// Pins the reads through a consumer outside the group against the
@@ -1678,9 +1678,9 @@ mod tests {
         );
         let missing = [(Arc::clone(&work), 9)];
         let e = reads.listed(&missing, Offset::Beginning).unwrap_err();
-        assert!(e.reason.contains("reading log start offsets"), "{e}");
+        assert!(e.reason().contains("reading log start offsets"), "{e}");
         let e = reads.listed(&missing, Offset::End).unwrap_err();
-        assert!(e.reason.contains("reading end offsets"), "{e}");
+        assert!(e.reason().contains("reading end offsets"), "{e}");
     }
 
     /// Pins the error class of a failed offset request: an authorization
@@ -1730,13 +1730,13 @@ mod tests {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
         );
         let e = reads.committed(&one).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
         cluster.request_errors(
             RDKafkaApiKey::ListOffsets,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
         );
         let e = reads.listed(&one, Offset::End).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
     }
 
     /// A read classes its failure by the crate's table of consumer codes: a
@@ -1784,6 +1784,6 @@ mod tests {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART],
         );
         let e = reads.listed(&one, Offset::End).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+        assert_eq!(e.kind(), FeedErrorKind::Retryable, "{e}");
     }
 }

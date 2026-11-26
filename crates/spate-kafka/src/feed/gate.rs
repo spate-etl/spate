@@ -768,7 +768,8 @@ mod tests {
             .latched()
             .cloned()
             .expect("the feed stopped")
-            .reason;
+            .reason()
+            .to_owned();
         assert!(
             reason.contains("reading the watermarks of `units-attempts` partition 1"),
             "{reason}"

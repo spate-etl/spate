@@ -8,7 +8,7 @@ use apache_avro::types::Value;
 use apache_avro::{BigDecimal, Days, Decimal, Duration, Millis, Months, Schema, to_avro_datum};
 use spate_avro::{AvroDeserializerBuilder, AvroDeserializerConfig, AvroSchemaSection};
 use spate_core::deser::{Deserializer, Owned};
-use spate_core::error::DeserError;
+use spate_core::error::{DeserError, DeserErrorKind};
 use spate_test::{EmitCollector, raw_payload, test_ack};
 
 fn builder(schema: &str, reader: Option<&str>) -> AvroDeserializerBuilder {
@@ -36,7 +36,7 @@ fn refusal<T: Send + 'static + std::fmt::Debug>(
     datum: &[u8],
 ) -> String {
     match decode(deser, datum) {
-        Err(DeserError::Malformed { reason }) => reason,
+        Err(e) if e.kind() == DeserErrorKind::Malformed => e.reason().to_owned(),
         other => panic!("expected a malformed-record error, got {other:?}"),
     }
 }
@@ -458,7 +458,7 @@ fn each_decoded_byte_counts_against_the_byte_budget() {
             let mut deser = builder(&schema, None).build_value();
             let got = match decode(&mut deser, &datum) {
                 Ok(_) => false,
-                Err(DeserError::Malformed { reason }) => over_budget(&reason),
+                Err(e) if e.kind() == DeserErrorKind::Malformed => over_budget(e.reason()),
                 Err(e) => panic!("{label}: {e}"),
             };
             assert_eq!(got, refused, "{label} of {n} bytes");
@@ -884,9 +884,9 @@ fn a_reader_schema_counts_what_resolution_builds() {
             let mut deser = builder(&case.writer, Some(&reader)).build_value();
             let got = match decode(&mut deser, &datum) {
                 Ok(_) => false,
-                Err(DeserError::Malformed { reason }) => {
-                    reason.contains(&format!("decodes to more than {budget} bytes"))
-                }
+                Err(e) if e.kind() == DeserErrorKind::Malformed => e
+                    .reason()
+                    .contains(&format!("decodes to more than {budget} bytes")),
                 Err(e) => panic!("{}: {e}", case.label),
             };
             assert_eq!(got, refused, "{} with n = {n}", case.label);

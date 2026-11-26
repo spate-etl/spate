@@ -380,7 +380,7 @@ impl Core {
             (error, first, st.close.take())
         };
         if first {
-            tracing::error!(error = %error.reason, "the Kafka feed stopped");
+            tracing::error!(error = %error.reason(), "the Kafka feed stopped");
         }
         if let Some(close) = close {
             close.confirmer.reject(error.clone());

@@ -19,17 +19,15 @@ pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
     if let Some(&magic) = payload.first()
         && magic != 0x00
     {
-        return Err(DeserError::Malformed {
-            reason: format!("not Confluent wire format: magic byte {magic:#04x}, expected 0x00"),
-        });
+        return Err(DeserError::malformed(format!(
+            "not Confluent wire format: magic byte {magic:#04x}, expected 0x00"
+        )));
     }
     if payload.len() < 5 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "truncated Confluent header: {} bytes, need at least 5",
-                payload.len()
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "truncated Confluent header: {} bytes, need at least 5",
+            payload.len()
+        )));
     }
     let schema_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
     Ok((schema_id, &payload[5..]))
@@ -41,20 +39,16 @@ pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
 /// Returns the fingerprint and the datum slice.
 pub fn parse_single_object(payload: &[u8]) -> Result<(u64, &[u8]), DeserError> {
     if payload.len() < 10 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "truncated single-object header: {} bytes, need at least 10",
-                payload.len()
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "truncated single-object header: {} bytes, need at least 10",
+            payload.len()
+        )));
     }
     if payload[0] != 0xC3 || payload[1] != 0x01 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "not Avro single-object encoding: magic {:#04x} {:#04x}, expected 0xc3 0x01",
-                payload[0], payload[1]
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "not Avro single-object encoding: magic {:#04x} {:#04x}, expected 0xc3 0x01",
+            payload[0], payload[1]
+        )));
     }
     let fingerprint = u64::from_le_bytes(payload[2..10].try_into().expect("length checked"));
     Ok((fingerprint, &payload[10..]))

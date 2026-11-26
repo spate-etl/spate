@@ -430,8 +430,8 @@ impl UnitReader {
             let receipt = self.deliveries[&delivery].receipt;
             match self.feed.hand_back(receipt) {
                 Ok(()) => {}
-                Err(e) if e.kind == FeedErrorKind::Gone => {}
-                Err(e) if e.kind == FeedErrorKind::Retryable => {
+                Err(e) if e.kind() == FeedErrorKind::Gone => {}
+                Err(e) if e.kind() == FeedErrorKind::Retryable => {
                     tracing::warn!(
                         %receipt,
                         error = %e,
@@ -677,14 +677,14 @@ impl UnitReader {
                 Ok(()) => {}
                 // The feed delivered the unit again or settled it, so this
                 // reading is no longer the unit's.
-                Err(e) if e.kind == FeedErrorKind::Gone => {
+                Err(e) if e.kind() == FeedErrorKind::Gone => {
                     tracing::warn!(
                         %receipt,
                         "a held unit's lease lapsed or the feed delivered it again; letting it go"
                     );
                     self.release(delivery);
                 }
-                Err(e) if e.kind == FeedErrorKind::Retryable => {
+                Err(e) if e.kind() == FeedErrorKind::Retryable => {
                     tracing::warn!(%receipt, error = %e, "renewing a held unit failed; retrying");
                 }
                 Err(e) => return Err(feed_error("renewing a held unit", &e)),
@@ -794,7 +794,7 @@ impl UnitReader {
                 match confirmation.try_outcome() {
                     None => {}
                     Some(Ok(())) => *re_enqueue = ReEnqueue::Done,
-                    Some(Err(e)) if e.kind == FeedErrorKind::Fatal => {
+                    Some(Err(e)) if e.kind() == FeedErrorKind::Fatal => {
                         return Err(feed_error("re-enqueueing an overwritten object", &e));
                     }
                     Some(Err(e)) if held.failing.is_none() => {
@@ -897,7 +897,7 @@ impl UnitReader {
     fn receive(&mut self, room: usize) -> Result<Option<usize>, SourceError> {
         let deliveries = match self.feed.receive(room) {
             Ok(deliveries) => deliveries,
-            Err(e) if e.kind == FeedErrorKind::Retryable => {
+            Err(e) if e.kind() == FeedErrorKind::Retryable => {
                 tracing::warn!(error = %e, "receiving from the feed failed; retrying");
                 return Ok(None);
             }
@@ -1041,8 +1041,8 @@ enum Settled {
 fn settled(outcome: Result<(), FeedError>) -> Result<Settled, SourceError> {
     match outcome {
         Ok(()) => Ok(Settled::Yes),
-        Err(e) if e.kind == FeedErrorKind::Gone => Ok(Settled::Yes),
-        Err(e) if e.kind == FeedErrorKind::Retryable => {
+        Err(e) if e.kind() == FeedErrorKind::Gone => Ok(Settled::Yes),
+        Err(e) if e.kind() == FeedErrorKind::Retryable => {
             tracing::warn!(error = %e, "the feed refused a request for now; retrying");
             Ok(Settled::Later)
         }
@@ -1051,7 +1051,7 @@ fn settled(outcome: Result<(), FeedError>) -> Result<Settled, SourceError> {
 }
 
 fn feed_error(doing: &str, e: &FeedError) -> SourceError {
-    SourceError::new(e.class(), format!("{doing}: {e}"))
+    SourceError::from_class(e.class(), format!("{doing}: {e}"))
 }
 
 #[cfg(test)]

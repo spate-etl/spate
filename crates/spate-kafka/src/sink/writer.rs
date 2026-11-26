@@ -388,7 +388,7 @@ fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
         ),
         _ => reason.to_string(),
     };
-    SinkError::new(class, reason)
+    SinkError::from_class(class, reason)
 }
 
 /// The class of a failed produce or delivery report, by [`classify`]'s

@@ -233,8 +233,9 @@ impl DecoderCore {
         }
     }
 
-    /// Apply the error policy to a decode failure: `Skip` counts it and
-    /// returns `Ok`, `Fail` returns [`DeserError::Malformed`].
+    /// Apply the error policy to a decode failure: `Skip` counts it and returns
+    /// `Ok`, `Fail` returns
+    /// [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed).
     fn on_item_error(
         &self,
         e: &backend::DecodeError,
@@ -259,9 +260,7 @@ impl DecoderCore {
                 );
                 Ok(())
             }
-            JsonOnError::Fail => Err(DeserError::Malformed {
-                reason: format!("{}: {e}", reason.label()),
-            }),
+            JsonOnError::Fail => Err(DeserError::malformed(format!("{}: {e}", reason.label()))),
         }
     }
 }
@@ -390,6 +389,7 @@ mod tests {
     use crate::framing::tests::arb_stream;
     use proptest::prelude::*;
     use serde::Deserialize;
+    use spate_core::error::DeserErrorKind;
     use spate_core::metrics::Meter;
     use spate_core::record::{PartitionId, stable_key_hash};
     use spate_test::{EmitCollector, render_metrics};
@@ -622,7 +622,7 @@ mod tests {
         let err = fail
             .deserialize(&raw(b"{not json"), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod tests {
         let err = d
             .deserialize(&raw(payload), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
         // Fail is atomic: the good line before GARBAGE must NOT be emitted, or
         // the chain's Skip policy would commit the offset past the lost tail.
         assert!(
@@ -678,7 +678,7 @@ mod tests {
                 &mut out,
             )
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
         // The good first element must not be emitted ahead of the error.
         assert!(
             out.records.is_empty(),
@@ -703,9 +703,10 @@ mod tests {
             .deserialize(&raw(br#"{"id":1,"id":2}"#), &test_ack(), &mut out)
             .unwrap_err();
         match err {
-            DeserError::Malformed { reason } => assert!(
-                reason.starts_with("duplicate_key:"),
-                "a real duplicate key must be labeled duplicate_key, got `{reason}`"
+            e if e.kind() == DeserErrorKind::Malformed => assert!(
+                e.reason().starts_with("duplicate_key:"),
+                "a real duplicate key must be labeled duplicate_key, got `{}`",
+                e.reason()
             ),
             other => panic!("expected Malformed, got {other}"),
         }
@@ -718,7 +719,7 @@ mod tests {
         let err = d
             .deserialize(&raw(br#"{"outer":{"a":1,"a":2}}"#), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
     }
 
     #[test]
@@ -731,9 +732,10 @@ mod tests {
             .deserialize(&raw(b"{not valid json"), &test_ack(), &mut out)
             .unwrap_err();
         match err {
-            DeserError::Malformed { reason } => assert!(
-                reason.starts_with("malformed:"),
-                "a syntax error must be labeled malformed, got `{reason}`"
+            e if e.kind() == DeserErrorKind::Malformed => assert!(
+                e.reason().starts_with("malformed:"),
+                "a syntax error must be labeled malformed, got `{}`",
+                e.reason()
             ),
             other => panic!("expected Malformed, got {other}"),
         }

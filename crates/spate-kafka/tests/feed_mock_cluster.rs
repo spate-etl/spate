@@ -337,7 +337,7 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     assert!(
         worker.feed.receive(8).map_or_else(
             |e| {
-                assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+                assert_eq!(e.kind(), FeedErrorKind::Retryable, "{e}");
                 true
             },
             |got| got.is_empty()
@@ -375,7 +375,7 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     assert!(
         worker.feed.receive(8).map_or_else(
             |e| {
-                assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+                assert_eq!(e.kind(), FeedErrorKind::Retryable, "{e}");
                 true
             },
             |got| got.is_empty()
@@ -685,22 +685,22 @@ fn a_failed_write_to_a_missing_retry_topic_makes_the_feed_fatal() {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
     assert!(
         error
-            .reason
+            .reason()
             .contains(&format!("writing a unit to `{RETRY}`")),
         "{error}"
     );
     assert_eq!(
-        worker.feed.acknowledge(Receipt(1)).unwrap_err().kind,
+        worker.feed.acknowledge(Receipt(1)).unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
     let mut refused = worker.feed.publish(Unit::new("v", Vec::new()));
     assert_eq!(
-        refused.try_outcome().unwrap().unwrap_err().kind,
+        refused.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
 }
@@ -733,7 +733,7 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
         for (who, feed) in [("a", &a.feed), ("b", &b.feed)] {
             if let Err(e) = feed.receive(1) {
                 errors.push(format!("{who} +{:?}: {e}", start.elapsed()));
-                assert_ne!(e.kind, FeedErrorKind::Fatal, "{errors:#?}");
+                assert_ne!(e.kind(), FeedErrorKind::Fatal, "{errors:#?}");
             }
         }
         start.elapsed() >= Duration::from_secs(20)
@@ -770,11 +770,11 @@ fn an_assignment_on_another_topic_stops_the_feed() {
         }
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
     assert!(
-        error.reason.contains(&format!(
+        error.reason().contains(&format!(
             "the group offered a partition of a topic other than `{WORK}` or `{RETRY}`"
         )),
         "{error}"
@@ -825,11 +825,11 @@ fn a_message_at_the_top_of_the_offset_range_stops_the_feed() {
         }
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
     assert!(
-        error.reason.contains("the top of the offset range"),
+        error.reason().contains("the top of the offset range"),
         "{error}"
     );
 }
@@ -858,10 +858,10 @@ fn a_corrupt_batch_stops_the_feed() {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
-    assert!(error.reason.contains("Bad message"), "{error}");
+    assert!(error.reason().contains("Bad message"), "{error}");
 }
 
 /// Pins that a batch whose codec id this build does not know stops the feed,
@@ -882,11 +882,11 @@ fn an_unknown_codec_stops_the_feed_and_names_it() {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
-    assert!(error.reason.contains("codec 0x5"), "{error}");
-    assert!(error.reason.contains("cannot read"), "{error}");
+    assert!(error.reason().contains("codec 0x5"), "{error}");
+    assert!(error.reason().contains("cannot read"), "{error}");
 }
 
 /// Pins that a gzip batch whose bytes do not decompress stops the feed:
@@ -911,10 +911,10 @@ fn a_batch_that_does_not_decompress_stops_the_feed() {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
-            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+            .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
     });
     let error = error.unwrap();
-    assert!(error.reason.contains("ompress"), "{error}");
+    assert!(error.reason().contains("ompress"), "{error}");
 }
 
 /// Pins that connecting refuses a missing retry topic and leaves it
@@ -1206,11 +1206,11 @@ fn the_publish_in_flight_at_a_fatal_producer_error_names_its_cause() {
     let err = io
         .block_on(publisher.publish(Unit::new("a", b"body".to_vec())))
         .unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+    assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
     assert!(
-        err.reason.contains("Cluster authorization failed"),
+        err.reason().contains("Cluster authorization failed"),
         "{}",
-        err.reason
+        err.reason()
     );
 }
 
@@ -1673,8 +1673,8 @@ fn a_dead_letter_topic_authorization_failure_is_fatal() {
         )
         .unwrap();
     let e = read_depth(&d.feed, DepthOf::DeadLetters).unwrap_err();
-    assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
-    assert!(e.reason.contains(DEAD), "{e}");
+    assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
+    assert!(e.reason().contains(DEAD), "{e}");
 }
 
 /// A depth read in these tests reads again past a transient answer, as a
@@ -1692,7 +1692,7 @@ fn a_depth_read_passes_over_a_transient_answer() {
     );
     assert!(read_depth(&feed, DepthOf::Feed).unwrap().is_empty());
     let e = read_depth(&feed, DepthOf::DeadLetters).unwrap_err();
-    assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+    assert_eq!(e.kind(), FeedErrorKind::Fatal, "{e}");
     assert_eq!(script.depth_reads(DepthOf::Feed), 2);
     assert_eq!(script.depth_reads(DepthOf::DeadLetters), 2);
 }
@@ -1776,10 +1776,10 @@ fn a_feed_fenced_on_join_still_drops() {
             error = worker.feed.receive(1).err();
             error
                 .as_ref()
-                .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+                .is_some_and(|e| e.kind() == FeedErrorKind::Fatal)
         });
         let error = error.unwrap();
-        assert!(error.reason.contains("FencedInstanceId"), "{error}");
+        assert!(error.reason().contains("FencedInstanceId"), "{error}");
         let (dropped, on_drop) = mpsc::channel();
         let dropping = spawn_thread("drop-feed", move || {
             drop(worker);

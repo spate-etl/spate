@@ -18,7 +18,7 @@ use spate_avro::{
 use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
-use spate_core::error::DeserError;
+use spate_core::error::{DeserError, DeserErrorKind};
 use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::{RegistryRequest, RegistryStub, run_in_child};
 use std::sync::Arc;
@@ -129,7 +129,7 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
     let err = deser
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
-    assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::NotReady, "{err}");
     assert!(out.records.is_empty());
 
     // The driver's retry loop, condensed.
@@ -189,7 +189,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     .unwrap();
     let err = first.unwrap_err();
     assert!(
-        matches!(err, DeserError::SchemaUnavailable { .. }),
+        err.kind() == DeserErrorKind::SchemaUnavailable,
         "poison id surfaces as unavailable (policy applies): {err}"
     );
     let hits_after_first = stub.hits();
@@ -202,7 +202,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     let err = deser
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
-    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
     assert_eq!(stub.hits(), hits_after_first);
 
     // A nanosecond short of the configured TTL: still answered from the
@@ -211,7 +211,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     let err = deser
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
-    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
     assert_eq!(stub.hits(), hits_after_first);
 
     // After expiry the schema exists now: refetch succeeds.
@@ -248,7 +248,7 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
     .await
     .unwrap();
     let err = first.unwrap_err();
-    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
 
     stub.script("/schemas/ids/6", 200, schema_body(SCHEMA_V1), 0);
     clock.advance(Duration::from_millis(100));
@@ -286,7 +286,9 @@ fn decode_unknown_ids(
     for id in ids {
         let result = decode_on(rt, deser, id);
         assert!(
-            matches!(result, Err(DeserError::SchemaUnavailable { .. })),
+            result
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::SchemaUnavailable),
             "id {id}: {result:?}"
         );
     }
@@ -423,10 +425,11 @@ async fn no_refetch_while_the_backoff_holds() {
         let mut out = EmitCollector::new();
         let reads = || clock.reads.load(Ordering::SeqCst);
         let mut replay = || {
-            assert!(matches!(
-                deser.deserialize(&raw_payload(&payload), &ack, &mut out),
-                Err(DeserError::NotReady { .. })
-            ));
+            assert!(
+                deser
+                    .deserialize(&raw_payload(&payload), &ack, &mut out)
+                    .is_err_and(|e| e.kind() == DeserErrorKind::NotReady)
+            );
         };
         replay();
         spate_test::wait_until(spate_test::HANG, "the 503 is stamped", || reads() >= 1);
@@ -498,10 +501,11 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
         let reads = || clock.reads.load(Ordering::SeqCst);
         // No backoff and no negative entry yet, so the first read is the
         // stamp of the first 503.
-        assert!(matches!(
-            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
-            Err(DeserError::NotReady { .. })
-        ));
+        assert!(
+            deser
+                .deserialize(&raw_payload(&payload), &ack, &mut out)
+                .is_err_and(|e| e.kind() == DeserErrorKind::NotReady)
+        );
         spate_test::wait_until(spate_test::HANG, "the first 503 is stamped", || {
             reads() >= 1
         });
@@ -511,10 +515,11 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
         // be requested again, so a replay in between adds no request: replay
         // until the second stamp.
         spate_test::wait_until(spate_test::HANG, "the second 503 is stamped", || {
-            assert!(matches!(
-                deser.deserialize(&raw_payload(&payload), &ack, &mut out),
-                Err(DeserError::NotReady { .. })
-            ));
+            assert!(
+                deser
+                    .deserialize(&raw_payload(&payload), &ack, &mut out)
+                    .is_err_and(|e| e.kind() == DeserErrorKind::NotReady)
+            );
             reads() >= 3
         });
         test_clock.advance(Duration::from_millis(400));
@@ -609,12 +614,13 @@ async fn slow_fetch_does_not_block_other_ids() {
     // Kick off the slow (gated) fetch first, then the fast one.
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = EmitCollector::new();
-    assert!(matches!(
+    assert!(
         deser
             .deserialize(&raw_payload(&slow), &ack, &mut sink)
-            .unwrap_err(),
-        DeserError::NotReady { .. }
-    ));
+            .unwrap_err()
+            .kind()
+            == DeserErrorKind::NotReady
+    );
 
     let slow_probe = slow.clone();
     let mut deser = tokio::task::spawn_blocking(move || {
@@ -630,12 +636,13 @@ async fn slow_fetch_does_not_block_other_ids() {
         // The slow id is still unavailable (its fetch is blocked).
         let (ack, _rx) = AckRef::test_pair();
         let mut out = EmitCollector::new();
-        assert!(matches!(
+        assert!(
             deser
                 .deserialize(&raw_payload(&slow_probe), &ack, &mut out)
-                .unwrap_err(),
-            DeserError::NotReady { .. }
-        ));
+                .unwrap_err()
+                .kind()
+                == DeserErrorKind::NotReady
+        );
         deser
     })
     .await
@@ -781,7 +788,7 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     .unwrap()
     .unwrap_err();
     assert!(
-        matches!(err, DeserError::SchemaUnavailable { .. }),
+        err.kind() == DeserErrorKind::SchemaUnavailable,
         "a refused schema parse must poison the id, not stall at NotReady: {err}"
     );
 }
@@ -809,7 +816,7 @@ async fn a_schema_that_is_not_avro_poisons_the_id() {
     .unwrap()
     .unwrap_err();
     assert!(
-        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("JSON")),
+        err.kind() == DeserErrorKind::SchemaUnavailable && err.reason().contains("JSON"),
         "{err}"
     );
 }
@@ -850,7 +857,9 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     .await
     .unwrap();
     assert!(
-        matches!(&result, Err(DeserError::SchemaUnavailable { reason }) if reason.contains("JSON")),
+        result.as_ref().is_err_and(
+            |e| e.kind() == DeserErrorKind::SchemaUnavailable && e.reason().contains("JSON")
+        ),
         "{result:?}"
     );
 }
@@ -876,7 +885,7 @@ async fn an_unknown_id_names_the_registry_error() {
     .unwrap()
     .unwrap_err();
     assert!(
-        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("40403")),
+        err.kind() == DeserErrorKind::SchemaUnavailable && err.reason().contains("40403"),
         "{err}"
     );
 }
@@ -1004,7 +1013,7 @@ async fn a_prewarm_sends_basic_auth() {
 // ---------------------------------------------------------------------------
 
 /// Drives `payload` through a fresh value deserializer until the result is
-/// not `NotReady`, and returns the `DeserError::Fatal` reason.
+/// not `NotReady`, and returns the `DeserErrorKind::Fatal` reason.
 async fn fatal_reason(deser: spate_avro::AvroValueDeserializer, payload: Vec<u8>) -> String {
     let mut deser = deser;
     let result = tokio::task::spawn_blocking(move || {
@@ -1014,8 +1023,8 @@ async fn fatal_reason(deser: spate_avro::AvroValueDeserializer, payload: Vec<u8>
     .await
     .unwrap();
     match result {
-        Err(DeserError::Fatal { reason }) => reason,
-        other => panic!("expected DeserError::Fatal, got {other:?}"),
+        Err(e) if e.kind() == DeserErrorKind::Fatal => e.reason().to_owned(),
+        other => panic!("expected a fatal error, got {other:?}"),
     }
 }
 
@@ -1092,7 +1101,9 @@ async fn a_cached_schema_decodes_after_a_rejection() {
     .unwrap();
     first.unwrap();
     assert!(
-        matches!(second, Err(DeserError::Fatal { .. })),
+        second
+            .as_ref()
+            .is_err_and(|e| e.kind() == DeserErrorKind::Fatal),
         "{second:?}"
     );
     again.expect("a cached schema still decodes");
@@ -1201,7 +1212,7 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
     let err = deser
         .deserialize(&raw_payload(&p61), &ack, &mut out)
         .unwrap_err();
-    assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::NotReady, "{err}");
     assert!(out.records.is_empty());
 
     let decoded = tokio::task::spawn_blocking(move || {
@@ -1281,7 +1292,7 @@ async fn duration_schema_gates_only_the_datum_path() {
     .await
     .unwrap();
     assert!(
-        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("datum path")),
+        err.kind() == DeserErrorKind::SchemaUnavailable && err.reason().contains("datum path"),
         "{err}"
     );
 }
@@ -1314,7 +1325,9 @@ async fn confluent_truncated_string_is_malformed() {
         let mut out = EmitCollector::new();
         let result = drive_until_ready(&mut deser, &frame(&[0x22]), &mut out);
         assert!(
-            matches!(result, Err(DeserError::Malformed { .. })),
+            result
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::Malformed),
             "result={result:?}, emitted={:?}",
             out.payloads()
         );
@@ -1352,7 +1365,9 @@ async fn reader_projection_does_not_hide_truncated_writer_string() {
         let mut out = EmitCollector::new();
         let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
         assert!(
-            matches!(result, Err(DeserError::Malformed { .. })),
+            result
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::Malformed),
             "result={result:?}, emitted={:?}",
             out.payloads()
         );
@@ -1435,7 +1450,11 @@ async fn an_evicted_id_refetches_while_another_fetch_is_held() {
             &ack,
             &mut EmitCollector::new(),
         );
-        assert!(matches!(blocked, Err(DeserError::NotReady { .. })));
+        assert!(
+            blocked
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::NotReady)
+        );
         decode_each(&mut deser, [1]);
         deser
     })
@@ -1563,7 +1582,7 @@ async fn a_prewarm_refuses_a_schema_above_the_byte_bound() {
     })
     .await
     .unwrap();
-    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
     assert_eq!(stub.path_hits(&by_id(5)), 1, "the pre-warm did not hold it");
 }
 
@@ -1587,11 +1606,9 @@ async fn a_schema_above_the_byte_bound_poisons_the_id() {
     .await
     .unwrap();
     for err in errors {
-        let DeserError::SchemaUnavailable { reason, .. } = &err else {
-            panic!("expected schema-unavailable, got {err}");
-        };
+        assert_eq!(err.kind(), DeserErrorKind::SchemaUnavailable, "{err}");
         assert_eq!(
-            *reason,
+            err.reason(),
             format!(
                 "schema 5 is not usable: it would hold about {} MiB compiled, above the 64 MiB \
                  the schema cache holds",

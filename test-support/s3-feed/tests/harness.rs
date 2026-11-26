@@ -57,7 +57,7 @@ fn the_recording_passes_each_call_on_and_records_it() {
     recording.renew(second).unwrap();
     assert_eq!(script.renewed(), [second]);
     assert_eq!(
-        recording.renew(first).unwrap_err().kind,
+        recording.renew(first).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 

@@ -45,11 +45,13 @@ pub trait EmitRecord<'buf, T> {
 
 /// One borrowed payload in, 0..N records out through `out`.
 ///
-/// Dyn-compatible for a concrete family (the only generic on the method is
-/// a lifetime). Zero emissions is valid (tombstones, empty envelopes). An
-/// error is subject to the stage's `ErrorPolicy`, except
-/// [`DeserError::NotReady`], which holds the batch for a replay, and
-/// [`DeserError::Fatal`], which stops the pipeline.
+/// Dyn-compatible for a concrete family (the only generic on the method is a
+/// lifetime). Zero emissions is valid (tombstones, empty envelopes). An error
+/// is subject to the stage's `ErrorPolicy`, except
+/// [`DeserErrorKind::NotReady`](crate::error::DeserErrorKind::NotReady), which
+/// holds the batch for a replay, and
+/// [`DeserErrorKind::Fatal`](crate::error::DeserErrorKind::Fatal), which stops
+/// the pipeline.
 pub trait Deserializer<F: RecFamily>: Send {
     /// Decode `raw`, emitting each resulting record with the payload's
     /// metadata and a clone of `ack`.

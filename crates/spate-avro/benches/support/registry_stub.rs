@@ -28,7 +28,7 @@
 
 use spate_avro::AvroValueDeserializer;
 use spate_core::checkpoint::AckRef;
-use spate_core::error::DeserError;
+use spate_core::error::DeserErrorKind;
 use spate_core::record::{PartitionId, RawPayload};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -230,7 +230,8 @@ pub(crate) fn warm(
             rt.block_on(async { tokio::time::sleep(WARM_POLL).await });
         });
     match (&outcome, want) {
-        (Ok(()), Warm::Ready) | (Err(DeserError::SchemaUnavailable { .. }), Warm::Poisoned) => {}
+        (Ok(()), Warm::Ready) => {}
+        (Err(e), Warm::Poisoned) if e.kind() == DeserErrorKind::SchemaUnavailable => {}
         _ => panic!("warm-up wanted {want:?} but the payload resolved to {outcome:?}"),
     }
 }

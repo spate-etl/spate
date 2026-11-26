@@ -66,6 +66,9 @@ pub mod task;
 pub mod telemetry;
 pub mod tls;
 
-pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};
+pub use error::{
+    DeserError, DeserErrorKind, ErrorClass, ErrorPolicy, FatalError, SinkError, SinkErrorKind,
+    SourceError, SourceErrorKind,
+};
 pub use framing::FramingContract;
 pub use record::{Flow, NO_EVENT_TIME_MS, PartitionId, RawPayload, Record, RecordMeta};

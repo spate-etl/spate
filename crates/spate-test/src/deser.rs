@@ -4,7 +4,7 @@ use crate::wait_for_value;
 use spate_core::checkpoint::AckRef;
 use spate_core::config::ConfigError;
 use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
-use spate_core::error::DeserError;
+use spate_core::error::{DeserError, DeserErrorKind};
 use spate_core::framing::FramingContract;
 use spate_core::record::{Flow, RawPayload, Record};
 use std::time::Duration;
@@ -26,8 +26,9 @@ enum Mode {
 ///   source that frames one record per payload, so a pipeline over such a
 ///   source fails at start;
 /// - [`fail_on_prefix`](Self::fail_on_prefix): payloads starting with the
-///   marker fail with [`DeserError::Malformed`], everything else passes
-///   through, exercising `Skip`/`Fail` error policies.
+///   marker fail with
+///   [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed),
+///   everything else passes through, exercising `Skip`/`Fail` error policies.
 ///
 /// Emission honors [`Flow::Blocked`]: the deserializer stops emitting for
 /// the current payload, as the seam contract requires.
@@ -92,9 +93,9 @@ impl Deserializer<Owned<Vec<u8>>> for TestDeserializer {
             }
             Mode::FailOnPrefix(marker) => {
                 if raw.bytes.starts_with(marker) {
-                    return Err(DeserError::Malformed {
-                        reason: format!("payload starts with test marker {marker:?}"),
-                    });
+                    return Err(DeserError::malformed(format!(
+                        "payload starts with test marker {marker:?}"
+                    )));
                 }
                 let _ = emit(raw.bytes.to_vec());
             }
@@ -175,8 +176,8 @@ impl<'buf, T> EmitRecord<'buf, T> for EmitCollector<T> {
 }
 
 /// Replays `raw` through `deser` until it answers anything but
-/// [`DeserError::NotReady`], as the pipeline's driver replays a payload, and
-/// returns that answer.
+/// [`DeserErrorKind::NotReady`](spate_core::error::DeserErrorKind::NotReady),
+/// as the pipeline's driver replays a payload, and returns that answer.
 ///
 /// `between` runs before each replay. A test uses it to move the clock the
 /// deserializer reads, or to drive the runtime its fetch runs on.
@@ -229,7 +230,11 @@ where
             replay = true;
             deser.deserialize(raw, ack, out)
         },
-        |answer| !matches!(answer, Err(DeserError::NotReady { .. })),
+        |answer| {
+            !answer
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::NotReady)
+        },
     )
 }
 
@@ -279,9 +284,7 @@ mod tests {
         ) -> Result<(), DeserError> {
             self.calls += 1;
             if self.ready.load(Ordering::SeqCst) < self.after {
-                return Err(DeserError::NotReady {
-                    reason: "waiting on the test".into(),
-                });
+                return Err(DeserError::not_ready("waiting on the test"));
             }
             match self.answer {
                 Answer::Record => {
@@ -292,9 +295,7 @@ mod tests {
                     });
                     Ok(())
                 }
-                Answer::Fatal => Err(DeserError::Fatal {
-                    reason: "rejected".into(),
-                }),
+                Answer::Fatal => Err(DeserError::fatal("rejected")),
             }
         }
     }
@@ -337,7 +338,9 @@ mod tests {
             },
         );
         assert!(
-            matches!(&result, Err(DeserError::Fatal { reason }) if reason == "rejected"),
+            result
+                .as_ref()
+                .is_err_and(|e| e.kind() == DeserErrorKind::Fatal && e.reason() == "rejected"),
             "{result:?}"
         );
         assert_eq!(ready.load(Ordering::SeqCst), 0, "between runs");

@@ -68,26 +68,79 @@ impl FatalError {
     }
 }
 
-/// A payload could not be deserialized.
-#[derive(Debug, thiserror::Error)]
+/// The client error a role error carries, behind an `Arc` so the error stays
+/// cheap to clone.
+type Source = std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>;
+
+/// The methods every role error shares: `SourceError`, `SinkError`,
+/// `FeedError` and `DeserError`. Each type is a struct with private `kind`,
+/// `reason` and `source` fields, and its kind enum has a `class` method.
+macro_rules! role_error_methods {
+    ($ty:ident, $kind:ident) => {
+        impl $ty {
+            #[doc = concat!("An error of `kind` with a human-readable `reason`.")]
+            #[must_use]
+            pub fn new(kind: $kind, reason: impl Into<String>) -> Self {
+                Self {
+                    kind,
+                    reason: reason.into(),
+                    source: None,
+                }
+            }
+
+            /// How the caller must react.
+            #[must_use]
+            pub fn kind(&self) -> $kind {
+                self.kind
+            }
+
+            /// The [`ErrorClass`](crate::error::ErrorClass) the kind maps to,
+            /// which answers "retry or stop" the same way for every role.
+            #[must_use]
+            pub fn class(&self) -> $crate::error::ErrorClass {
+                self.kind.class()
+            }
+
+            /// The human-readable cause.
+            #[must_use]
+            pub fn reason(&self) -> &str {
+                &self.reason
+            }
+
+            /// This error with `source` as the error that caused it, which
+            /// [`source`](std::error::Error::source) returns.
+            ///
+            /// The source's text and `Debug` follow the rules for the reason:
+            /// no credential, and no record or payload content.
+            #[must_use]
+            pub fn with_source(
+                mut self,
+                source: impl std::error::Error + Send + Sync + 'static,
+            ) -> Self {
+                self.source = Some(std::sync::Arc::new(source));
+                self
+            }
+        }
+
+        impl std::error::Error for $ty {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.source
+                    .as_deref()
+                    .map(|source| source as &(dyn std::error::Error + 'static))
+            }
+        }
+    };
+}
+pub(crate) use role_error_methods;
+
+/// How the chain must react to a [`DeserError`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum DeserError {
+pub enum DeserErrorKind {
     /// The payload bytes do not match the expected format.
-    #[error("malformed payload: {reason}")]
-    Malformed {
-        /// Human-readable cause, for logs and dead-record metrics.
-        ///
-        /// The chain logs it for a skipped payload and uses it as the
-        /// pipeline's failure reason, so a deserializer keeps the payload's
-        /// content out of it.
-        reason: String,
-    },
+    Malformed,
     /// A schema required to decode the payload is not available.
-    #[error("schema unavailable: {reason}")]
-    SchemaUnavailable {
-        /// Human-readable cause.
-        reason: String,
-    },
+    SchemaUnavailable,
     /// The payload cannot be decoded *yet*. A required resource (typically
     /// a schema fetched from a registry) is still being obtained, and the
     /// deserializer has already triggered the asynchronous work that will
@@ -99,11 +152,7 @@ pub enum DeserError {
     /// Contract: a deserializer must return this **before emitting any
     /// record** for the payload; records emitted ahead of a `NotReady`
     /// would be duplicated when the payload is replayed.
-    #[error("not ready: {reason}")]
-    NotReady {
-        /// What is being waited for.
-        reason: String,
-    },
+    NotReady,
     /// The deserializer can decode no further payload, for example because
     /// its schema registry rejected the credentials. The chain stops the
     /// pipeline whatever the stage's [`ErrorPolicy`], and counts the payload
@@ -111,36 +160,130 @@ pub enum DeserError {
     ///
     /// Contract: as with `NotReady`, return this before emitting any record
     /// for the payload.
-    #[error("deserializer failed: {reason}")]
-    Fatal {
-        /// Human-readable cause.
-        reason: String,
-    },
+    Fatal,
 }
 
-/// The constructors and accessors `SourceError` and `SinkError` share. Each
-/// type has one variant today, and every method matches it exhaustively, so a
-/// new variant states its class and reason here.
+impl DeserErrorKind {
+    /// [`Malformed`](Self::Malformed) and
+    /// [`SchemaUnavailable`](Self::SchemaUnavailable) are record-level, as the
+    /// stage's [`ErrorPolicy`] decides them, and
+    /// [`NotReady`](Self::NotReady) is retryable. The chain acts on the kind
+    /// itself.
+    pub(crate) fn class(self) -> ErrorClass {
+        match self {
+            DeserErrorKind::Malformed | DeserErrorKind::SchemaUnavailable => {
+                ErrorClass::RecordLevel
+            }
+            DeserErrorKind::NotReady => ErrorClass::Retryable,
+            DeserErrorKind::Fatal => ErrorClass::Fatal,
+        }
+    }
+}
+
+/// A payload could not be deserialized.
+///
+/// The chain logs the reason for a skipped payload and uses it as the
+/// pipeline's failure reason, so a deserializer keeps the payload's content
+/// out of the reason and out of any source it attaches.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::error::{DeserError, DeserErrorKind, ErrorClass};
+///
+/// let e = DeserError::malformed("truncated header");
+/// assert_eq!(e.kind(), DeserErrorKind::Malformed);
+/// assert_eq!(e.class(), ErrorClass::RecordLevel);
+/// assert_eq!(e.to_string(), "malformed payload: truncated header");
+/// ```
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct DeserError {
+    kind: DeserErrorKind,
+    reason: String,
+    source: Option<Source>,
+}
+
+role_error_methods!(DeserError, DeserErrorKind);
+
+impl DeserError {
+    /// A [`Malformed`](DeserErrorKind::Malformed) error.
+    #[must_use]
+    pub fn malformed(reason: impl Into<String>) -> DeserError {
+        DeserError::new(DeserErrorKind::Malformed, reason)
+    }
+
+    /// A [`SchemaUnavailable`](DeserErrorKind::SchemaUnavailable) error.
+    #[must_use]
+    pub fn schema_unavailable(reason: impl Into<String>) -> DeserError {
+        DeserError::new(DeserErrorKind::SchemaUnavailable, reason)
+    }
+
+    /// A [`NotReady`](DeserErrorKind::NotReady) error; `reason` says what is
+    /// being waited for.
+    #[must_use]
+    pub fn not_ready(reason: impl Into<String>) -> DeserError {
+        DeserError::new(DeserErrorKind::NotReady, reason)
+    }
+
+    /// A [`Fatal`](DeserErrorKind::Fatal) error.
+    #[must_use]
+    pub fn fatal(reason: impl Into<String>) -> DeserError {
+        DeserError::new(DeserErrorKind::Fatal, reason)
+    }
+}
+
+impl std::fmt::Display for DeserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.kind {
+            DeserErrorKind::Malformed => "malformed payload",
+            DeserErrorKind::SchemaUnavailable => "schema unavailable",
+            DeserErrorKind::NotReady => "not ready",
+            DeserErrorKind::Fatal => "deserializer failed",
+        };
+        write!(f, "{what}: {}", self.reason)
+    }
+}
+
+/// The constructors `SourceError` and `SinkError` share beyond the role
+/// methods, for a class the producer picks.
 macro_rules! client_error_methods {
-    ($ty:ident, $what:literal, $fatal:literal) => {
+    ($ty:ident, $kind:ident, $what:literal, $fatal:literal) => {
+        impl $kind {
+            fn class(self) -> ErrorClass {
+                match self {
+                    $kind::Retryable => ErrorClass::Retryable,
+                    $kind::RecordLevel => ErrorClass::RecordLevel,
+                    $kind::Fatal => ErrorClass::Fatal,
+                }
+            }
+
+            fn from_class(class: ErrorClass) -> $kind {
+                match class {
+                    ErrorClass::Retryable => $kind::Retryable,
+                    ErrorClass::RecordLevel => $kind::RecordLevel,
+                    ErrorClass::Fatal => $kind::Fatal,
+                }
+            }
+        }
+
+        role_error_methods!($ty, $kind);
+
         impl $ty {
             #[doc = concat!("A ", $what, " error of `class` with a human-readable `reason`.")]
             ///
             /// # Examples
             ///
             /// ```
-            #[doc = concat!("use spate_core::error::{ErrorClass, ", stringify!($ty), "};")]
+            #[doc = concat!("use spate_core::error::{ErrorClass, ", stringify!($ty), ", ", stringify!($kind), "};")]
             ///
-            #[doc = concat!("let e = ", stringify!($ty), "::new(ErrorClass::RecordLevel, \"bad row\");")]
-            /// assert_eq!(e.class(), ErrorClass::RecordLevel);
+            #[doc = concat!("let e = ", stringify!($ty), "::from_class(ErrorClass::RecordLevel, \"bad row\");")]
+            #[doc = concat!("assert_eq!(e.kind(), ", stringify!($kind), "::RecordLevel);")]
             /// assert_eq!(e.reason(), "bad row");
             /// ```
             #[must_use]
-            pub fn new(class: ErrorClass, reason: impl Into<String>) -> Self {
-                Self::Client {
-                    class,
-                    reason: reason.into(),
-                }
+            pub fn from_class(class: ErrorClass, reason: impl Into<String>) -> Self {
+                Self::new($kind::from_class(class), reason)
             }
 
             #[doc = $fatal]
@@ -156,88 +299,70 @@ macro_rules! client_error_methods {
             /// ```
             #[must_use]
             pub fn fatal(reason: impl Into<String>) -> Self {
-                Self::new(ErrorClass::Fatal, reason)
+                Self::new($kind::Fatal, reason)
             }
 
             /// A transient error; retrying the same operation may succeed.
             #[must_use]
             pub fn retryable(reason: impl Into<String>) -> Self {
-                Self::new(ErrorClass::Retryable, reason)
+                Self::new($kind::Retryable, reason)
             }
 
             /// An error specific to one record, which retrying cannot fix.
             #[must_use]
             pub fn record_level(reason: impl Into<String>) -> Self {
-                Self::new(ErrorClass::RecordLevel, reason)
+                Self::new($kind::RecordLevel, reason)
             }
 
-            /// The class the producer of this error chose.
-            ///
-            /// Every variant carries a class, so a caller outside this crate
-            /// needs no fallback for the enum's non-exhaustive variants.
-            ///
-            /// # Examples
-            ///
-            /// ```
-            #[doc = concat!("use spate_core::error::{ErrorClass, ", stringify!($ty), "};")]
-            ///
-            #[doc = concat!("let e = ", stringify!($ty), "::retryable(\"connection reset\");")]
-            /// assert_eq!(e.class(), ErrorClass::Retryable);
-            /// ```
+            /// This error with the kind for `class`, and its reason and
+            /// source kept.
             #[must_use]
-            pub fn class(&self) -> ErrorClass {
-                match self {
-                    Self::Client { class, .. } => *class,
-                }
+            pub fn with_class(mut self, class: ErrorClass) -> Self {
+                self.kind = $kind::from_class(class);
+                self
             }
 
-            /// The human-readable cause.
+            /// This error with `f` applied to its reason, and its kind and
+            /// source kept.
             #[must_use]
-            pub fn reason(&self) -> &str {
-                match self {
-                    Self::Client { reason, .. } => reason,
-                }
+            pub fn map_reason(mut self, f: impl FnOnce(String) -> String) -> Self {
+                self.reason = f(self.reason);
+                self
             }
+        }
 
-            /// This error with its class replaced and its reason kept.
-            #[must_use]
-            pub fn with_class(self, class: ErrorClass) -> Self {
-                match self {
-                    Self::Client { reason, .. } => Self::Client { class, reason },
-                }
-            }
-
-            /// This error with `f` applied to its reason and its class kept.
-            #[must_use]
-            pub fn map_reason(self, f: impl FnOnce(String) -> String) -> Self {
-                match self {
-                    Self::Client { class, reason } => Self::Client {
-                        class,
-                        reason: f(reason),
-                    },
-                }
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, concat!($what, " error ({:?}): {}"), self.kind, self.reason)
             }
         }
     };
 }
 
-/// A source failed to poll, commit, or manage its assignment.
-#[derive(Debug, thiserror::Error)]
+/// How the pipeline reacts to a [`SourceError`], as judged by the connector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum SourceError {
-    /// Underlying client error.
-    #[error("source error ({class:?}): {reason}")]
-    Client {
-        /// How the pipeline reacts, as judged by the connector; see
-        /// [`ErrorClass`].
-        class: ErrorClass,
-        /// Human-readable cause.
-        reason: String,
-    },
+pub enum SourceErrorKind {
+    /// Transient; retrying the same operation may succeed.
+    Retryable,
+    /// Specific to one record; retrying the same record cannot succeed.
+    RecordLevel,
+    /// The source is broken; processing must stop.
+    Fatal,
+}
+
+/// A source failed to poll, commit, or manage its assignment.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SourceError {
+    kind: SourceErrorKind,
+    reason: String,
+    source: Option<Source>,
 }
 
 client_error_methods!(
     SourceError,
+    SourceErrorKind,
     "source",
     "An error that stops the pipeline when [`Source::open`](crate::source::Source::open), \
      [`Source::poll_events`](crate::source::Source::poll_events), \
@@ -247,29 +372,38 @@ client_error_methods!(
      `flush_commits` is logged and the run goes on."
 );
 
-/// A sink failed to write a batch.
-#[derive(Debug, thiserror::Error)]
+/// How the framework reacts to a [`SinkError`].
+///
+/// From a write, `Retryable` is retried, rotating across healthy replicas,
+/// and any other kind abandons the batch. From
+/// [`RowEncoder::encode`](crate::sink::RowEncoder::encode), `Fatal` stops the
+/// pipeline and any other kind follows the stage's [`ErrorPolicy`]. An error
+/// of any kind from
+/// [`RowEncoder::finish_chunk`](crate::sink::RowEncoder::finish_chunk) or a
+/// [`FrameCodec`](crate::sink::FrameCodec) stops the pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum SinkError {
-    /// Underlying client error.
-    #[error("sink error ({class:?}): {reason}")]
-    Client {
-        /// How the framework reacts; see [`ErrorClass`]. From a write,
-        /// `Retryable` is retried, rotating across healthy replicas, and any
-        /// other class abandons the batch. From
-        /// [`RowEncoder::encode`](crate::sink::RowEncoder::encode), `Fatal`
-        /// stops the pipeline and any other class follows the stage's
-        /// [`ErrorPolicy`]. An error of any class from
-        /// [`RowEncoder::finish_chunk`](crate::sink::RowEncoder::finish_chunk)
-        /// or a [`FrameCodec`](crate::sink::FrameCodec) stops the pipeline.
-        class: ErrorClass,
-        /// Human-readable cause.
-        reason: String,
-    },
+pub enum SinkErrorKind {
+    /// Transient; retrying the same operation may succeed.
+    Retryable,
+    /// Specific to one record; retrying the same record cannot succeed.
+    RecordLevel,
+    /// The sink is broken; processing must stop.
+    Fatal,
+}
+
+/// A sink failed to write a batch.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct SinkError {
+    kind: SinkErrorKind,
+    reason: String,
+    source: Option<Source>,
 }
 
 client_error_methods!(
     SinkError,
+    SinkErrorKind,
     "sink",
     "An error the framework does not retry. A write that returns it abandons \
      its batch, and an encoder or frame codec that returns it stops the \
@@ -530,63 +664,149 @@ mod tests {
         }
     }
 
-    /// Each constructor builds the class it names with the reason given,
-    /// and both types render it in their `Display` text.
+    /// Each constructor builds the kind it names, which maps to its class,
+    /// with the reason given, and both types render it in their `Display`
+    /// text.
     #[test]
-    fn constructors_carry_their_class_and_reason() {
+    fn source_and_sink_constructors_carry_their_kind_and_class() {
         use ErrorClass::{Fatal, RecordLevel, Retryable};
         let sources = [
-            (SourceError::fatal("broken"), Fatal),
-            (SourceError::retryable("broken"), Retryable),
-            (SourceError::record_level("broken"), RecordLevel),
-            (SourceError::new(Fatal, "broken"), Fatal),
-            (SourceError::new(Retryable, "broken"), Retryable),
-            (SourceError::new(RecordLevel, "broken"), RecordLevel),
+            (SourceError::fatal("broken"), SourceErrorKind::Fatal, Fatal),
+            (
+                SourceError::retryable("broken"),
+                SourceErrorKind::Retryable,
+                Retryable,
+            ),
+            (
+                SourceError::record_level("broken"),
+                SourceErrorKind::RecordLevel,
+                RecordLevel,
+            ),
+            (
+                SourceError::from_class(Fatal, "broken"),
+                SourceErrorKind::Fatal,
+                Fatal,
+            ),
+            (
+                SourceError::from_class(Retryable, "broken"),
+                SourceErrorKind::Retryable,
+                Retryable,
+            ),
+            (
+                SourceError::from_class(RecordLevel, "broken"),
+                SourceErrorKind::RecordLevel,
+                RecordLevel,
+            ),
+            (
+                SourceError::new(SourceErrorKind::Fatal, "broken"),
+                SourceErrorKind::Fatal,
+                Fatal,
+            ),
         ];
-        for (e, class) in sources {
-            assert_eq!(e.class(), class);
-            assert_eq!(e.reason(), "broken");
-            assert_eq!(e.to_string(), format!("source error ({class:?}): broken"));
+        for (e, kind, class) in sources {
+            assert_eq!((e.kind(), e.class(), e.reason()), (kind, class, "broken"));
+            assert_eq!(e.to_string(), format!("source error ({kind:?}): broken"));
         }
         let sinks = [
-            (SinkError::fatal("broken"), Fatal),
-            (SinkError::retryable("broken"), Retryable),
-            (SinkError::record_level("broken"), RecordLevel),
-            (SinkError::new(Fatal, "broken"), Fatal),
-            (SinkError::new(Retryable, "broken"), Retryable),
-            (SinkError::new(RecordLevel, "broken"), RecordLevel),
+            (SinkError::fatal("broken"), SinkErrorKind::Fatal, Fatal),
+            (
+                SinkError::retryable("broken"),
+                SinkErrorKind::Retryable,
+                Retryable,
+            ),
+            (
+                SinkError::record_level("broken"),
+                SinkErrorKind::RecordLevel,
+                RecordLevel,
+            ),
+            (
+                SinkError::from_class(Fatal, "broken"),
+                SinkErrorKind::Fatal,
+                Fatal,
+            ),
+            (
+                SinkError::from_class(Retryable, "broken"),
+                SinkErrorKind::Retryable,
+                Retryable,
+            ),
+            (
+                SinkError::from_class(RecordLevel, "broken"),
+                SinkErrorKind::RecordLevel,
+                RecordLevel,
+            ),
+            (
+                SinkError::new(SinkErrorKind::Retryable, "broken"),
+                SinkErrorKind::Retryable,
+                Retryable,
+            ),
         ];
-        for (e, class) in sinks {
-            assert_eq!(e.class(), class);
-            assert_eq!(e.reason(), "broken");
-            assert_eq!(e.to_string(), format!("sink error ({class:?}): broken"));
+        for (e, kind, class) in sinks {
+            assert_eq!((e.kind(), e.class(), e.reason()), (kind, class, "broken"));
+            assert_eq!(e.to_string(), format!("sink error ({kind:?}): broken"));
         }
     }
 
-    /// `class()` and `reason()` read the fields of a variant built by hand.
+    /// Each deserializer constructor builds the kind it names, with its class
+    /// and its own `Display` prefix.
     #[test]
-    fn accessors_read_a_client_error_built_by_hand() {
-        for class in [
-            ErrorClass::Retryable,
-            ErrorClass::RecordLevel,
-            ErrorClass::Fatal,
-        ] {
-            let source = SourceError::Client {
-                class,
-                reason: "by hand".into(),
-            };
-            assert_eq!((source.class(), source.reason()), (class, "by hand"));
-            let sink = SinkError::Client {
-                class,
-                reason: "by hand".into(),
-            };
-            assert_eq!((sink.class(), sink.reason()), (class, "by hand"));
+    fn deser_constructors_carry_their_kind_class_and_text() {
+        let cases = [
+            (
+                DeserError::malformed("x"),
+                DeserErrorKind::Malformed,
+                ErrorClass::RecordLevel,
+                "malformed payload: x",
+            ),
+            (
+                DeserError::schema_unavailable("x"),
+                DeserErrorKind::SchemaUnavailable,
+                ErrorClass::RecordLevel,
+                "schema unavailable: x",
+            ),
+            (
+                DeserError::not_ready("x"),
+                DeserErrorKind::NotReady,
+                ErrorClass::Retryable,
+                "not ready: x",
+            ),
+            (
+                DeserError::fatal("x"),
+                DeserErrorKind::Fatal,
+                ErrorClass::Fatal,
+                "deserializer failed: x",
+            ),
+        ];
+        for (e, kind, class, text) in cases {
+            assert_eq!((e.kind(), e.class(), e.reason()), (kind, class, "x"));
+            assert_eq!(e.to_string(), text);
+            assert_eq!(DeserError::new(kind, "x").to_string(), text);
         }
     }
 
-    /// `with_class` keeps the reason and `map_reason` keeps the class.
+    /// An attached source is what `source()` returns, and `find_source`
+    /// reaches it through every role error. Without one, `source()` is none.
     #[test]
-    fn with_class_and_map_reason_keep_the_other_field() {
+    fn with_source_is_the_source_of_every_role_error() {
+        use crate::feed::{FeedError, FeedErrorKind};
+        let errors: [Box<dyn std::error::Error>; 4] = [
+            Box::new(SourceError::fatal("a").with_source(Target(1))),
+            Box::new(SinkError::fatal("a").with_source(Target(2))),
+            Box::new(DeserError::fatal("a").with_source(Target(3))),
+            Box::new(FeedError::new(FeedErrorKind::Fatal, "a").with_source(Target(4))),
+        ];
+        for (want, err) in (1..).zip(&errors) {
+            let source = err.source().expect("the attached source");
+            assert_eq!(source.to_string(), format!("target {want}"));
+            assert_eq!(find_source::<Target>(err.as_ref()).map(|t| t.0), Some(want));
+        }
+        assert!(std::error::Error::source(&SourceError::fatal("a")).is_none());
+        assert!(std::error::Error::source(&DeserError::fatal("a")).is_none());
+    }
+
+    /// `with_class` keeps the reason and the source, and `map_reason` keeps
+    /// the kind and the source.
+    #[test]
+    fn with_class_and_map_reason_keep_the_rest() {
         let sink = SinkError::fatal("a").with_class(ErrorClass::Retryable);
         assert_eq!(sink.to_string(), "sink error (Retryable): a");
         let source = SourceError::retryable("a").map_reason(|r| format!("{r}; b"));
@@ -595,19 +815,25 @@ mod tests {
         assert_eq!(sink.to_string(), "sink error (RecordLevel): a; b");
         let source = SourceError::fatal("a").with_class(ErrorClass::RecordLevel);
         assert_eq!(source.to_string(), "source error (RecordLevel): a");
+
+        let kept = |e: &(dyn std::error::Error + 'static)| find_source::<Target>(e).map(|t| t.0);
+        let source = SourceError::fatal("a").with_source(Target(5));
+        assert_eq!(
+            kept(&source.clone().with_class(ErrorClass::Retryable)),
+            Some(5)
+        );
+        assert_eq!(kept(&source.map_reason(|r| r + "; b")), Some(5));
+        let sink = SinkError::fatal("a").with_source(Target(6));
+        assert_eq!(
+            kept(&sink.clone().with_class(ErrorClass::Retryable)),
+            Some(6)
+        );
+        assert_eq!(kept(&sink.map_reason(|r| r + "; b")), Some(6));
     }
 
     #[test]
     fn defaults_match_documented_policy() {
         assert_eq!(ErrorPolicy::default(), ErrorPolicy::Fail);
-    }
-
-    #[test]
-    fn errors_render_reasons() {
-        let e = DeserError::Malformed {
-            reason: "truncated header".into(),
-        };
-        assert!(e.to_string().contains("truncated header"));
     }
 
     #[derive(Debug, thiserror::Error)]

@@ -450,7 +450,14 @@ fn a_fence_settles_without_finishing_anything() {
         "{lines:#?}"
     );
     core.settle(fence(), Err(failure(C::TopicAuthorizationFailed)));
-    let reason = core.lock().signal.latched().cloned().unwrap().reason;
+    let reason = core
+        .lock()
+        .signal
+        .latched()
+        .cloned()
+        .unwrap()
+        .reason()
+        .to_owned();
     assert!(
         reason.contains("writing a fence to `units-attempts` failed"),
         "{reason}"
@@ -533,7 +540,7 @@ fn a_fatal_write_report_stops_the_feed() {
     let fatal = moving(&core, second);
     core.settle(*fatal, Err(failure(C::UnknownTopicOrPartition)));
     let mut st = core.lock();
-    assert_eq!(st.signal.latched().unwrap().kind, FeedErrorKind::Fatal);
+    assert_eq!(st.signal.latched().unwrap().kind(), FeedErrorKind::Fatal);
     assert!(st.resends.is_empty());
     assert_eq!(offsets(st.tracker.take_commits()), vec![(tp(0), 1)]);
 }
@@ -556,12 +563,12 @@ fn a_publish_settles_by_its_report() {
     };
     assert!(settle(Ok(())).is_ok());
     let refused = settle(Err(failure(C::MessageSizeTooLarge))).unwrap_err();
-    assert_eq!(refused.kind, FeedErrorKind::Refused);
+    assert_eq!(refused.kind(), FeedErrorKind::Refused);
     assert!(core.lock().signal.latched().is_none());
     let retry = settle(Err(failure(C::MessageTimedOut))).unwrap_err();
-    assert_eq!(retry.kind, FeedErrorKind::Retryable);
+    assert_eq!(retry.kind(), FeedErrorKind::Retryable);
     let fatal = settle(Err(failure(C::TopicAuthorizationFailed))).unwrap_err();
-    assert_eq!(fatal.kind, FeedErrorKind::Fatal);
+    assert_eq!(fatal.kind(), FeedErrorKind::Fatal);
     assert!(core.lock().signal.latched().is_some());
 }
 
@@ -759,8 +766,8 @@ fn a_latched_feed_answers_a_depth_read_with_its_error() {
     feed.core.latch("the depth thread ended");
     let mut reading = feed.read_depth(DepthOf::DeadLetters).expect("a reading");
     let e = reading.try_outcome().expect("settled").unwrap_err();
-    assert_eq!(e.kind, FeedErrorKind::Fatal);
-    assert!(e.reason.contains("the depth thread ended"), "{e}");
+    assert_eq!(e.kind(), FeedErrorKind::Fatal);
+    assert!(e.reason().contains("the depth thread ended"), "{e}");
 }
 
 /// Pins that the publish-only handle reports no depth, since it reads
@@ -782,14 +789,18 @@ fn a_publisher_answers_the_receive_side() {
     assert_eq!(publisher.backend(), "kafka");
     assert!(!publisher.hands_back());
     let err = publisher.receive(8).unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal);
-    assert!(err.reason.contains("KafkaFeed::connect"), "{}", err.reason);
+    assert_eq!(err.kind(), FeedErrorKind::Fatal);
+    assert!(
+        err.reason().contains("KafkaFeed::connect"),
+        "{}",
+        err.reason()
+    );
     for outcome in [
         publisher.renew(Receipt(1)),
         publisher.acknowledge(Receipt(1)),
         publisher.fail(Receipt(1), "why"),
     ] {
-        assert_eq!(outcome.unwrap_err().kind, FeedErrorKind::Gone);
+        assert_eq!(outcome.unwrap_err().kind(), FeedErrorKind::Gone);
     }
     let (waker, park) = wake_channel();
     publisher.set_waker(waker);
@@ -806,8 +817,8 @@ fn a_latched_publisher_refuses_every_later_publish() {
     publisher.core().latch("x");
     let mut confirmation = publisher.publish(Unit::new("u", b"body".to_vec()));
     let err = confirmation.try_outcome().expect("settled").unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal);
-    assert_eq!(err.reason, "x");
+    assert_eq!(err.kind(), FeedErrorKind::Fatal);
+    assert_eq!(err.reason(), "x");
 }
 
 /// Pins that a publisher's `Debug` prints no passthrough value.
@@ -862,8 +873,8 @@ fn a_rejection_the_feed_producer_reports_latches_the_feed() {
             .try_outcome()
             .expect("settled")
             .unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal);
-        assert!(err.reason.ends_with(text), "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal);
+        assert!(err.reason().ends_with(text), "{}", err.reason());
     }
 }
 
@@ -905,11 +916,11 @@ fn a_fatal_producer_error_latches_the_feed_with_its_cause() {
             .try_outcome()
             .expect("settled")
             .unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{code:?}");
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{code:?}");
         assert!(
-            err.reason.contains("Cluster authorization failed"),
+            err.reason().contains("Cluster authorization failed"),
             "{}",
-            err.reason
+            err.reason()
         );
     }
     let publisher = idle_publisher();
@@ -961,7 +972,7 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
         .recv_timeout(HANG)
         .expect("publish_unit did not return: the state lock is held across the send");
     let err = outcome.expect("settled inline").unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+    assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
     assert!(fresh.latched());
 }
 /// Pins that the publisher refuses a section a worker refuses, with the
@@ -1040,7 +1051,7 @@ fn a_transient_consumer_error_is_returned_once() {
     buffer_one(&feed);
     feed.core.lock().signal.fail_soon("broker down".to_owned());
     let error = feed.receive(8).unwrap_err();
-    assert_eq!(error.kind, FeedErrorKind::Retryable);
+    assert_eq!(error.kind(), FeedErrorKind::Retryable);
     assert_eq!(feed.receive(8).unwrap().len(), 1);
 }
 
@@ -1119,7 +1130,7 @@ fn renew_keeps_a_held_receipt_until_the_feed_latches() {
     let receipt = feed.receive(1).unwrap().pop().unwrap().receipt;
     assert_eq!(feed.renew(receipt), Ok(()));
     let unknown = feed.renew(Receipt(u64::MAX)).unwrap_err();
-    assert_eq!(unknown.kind, FeedErrorKind::Gone);
+    assert_eq!(unknown.kind(), FeedErrorKind::Gone);
 
     let latched = feed.core.latch("probe");
     assert_eq!(feed.renew(receipt), Err(latched));
@@ -1215,14 +1226,14 @@ fn an_acknowledged_unit_finishes_only_once_its_tombstone_is_confirmed() {
 fn acknowledging_a_receipt_no_longer_held_is_gone() {
     let feed = idle_feed();
     assert_eq!(
-        feed.acknowledge(Receipt(99)).unwrap_err().kind,
+        feed.acknowledge(Receipt(99)).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
     buffer_one(&feed);
     let delivery = feed.receive(1).unwrap().pop().unwrap();
     feed.core.lock().tracker.revoke(&[tp(0)]);
     assert_eq!(
-        feed.acknowledge(delivery.receipt).unwrap_err().kind,
+        feed.acknowledge(delivery.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 }
@@ -1403,7 +1414,8 @@ fn a_failed_attempt_write_is_sent_again_and_delivers_the_unit() {
         .latched()
         .cloned()
         .expect("the feed stopped")
-        .reason;
+        .reason()
+        .to_owned();
     assert!(
         reason.contains("writing an attempt record to `units-attempts`"),
         "{reason}"
@@ -1449,7 +1461,7 @@ fn a_fatal_tombstone_report_stops_the_feed() {
         Err(failure(C::TopicAuthorizationFailed)),
     );
     let mut st = core.lock();
-    let reason = &st.signal.latched().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason();
     assert!(reason.contains("tombstone"), "{reason}");
     assert!(st.resends.is_empty());
     assert_eq!(offsets(st.tracker.take_commits()), vec![(tp(0), 0)]);
@@ -1466,7 +1478,7 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
     let write = admission(&core_a, entry).expect("admitted below the cap");
     core_a.settle(write, Err(failure(C::MessageSizeTooLarge)));
     let st = core_a.lock();
-    let reason = &st.signal.latched().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason();
     assert!(
         reason.contains("writing an attempt record to `units-attempts`"),
         "{reason}"
@@ -1487,7 +1499,7 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
         Err(failure(C::MessageSizeTooLarge)),
     );
     let st = core_t.lock();
-    let reason = &st.signal.latched().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason();
     assert!(
         reason.contains("writing an attempt record's tombstone to `units-attempts`"),
         "{reason}"
@@ -2054,8 +2066,8 @@ fn a_latch_settles_a_close_the_consumer_thread_has_not_taken() {
     assert!(closing.try_outcome().is_none(), "settled before the latch");
     feed.core.latch("a test latch");
     let err = closing.try_outcome().expect("settled").unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal);
-    assert_eq!(err.reason, "a test latch");
+    assert_eq!(err.kind(), FeedErrorKind::Fatal);
+    assert_eq!(err.reason(), "a test latch");
 }
 
 /// Pins that `close` returns at once while no broker answers: it only
@@ -2538,8 +2550,8 @@ mod cluster {
                 depth: None,
             };
             wait_until(HANG, "the feed stops", || match feed.receive(1) {
-                Err(e) if e.kind == FeedErrorKind::Fatal => {
-                    reason = Some(e.reason);
+                Err(e) if e.kind() == FeedErrorKind::Fatal => {
+                    reason = Some(e.reason().to_owned());
                     true
                 }
                 _ => false,
@@ -2791,14 +2803,14 @@ mod cluster {
             let Some(error) = core.lock().signal.latched().cloned() else {
                 panic!("the assignment was accepted: {assigned:?}");
             };
-            assert_eq!(error.kind, FeedErrorKind::Fatal);
+            assert_eq!(error.kind(), FeedErrorKind::Fatal);
             assert!(
-                error.reason.contains(
+                error.reason().contains(
                     "the group offered a partition of a topic other than `units` or \
                      `units-retry`"
                 ),
                 "{}",
-                error.reason
+                error.reason()
             );
             assert_eq!(assigned.count(), 0, "{assigned:?}");
             assert_eq!(owns(&d), 0);
@@ -3280,7 +3292,8 @@ mod cluster {
             .latched()
             .cloned()
             .expect("the feed stopped")
-            .reason;
+            .reason()
+            .to_owned();
         assert!(
             reason.contains("reading the watermarks of `units-attempts`"),
             "{reason}"
@@ -3353,7 +3366,7 @@ mod cluster {
         .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
-        let reason = &st.signal.latched().expect("the feed stopped").reason;
+        let reason = &st.signal.latched().expect("the feed stopped").reason();
         assert!(reason.contains("partition 1"), "{reason}");
         assert_eq!(st.gating.len(), 2, "a unit was admitted");
         assert_eq!(st.admitting, 0);
@@ -3605,7 +3618,7 @@ mod cluster {
         .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
-        let reason = &st.signal.latched().expect("the feed stopped").reason;
+        let reason = &st.signal.latched().expect("the feed stopped").reason();
         assert!(
             reason.contains("reading the watermarks of `units-attempts`"),
             "{reason}"
@@ -5119,7 +5132,7 @@ mod cluster {
         drive(
             &mut d,
             "the fetch error reaches the poll",
-            |d| matches!(d.core.lock().signal.check(), Err(e) if e.kind == FeedErrorKind::Retryable),
+            |d| matches!(d.core.lock().signal.check(), Err(e) if e.kind() == FeedErrorKind::Retryable),
         );
         d.call_bound = HOUR;
         let (cluster, mut d, _) = on_driver_answered(cluster, d, "the first commit", |d| {
@@ -5250,8 +5263,8 @@ mod cluster {
         core.latch("a test latch");
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         let err = closing.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal);
-        assert_eq!(err.reason, "a test latch");
+        assert_eq!(err.kind(), FeedErrorKind::Fatal);
+        assert_eq!(err.reason(), "a test latch");
         consumer::run(d);
         assert_eq!(committed(&brokers, &group), None);
     }
@@ -5297,11 +5310,11 @@ mod cluster {
         let mut closing = feed.close(Duration::ZERO).expect("a close");
         consumer::run(d);
         let err = closing.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Retryable);
+        assert_eq!(err.kind(), FeedErrorKind::Retryable);
         assert!(
-            err.reason.contains("writes still in flight"),
+            err.reason().contains("writes still in flight"),
             "{}",
-            err.reason
+            err.reason()
         );
         assert_ne!(committed(&brokers, &group), Some(1));
     }
@@ -5326,8 +5339,12 @@ mod cluster {
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         let lines = spate_test::capture_logs(tracing::Level::WARN, || consumer::run(d));
         let err = closing.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Retryable);
-        assert!(err.reason.contains("last commit failed"), "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Retryable);
+        assert!(
+            err.reason().contains("last commit failed"),
+            "{}",
+            err.reason()
+        );
         assert!(
             lines
                 .iter()
@@ -5440,8 +5457,8 @@ mod cluster {
         core.latch("a test latch");
         thread.join().expect("the consumer thread ends");
         let err = closing.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
-        assert_eq!(err.reason, "a test latch");
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
+        assert_eq!(err.reason(), "a test latch");
     }
 
     /// Pins that a close settles only once the consumer is gone: the
@@ -5538,7 +5555,7 @@ mod cluster {
             &io,
         );
         let err = settled(publisher.publish(Unit::new("big", vec![b'x'; 2000]))).unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Refused, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Refused, "{}", err.reason());
         settled(publisher.publish(Unit::new("small", b"body".to_vec()))).unwrap();
     }
 
@@ -5556,9 +5573,9 @@ mod cluster {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
         );
         let err = settled(publisher.publish(Unit::new("a", b"body".to_vec()))).unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
         let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
         let reader = spate_test_support::consumer(&brokers, &[]).unwrap();
         assert_eq!(
             spate_test_support::high_watermark(&reader, "units", 0, HANG),
@@ -5587,7 +5604,7 @@ mod cluster {
             "the drop did not return"
         );
         let err = confirmation.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Retryable, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Retryable, "{}", err.reason());
     }
 
     /// Pins that a publisher whose idempotent producer id the cluster
@@ -5605,11 +5622,11 @@ mod cluster {
         assert!(first.is_err(), "{first:?}");
         wait_until(HANG, "the publisher latches", || publisher.core().latched());
         let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
         assert!(
-            err.reason.contains("Cluster authorization failed"),
+            err.reason().contains("Cluster authorization failed"),
             "{}",
-            err.reason
+            err.reason()
         );
     }
 
@@ -5618,7 +5635,7 @@ mod cluster {
     fn latched_reason(publisher: &KafkaFeedPublisher) -> spate_core::feed::FeedError {
         wait_until(HANG, "the publisher latches", || publisher.core().latched());
         let err = settled(publisher.publish(Unit::new("later", b"body".to_vec()))).unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
         err
     }
 
@@ -5642,9 +5659,9 @@ mod cluster {
         assert!(first.is_err(), "{first:?}");
         let err = latched_reason(&publisher);
         assert!(
-            err.reason.contains("the feed's producer stopped"),
+            err.reason().contains("the feed's producer stopped"),
             "{}",
-            err.reason
+            err.reason()
         );
     }
 
@@ -5664,9 +5681,9 @@ mod cluster {
         assert!(first.is_err(), "{first:?}");
         let err = latched_reason(&publisher);
         assert!(
-            err.reason.contains("the feed's producer stopped"),
+            err.reason().contains("the feed's producer stopped"),
             "{}",
-            err.reason
+            err.reason()
         );
     }
 
@@ -5889,7 +5906,7 @@ mod cluster {
             .try_outcome()
             .expect("settled")
             .expect_err("an unanswered commit is a failed one");
-        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        assert_eq!(err.kind(), FeedErrorKind::Retryable, "{err}");
         assert!(
             returns_within(HANG, move || drop(feed)),
             "the feed's drop did not return"
@@ -5921,7 +5938,7 @@ mod cluster {
             .try_outcome()
             .expect("settled")
             .expect_err("unanswered");
-        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        assert_eq!(err.kind(), FeedErrorKind::Retryable, "{err}");
         drop(feed);
     }
 
@@ -5951,7 +5968,7 @@ mod cluster {
             .try_outcome()
             .expect("settled")
             .expect_err("unanswered");
-        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        assert_eq!(err.kind(), FeedErrorKind::Retryable, "{err}");
         drop(feed);
     }
 
@@ -5984,7 +6001,7 @@ mod cluster {
             .try_outcome()
             .expect("settled")
             .expect_err("unanswered");
-        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        assert_eq!(err.kind(), FeedErrorKind::Retryable, "{err}");
         drop(feed);
     }
 
@@ -6327,7 +6344,7 @@ mod cluster {
         let waits = waits.lock().unwrap().clone();
         assert!(waits.contains(&Wait::Handoff(Duration::ZERO)), "{waits:?}");
         let err = closing.try_outcome().expect("settled").unwrap_err();
-        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
         drop((feed, cluster));
     }
 
@@ -6774,7 +6791,7 @@ mod docker {
         assert!(
             st.signal.latched().is_none(),
             "{:?}",
-            st.signal.latched().map(|f| &f.reason)
+            st.signal.latched().map(|f| f.reason())
         );
         assert!(st.gating.is_empty(), "the gate held back a unit");
     }
@@ -7129,12 +7146,12 @@ fn a_certificate_the_client_rejects_latches_the_publisher() {
         .try_outcome()
         .expect("settled")
         .unwrap_err();
-    assert_eq!(err.kind, FeedErrorKind::Fatal);
+    assert_eq!(err.kind(), FeedErrorKind::Fatal);
     assert!(
-        err.reason
+        err.reason()
             .starts_with("the client's credential or TLS handshake was rejected: "),
         "{}",
-        err.reason
+        err.reason()
     );
 }
 

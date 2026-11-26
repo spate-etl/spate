@@ -72,12 +72,11 @@ impl Deserializer<OrderHeaderF> for OrderHeaderDeser {
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, OrderHeader<'buf>>,
     ) -> Result<(), DeserError> {
-        let text = std::str::from_utf8(raw.bytes).map_err(|e| DeserError::Malformed {
-            reason: e.to_string(),
-        })?;
-        let (order_id, customer_id) = text.split_once('|').ok_or(DeserError::Malformed {
-            reason: "order header has no customer field".to_string(),
-        })?;
+        let text =
+            std::str::from_utf8(raw.bytes).map_err(|e| DeserError::malformed(e.to_string()))?;
+        let (order_id, customer_id) = text.split_once('|').ok_or(DeserError::malformed(
+            "order header has no customer field".to_string(),
+        ))?;
         let _ = out.emit(Record {
             payload: OrderHeader {
                 order_id,

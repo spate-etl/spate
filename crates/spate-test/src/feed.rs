@@ -173,7 +173,7 @@ pub struct FeedScript {
 ///
 /// // The first receipt has lapsed; the second acknowledges the unit.
 /// let lapsed = feed.acknowledge(first).unwrap_err();
-/// assert_eq!(lapsed.kind, FeedErrorKind::Gone);
+/// assert_eq!(lapsed.kind(), FeedErrorKind::Gone);
 /// feed.acknowledge(second).unwrap();
 /// assert_eq!(script.acknowledged(), vec![second]);
 /// assert_eq!(script.gone(), vec![first]);
@@ -321,7 +321,7 @@ impl FeedScript {
     /// script.refuse_next_acknowledge(FeedErrorKind::Retryable);
     ///
     /// let refused = feed.acknowledge(receipt).unwrap_err();
-    /// assert_eq!(refused.kind, FeedErrorKind::Retryable);
+    /// assert_eq!(refused.kind(), FeedErrorKind::Retryable);
     /// assert_eq!(script.held(), vec![receipt]);
     /// assert_eq!(script.refusals_left(), 0);
     ///
@@ -426,7 +426,7 @@ impl FeedScript {
     ///
     /// let read = |of| feed.read_depth(of).unwrap().try_outcome().unwrap();
     /// assert_eq!(read(DepthOf::Feed).unwrap(), peer_held);
-    /// assert_eq!(read(DepthOf::Feed).unwrap_err().kind, FeedErrorKind::Retryable);
+    /// assert_eq!(read(DepthOf::Feed).unwrap_err().kind(), FeedErrorKind::Retryable);
     ///
     /// // With the script spent, the feed reports its own state.
     /// let receipt = script.deliver(Unit::new("a", b"a".to_vec()));
@@ -704,7 +704,7 @@ mod tests {
     }
 
     fn kind(result: Result<(), FeedError>) -> FeedErrorKind {
-        result.unwrap_err().kind
+        result.unwrap_err().kind()
     }
 
     /// Pins that with no scripted answer the feed reports its own queue, held
@@ -770,7 +770,10 @@ mod tests {
         let read = |of| feed.read_depth(of).unwrap().try_outcome().unwrap();
         assert_eq!(read(DepthOf::DeadLetters).unwrap(), dead);
         assert_eq!(read(DepthOf::Feed).unwrap(), first);
-        assert_eq!(read(DepthOf::Feed).unwrap_err().kind, FeedErrorKind::Fatal);
+        assert_eq!(
+            read(DepthOf::Feed).unwrap_err().kind(),
+            FeedErrorKind::Fatal
+        );
         assert!(read(DepthOf::Feed).unwrap().is_empty());
         assert!(read(DepthOf::DeadLetters).unwrap().is_empty());
     }
@@ -849,7 +852,7 @@ mod tests {
         script.refuse_next_publish(FeedErrorKind::Refused);
         let mut refused = feed.publish(unit("refused"));
         assert_eq!(
-            refused.try_outcome().unwrap().unwrap_err().kind,
+            refused.try_outcome().unwrap().unwrap_err().kind(),
             FeedErrorKind::Refused
         );
 
@@ -1023,7 +1026,10 @@ mod tests {
         let (feed, script) = scripted_feed();
         let queued = script.deliver(unit("a"));
         script.refuse_next_receive(FeedErrorKind::Retryable);
-        assert_eq!(feed.receive(8).unwrap_err().kind, FeedErrorKind::Retryable);
+        assert_eq!(
+            feed.receive(8).unwrap_err().kind(),
+            FeedErrorKind::Retryable
+        );
         assert!(script.held().is_empty());
         assert!(script.delivered().is_empty());
         let got = feed.receive(8).unwrap();
@@ -1085,7 +1091,10 @@ mod tests {
         script.deliver(unit("a"));
         script.refuse_next_receive(FeedErrorKind::Retryable);
         assert!(park.park(Duration::ZERO));
-        assert_eq!(feed.receive(8).unwrap_err().kind, FeedErrorKind::Retryable);
+        assert_eq!(
+            feed.receive(8).unwrap_err().kind(),
+            FeedErrorKind::Retryable
+        );
         assert!(
             !park.park(Duration::ZERO),
             "a refused receive signalled the reader"
@@ -1101,7 +1110,7 @@ mod tests {
         assert_eq!(script.refusals_left(), 2);
         let mut refused = feed.publish(unit("a"));
         assert_eq!(
-            refused.try_outcome().unwrap().unwrap_err().kind,
+            refused.try_outcome().unwrap().unwrap_err().kind(),
             FeedErrorKind::Refused
         );
         assert_eq!(script.refusals_left(), 1);

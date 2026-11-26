@@ -72,7 +72,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
         "the second message is dead-lettered or the feed stops",
         || {
             if let Err(e) = worker.feed.receive(1)
-                && e.kind == FeedErrorKind::Fatal
+                && e.kind() == FeedErrorKind::Fatal
             {
                 fatal = Some(e);
             }

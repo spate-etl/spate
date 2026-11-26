@@ -158,7 +158,7 @@ Without the attribute, serde drops the key and the default applies with no warni
 Start a refusal with the key's path, a colon, then the rule, as `SectionPath::invalid` writes it: `sinks.eu: batch.max_rows: must be at least 1`.
 Put any other key the rule names in backticks.
 When a component refuses a key of another section, the refusal names that section, a colon, then the key in backticks: ``feed: `location` must not be empty``.
-A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka.rdkafka."group.id" cannot be overridden: …`.
+A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka: rdkafka."group.id" cannot be overridden: …`.
 
 Word a zero or empty value by what the key holds:
 

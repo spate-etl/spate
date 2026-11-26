@@ -14,7 +14,7 @@
 //! `HalfOpen` frees a slot; it is released by an *event*, the in-flight probe
 //! reporting. [`BreakerSet::subscribe`] is that event.
 
-use super::config::BreakerConfig;
+use super::config::BreakerSection;
 use crate::clock::deadline_after;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ pub(crate) struct Pick {
 /// rotation cursor.
 #[derive(Debug)]
 pub(crate) struct BreakerSet {
-    cfg: BreakerConfig,
+    cfg: BreakerSection,
     states: Vec<State>,
     cursor: usize,
     metrics: Arc<SinkShardMetrics>,
@@ -92,11 +92,11 @@ pub(crate) struct BreakerSet {
 impl BreakerSet {
     pub(crate) fn new(
         replicas: usize,
-        mut cfg: BreakerConfig,
+        mut cfg: BreakerSection,
         metrics: Arc<SinkShardMetrics>,
     ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
-        // `BreakerConfig::validate` rejects this, and the builder runs it when
+        // `BreakerSection::validate` rejects this, and the builder runs it when
         // it installs a sink. A pool spawned directly with `SinkPool::spawn`
         // skips it; this clamp covers that path.
         //
@@ -412,7 +412,7 @@ mod tests {
         let names: Vec<String> = (0..replicas).map(|r| format!("r{r}")).collect();
         BreakerSet::new(
             replicas,
-            BreakerConfig {
+            BreakerSection {
                 failure_threshold: threshold,
                 open_for: Duration::from_secs(5),
                 half_open_probes: 1,
@@ -657,7 +657,7 @@ mod tests {
         let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
         let mut b = BreakerSet::new(
             1,
-            BreakerConfig {
+            BreakerSection {
                 failure_threshold: 1,
                 open_for: Duration::from_secs(5),
                 half_open_probes: 0,
@@ -691,7 +691,7 @@ mod tests {
         let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
         let mut b = BreakerSet::new(
             1,
-            BreakerConfig {
+            BreakerSection {
                 failure_threshold: 1,
                 open_for: Duration::MAX,
                 half_open_probes: 1,
@@ -820,7 +820,7 @@ mod tests {
             ));
             let mut b = BreakerSet::new(
                 2,
-                BreakerConfig {
+                BreakerSection {
                     failure_threshold: 1,
                     open_for: Duration::from_secs(5),
                     half_open_probes: 1,

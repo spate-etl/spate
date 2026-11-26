@@ -13,6 +13,7 @@
 //! down sink therefore holds every permit with no exotic client behavior, and
 //! a `dispatch` that blocked on the semaphore would deadlock the drain.
 
+use bytesize::ByteSize;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::error::ErrorPolicy;
@@ -46,7 +47,7 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
     let sink = sink.with_pool_config({
         let mut pool = SinkPoolConfig::default();
         pool.batch.max_rows = 1;
-        pool.batch.max_bytes = u64::MAX;
+        pool.batch.max_bytes = ByteSize::b(u64::MAX);
         pool.batch.linger = Duration::from_millis(50);
         pool.inflight.max_per_shard = 1;
         pool

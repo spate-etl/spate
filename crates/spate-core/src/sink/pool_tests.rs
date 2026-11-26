@@ -15,6 +15,7 @@ use crate::hash::FastMap;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics, names};
 use crate::record::NO_EVENT_TIME_MS;
 use bytes::Bytes;
+use bytesize::ByteSize;
 use spate_test::wait_until;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -312,12 +313,12 @@ fn coded_chunk(raw_len: usize, frame_len: usize, ack: &AckRef) -> EncodedChunk {
 
 fn small_batches() -> SinkPoolConfig {
     SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: 1,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(3600),
         },
-        retry: RetryConfig {
+        retry: RetrySection {
             initial: Duration::from_millis(1),
             max: Duration::from_millis(4),
             multiplier: 2.0,
@@ -331,9 +332,9 @@ fn small_batches() -> SinkPoolConfig {
 #[tokio::test]
 async fn chunks_from_many_senders_merge_into_one_big_batch() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: 200,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -379,9 +380,9 @@ async fn chunks_from_many_senders_merge_into_one_big_batch() {
 #[tokio::test(start_paused = true)]
 async fn linger_seals_a_partial_batch() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(1),
         },
         ..SinkPoolConfig::default()
@@ -410,9 +411,9 @@ async fn linger_seals_a_partial_batch() {
 #[tokio::test]
 async fn byte_threshold_seals_independently_of_rows() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 1024,
+            max_bytes: ByteSize::b(1024),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -436,9 +437,9 @@ async fn byte_threshold_seals_independently_of_rows() {
 #[tokio::test]
 async fn max_bytes_counts_raw_bytes() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 300,
+            max_bytes: ByteSize::b(300),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -698,9 +699,9 @@ async fn record_level_errors_abandon_without_retry() {
 #[tokio::test(start_paused = true)]
 async fn drain_flushes_partials_and_abandons_hung_writes() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -822,9 +823,9 @@ async fn drain_deadline_published_after_worker_parks_is_observed() {
 #[tokio::test(start_paused = true)]
 async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -869,9 +870,9 @@ async fn drain_with_a_leaked_sender_completes_within_the_deadline() {
 #[tokio::test(start_paused = true)]
 async fn drain_force_seal_does_not_block_on_a_held_permit() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -916,9 +917,9 @@ async fn drain_force_seal_does_not_block_on_a_held_permit() {
 #[tokio::test(start_paused = true)]
 async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -969,9 +970,9 @@ async fn a_held_permit_does_not_wedge_dispatch_at_shutdown() {
 #[tokio::test(start_paused = true)]
 async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -1024,9 +1025,9 @@ async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
 #[tokio::test(start_paused = true)]
 async fn a_batch_waiting_for_a_permit_counts_its_shard_as_gated() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -1097,9 +1098,9 @@ async fn writes_with_permits_to_spare_leave_the_shard_ungated() {
 #[tokio::test(start_paused = true)]
 async fn the_drain_takes_a_gated_shard_out_of_the_count() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -1176,9 +1177,9 @@ fn a_worker_dropped_while_gated_leaves_the_shard_ungated() {
 #[tokio::test(start_paused = true)]
 async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_secs(3600),
         },
         // Retry policy left at its default of unbounded attempts.
@@ -1227,9 +1228,9 @@ async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
 #[tokio::test(start_paused = true)]
 async fn a_held_permit_does_not_wedge_the_linger_dispatch() {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: 32,
+            max_bytes: ByteSize::b(32),
             linger: Duration::from_millis(50),
         },
         ..SinkPoolConfig::default()
@@ -1287,9 +1288,9 @@ async fn drain_returns_under_any_permit_pressure() {
                 Outcome::Write(Duration::from_secs(60)),
             ] {
                 let mut cfg = SinkPoolConfig {
-                    batch: BatchConfig {
+                    batch: BatchSection {
                         max_rows: u64::MAX,
-                        max_bytes: 32,
+                        max_bytes: ByteSize::b(32),
                         linger: Duration::from_secs(3600),
                     },
                     ..SinkPoolConfig::default()
@@ -1395,9 +1396,9 @@ struct BlockedWrite {
 /// apart from the runtime's workers.
 fn one_blocked_write(clock: &Arc<TestClock>) -> BlockedWrite {
     let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: 1,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(3600),
         },
         ..SinkPoolConfig::default()
@@ -1521,9 +1522,9 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
                     .unwrap();
                 rt.block_on(async {
                     let cfg = SinkPoolConfig {
-                        batch: BatchConfig {
+                        batch: BatchSection {
                             max_rows,
-                            max_bytes: u64::MAX,
+                            max_bytes: ByteSize::b(u64::MAX),
                             linger: Duration::from_millis(5),
                         },
                         ..SinkPoolConfig::default()
@@ -1645,9 +1646,9 @@ fn sink_records_metric_matches_rows_written_exactly() {
             .expect("runtime");
         rt.block_on(async {
             let cfg = SinkPoolConfig {
-                batch: BatchConfig {
+                batch: BatchSection {
                     max_rows: 5,
-                    max_bytes: u64::MAX,
+                    max_bytes: ByteSize::b(u64::MAX),
                     linger: Duration::from_secs(3600),
                 },
                 ..SinkPoolConfig::default()
@@ -2694,9 +2695,9 @@ async fn paused_hour() {
 #[tokio::test(start_paused = true)]
 async fn linger_seals_on_the_injected_clock() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: u64::MAX,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(1),
         },
         ..SinkPoolConfig::default()
@@ -2734,9 +2735,9 @@ async fn linger_seals_on_the_injected_clock() {
 #[tokio::test(start_paused = true)]
 async fn a_new_batch_lingers_from_its_own_first_chunk() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: 2,
-            max_bytes: u64::MAX,
+            max_bytes: ByteSize::b(u64::MAX),
             linger: Duration::from_secs(1),
         },
         ..SinkPoolConfig::default()
@@ -3214,7 +3215,7 @@ fn event_basis_latency_sum(events: &[i64], ingest_age: Duration) -> f64 {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let config = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             max_rows: events.len().try_into().expect("a small batch"),
             ..small_batches().batch
         },
@@ -3407,7 +3408,7 @@ async fn sweep_whose_aborts_land() {
 /// Pins that `SinkPool::spawn` refuses a zero in-flight limit with the
 /// message `SinkPoolConfig::validate` gives for it.
 #[tokio::test]
-#[should_panic(expected = "inflight.max_per_shard must be at least 1")]
+#[should_panic(expected = "inflight.max_per_shard: must be at least 1")]
 async fn a_zero_inflight_limit_panics_at_spawn() {
     let mut cfg = SinkPoolConfig::default();
     cfg.inflight.max_per_shard = 0;
@@ -3417,7 +3418,7 @@ async fn a_zero_inflight_limit_panics_at_spawn() {
 /// Pins that `SinkPool::spawn` refuses an in-flight limit tokio's semaphore
 /// cannot hold, before a worker builds one.
 #[tokio::test]
-#[should_panic(expected = "inflight.max_per_shard must not exceed")]
+#[should_panic(expected = "inflight.max_per_shard: must not exceed")]
 async fn an_inflight_limit_past_the_semaphore_panics_at_spawn() {
     let mut cfg = SinkPoolConfig::default();
     cfg.inflight.max_per_shard = tokio::sync::Semaphore::MAX_PERMITS + 1;
@@ -3429,9 +3430,9 @@ async fn an_inflight_limit_past_the_semaphore_panics_at_spawn() {
 #[tokio::test(start_paused = true)]
 async fn a_linger_past_a_year_seals_at_a_year() {
     let cfg = SinkPoolConfig {
-        batch: BatchConfig {
+        batch: BatchSection {
             linger: Duration::MAX,
-            ..BatchConfig::default()
+            ..BatchSection::default()
         },
         ..SinkPoolConfig::default()
     };

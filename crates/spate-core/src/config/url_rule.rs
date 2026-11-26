@@ -63,7 +63,7 @@ impl<'a> UrlRule<'a> {
     /// use spate_core::config::{SectionPath, UrlRule};
     ///
     /// const ENDPOINT: UrlRule<'static> =
-    ///     UrlRule::new("set them in user and password").schemes(&["http", "https"]);
+    ///     UrlRule::new("set them in `username` and `password`").schemes(&["http", "https"]);
     ///
     /// let url = ENDPOINT.check("https://ch-0:8443").unwrap();
     /// assert_eq!(url.host_str(), Some("ch-0"));
@@ -71,7 +71,7 @@ impl<'a> UrlRule<'a> {
     /// let err = ENDPOINT.check("https://svc:hunter2@ch-0:8443").unwrap_err();
     /// assert_eq!(
     ///     SectionPath::sink("example").invalid("endpoint", err.to_string()).to_string(),
-    ///     "sink.example.endpoint: carries userinfo; set them in user and password"
+    ///     "sink.example.endpoint: carries userinfo; set them in `username` and `password`"
     /// );
     /// ```
     pub fn check(&self, value: &str) -> Result<Url, UrlRuleError> {

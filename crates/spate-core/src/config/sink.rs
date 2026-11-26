@@ -4,7 +4,7 @@ use super::chunk::ChunkSection;
 use super::component::{component_error, split_backend};
 use super::{ComponentConfig, ConfigError, SectionPath, redact};
 use crate::ops::ChunkConfig;
-use crate::sink::{BatchConfig, BreakerConfig, InflightConfig, QueueSection, RetryConfig};
+use crate::sink::{BatchSection, BreakerSection, InflightSection, QueueSection, RetrySection};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -151,8 +151,8 @@ impl SinkSection {
     pub(crate) fn batch(
         &self,
         address: &str,
-        base: &BatchConfig,
-    ) -> Result<Option<BatchConfig>, ConfigError> {
+        base: &BatchSection,
+    ) -> Result<Option<BatchSection>, ConfigError> {
         overlay(self.batch.as_ref(), base, address, "batch")
     }
 
@@ -160,8 +160,8 @@ impl SinkSection {
     pub(crate) fn inflight(
         &self,
         address: &str,
-        base: &InflightConfig,
-    ) -> Result<Option<InflightConfig>, ConfigError> {
+        base: &InflightSection,
+    ) -> Result<Option<InflightSection>, ConfigError> {
         overlay(self.inflight.as_ref(), base, address, "inflight")
     }
 
@@ -169,8 +169,8 @@ impl SinkSection {
     pub(crate) fn retry(
         &self,
         address: &str,
-        base: &RetryConfig,
-    ) -> Result<Option<RetryConfig>, ConfigError> {
+        base: &RetrySection,
+    ) -> Result<Option<RetrySection>, ConfigError> {
         overlay(self.retry.as_ref(), base, address, "retry")
     }
 
@@ -178,8 +178,8 @@ impl SinkSection {
     pub(crate) fn breaker(
         &self,
         address: &str,
-        base: &BreakerConfig,
-    ) -> Result<Option<BreakerConfig>, ConfigError> {
+        base: &BreakerSection,
+    ) -> Result<Option<BreakerSection>, ConfigError> {
         overlay(self.breaker.as_ref(), base, address, "breaker")
     }
 
@@ -192,10 +192,10 @@ impl SinkSection {
         if let Some(queue) = self.queue(address)? {
             queue.capacity(chunk.target_bytes, &SectionPath::at(address))?;
         }
-        self.batch(address, &BatchConfig::default())?;
-        self.inflight(address, &InflightConfig::default())?;
-        self.retry(address, &RetryConfig::default())?;
-        self.breaker(address, &BreakerConfig::default())?;
+        self.batch(address, &BatchSection::default())?;
+        self.inflight(address, &InflightSection::default())?;
+        self.retry(address, &RetrySection::default())?;
+        self.breaker(address, &BreakerSection::default())?;
         Ok(())
     }
 }
@@ -271,13 +271,14 @@ impl<'de> Deserialize<'de> for SinkSection {
 mod tests {
     use super::*;
     use crate::sink::SinkPoolConfig;
+    use bytesize::ByteSize;
     use std::time::Duration;
 
     /// Two pools at the extremes of each field, one with non-round values.
     fn extreme_bases() -> [SinkPoolConfig; 2] {
         let mut high = SinkPoolConfig::default();
         high.batch.max_rows = u64::MAX;
-        high.batch.max_bytes = u64::MAX;
+        high.batch.max_bytes = ByteSize::b(u64::MAX);
         high.batch.linger = crate::clock::LONGEST_DEADLINE;
         high.inflight.max_per_shard = tokio::sync::Semaphore::MAX_PERMITS;
         high.retry.initial = Duration::new(1, 1);
@@ -286,17 +287,29 @@ mod tests {
         high.retry.jitter = 1.0;
         high.retry.max_attempts = u32::MAX;
         high.breaker.failure_threshold = u32::MAX;
-        high.breaker.open_for = BreakerConfig::MAX_OPEN_FOR;
+        high.breaker.open_for = BreakerSection::MAX_OPEN_FOR;
         high.breaker.half_open_probes = u32::MAX;
         let mut odd = SinkPoolConfig::default();
         odd.batch.max_rows = 1;
-        odd.batch.max_bytes = 1_000_001;
+        odd.batch.max_bytes = ByteSize::b(1_000_001);
         odd.batch.linger = Duration::from_nanos(1);
         odd.retry.initial = Duration::from_nanos(7);
         odd.retry.multiplier = 1.000_000_1;
         odd.retry.jitter = 0.0;
         odd.breaker.open_for = Duration::new(3, 999_999_999);
         [high, odd]
+    }
+
+    /// Pins that `batch.max_bytes` takes a YAML byte size.
+    #[test]
+    fn batch_max_bytes_takes_a_byte_size() {
+        let section: SinkSection =
+            serde_yaml::from_str("fake: ~\nbatch: { max_bytes: 64MiB }").unwrap();
+        let batch = section
+            .batch("sink", &BatchSection::default())
+            .unwrap()
+            .expect("a batch block");
+        assert_eq!(batch.max_bytes, ByteSize::mib(64));
     }
 
     /// An empty or bare block leaves every field of the base as it was, at

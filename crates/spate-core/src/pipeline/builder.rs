@@ -69,7 +69,7 @@ use crate::metrics::{
 use crate::ops::{ChunkConfig, RunnableChain, SplitTarget};
 use crate::pipeline::ExitReport;
 use crate::sink::{
-    BatchConfig, BreakerConfig, DrainReport, InflightConfig, QueueSection, RetryConfig,
+    BatchSection, BreakerSection, DrainReport, InflightSection, QueueSection, RetrySection,
     ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkMetricsCtx, SinkPool,
     SinkPoolConfig, SinkProbeFn, shard_queues,
 };
@@ -283,9 +283,9 @@ const DEFAULT_QUEUE_CAPACITY: usize = 8;
 ///
 /// ```
 /// use spate_core::pipeline::SinkOptions;
-/// use spate_core::sink::{BatchConfig, QueueSection};
+/// use spate_core::sink::{BatchSection, QueueSection};
 ///
-/// let mut batch = BatchConfig::default();
+/// let mut batch = BatchSection::default();
 /// batch.max_rows = 1_000_000;
 /// let options = SinkOptions::default()
 ///     .with_queue(QueueSection::new(8 * 1024 * 1024))
@@ -303,13 +303,13 @@ pub struct SinkOptions {
     /// terminal via [`ChainCtx::chunk`] / [`ChainCtx::sink`].
     pub chunk: Option<ChunkConfig>,
     /// Batch sealing thresholds, replacing the connector's base whole.
-    pub batch: Option<BatchConfig>,
+    pub batch: Option<BatchSection>,
     /// In-flight write limits, replacing the connector's base whole.
-    pub inflight: Option<InflightConfig>,
+    pub inflight: Option<InflightSection>,
     /// Write retry policy, replacing the connector's base whole.
-    pub retry: Option<RetryConfig>,
+    pub retry: Option<RetrySection>,
     /// Replica circuit breaker, replacing the connector's base whole.
-    pub breaker: Option<BreakerConfig>,
+    pub breaker: Option<BreakerSection>,
 }
 
 impl SinkOptions {
@@ -329,28 +329,28 @@ impl SinkOptions {
 
     /// Set this sink's batch thresholds (see [`batch`](Self::batch)).
     #[must_use]
-    pub fn with_batch(mut self, batch: BatchConfig) -> Self {
+    pub fn with_batch(mut self, batch: BatchSection) -> Self {
         self.batch = Some(batch);
         self
     }
 
     /// Set this sink's in-flight limits (see [`inflight`](Self::inflight)).
     #[must_use]
-    pub fn with_inflight(mut self, inflight: InflightConfig) -> Self {
+    pub fn with_inflight(mut self, inflight: InflightSection) -> Self {
         self.inflight = Some(inflight);
         self
     }
 
     /// Set this sink's retry policy (see [`retry`](Self::retry)).
     #[must_use]
-    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+    pub fn with_retry(mut self, retry: RetrySection) -> Self {
         self.retry = Some(retry);
         self
     }
 
     /// Set this sink's circuit breaker (see [`breaker`](Self::breaker)).
     #[must_use]
-    pub fn with_breaker(mut self, breaker: BreakerConfig) -> Self {
+    pub fn with_breaker(mut self, breaker: BreakerSection) -> Self {
         self.breaker = Some(breaker);
         self
     }
@@ -418,7 +418,7 @@ impl SinkOptions {
         // also comes before the queue's slot count divides by it.
         if chunk.target_bytes == 0 {
             return Err(ConfigError::Validation(format!(
-                "{address}: chunk.target_bytes must be greater than zero"
+                "{address}: chunk.target_bytes: must be greater than zero"
             )));
         }
         let queue = one_place(
@@ -562,7 +562,7 @@ impl Pipeline {
         }
         if config.pipeline.io_threads == 0 {
             return Err(BuildError::Config(ConfigError::Validation(
-                "pipeline.io_threads must be non-zero".into(),
+                "pipeline.io_threads: must be at least 1".into(),
             )));
         }
         // The YAML loaders run the full `PipelineConfig::validate`; a
@@ -688,7 +688,7 @@ impl Pipeline {
             return Err(BuildError::DuplicateSinkName(sink_name));
         }
         if sink_name.is_empty() {
-            return Err(BuildError::Sink("sink name must be non-empty".into()));
+            return Err(BuildError::Sink("sink name must not be empty".into()));
         }
         // "default" maps to the historical component="sink" metric label, so
         // a sink literally named "sink" would silently merge its spate_sink_*
@@ -1043,6 +1043,7 @@ mod tests {
     use crate::record::PartitionId;
     use crate::sink::{SealedBatch, SinkParts, SinkPoolConfig};
     use crate::source::LaneId;
+    use bytesize::ByteSize;
     use spate_test::wait_until;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
@@ -1257,7 +1258,7 @@ mod tests {
         let p = Pipeline::from_config(test_config(1)).expect("builder");
         assert!(matches!(
             p.add_sink("", null_sink(1)).err(),
-            Some(BuildError::Sink(msg)) if msg.contains("non-empty")
+            Some(BuildError::Sink(msg)) if msg == "sink name must not be empty"
         ));
     }
 
@@ -1523,19 +1524,31 @@ mod tests {
         let cases = [
             (
                 pool(|c| c.batch.max_rows = 0),
-                "batch.max_rows must be at least 1",
+                "batch.max_rows: must be at least 1",
             ),
             (
                 pool(|c| c.inflight.max_per_shard = 0),
-                "inflight.max_per_shard must be at least 1",
+                "inflight.max_per_shard: must be at least 1",
+            ),
+            (
+                pool(|c| c.batch.max_bytes = ByteSize::b(0)),
+                "batch.max_bytes: must be greater than zero",
             ),
             (
                 pool(|c| c.retry.initial = Duration::ZERO),
-                "retry.initial and retry.max must be non-zero",
+                "retry.initial: must be greater than zero",
+            ),
+            (
+                pool(|c| c.retry.max = Duration::ZERO),
+                "retry.max: must be greater than zero",
+            ),
+            (
+                pool(|c| c.breaker.open_for = Duration::ZERO),
+                "breaker.open_for: must be from 1ns to 1year; found 0s",
             ),
             (
                 pool(|c| c.breaker.failure_threshold = 0),
-                "breaker.failure_threshold must be at least 1",
+                "breaker.failure_threshold: must be at least 1",
             ),
         ];
         for (pool, key) in cases {
@@ -1562,7 +1575,7 @@ mod tests {
             matches!(
                 &err,
                 Some(BuildError::Config(ConfigError::Validation(m)))
-                    if m == "sinks.eu: batch.max_rows must be at least 1"
+                    if m == "sinks.eu: batch.max_rows: must be at least 1"
             ),
             "{err:?}"
         );
@@ -1593,7 +1606,7 @@ mod tests {
             matches!(
                 &err,
                 Some(BuildError::Config(ConfigError::Validation(m)))
-                    if m == "sink: batch.max_rows must be at least 1"
+                    if m == "sink: batch.max_rows: must be at least 1"
             ),
             "{err:?}"
         );
@@ -1881,6 +1894,19 @@ mod tests {
         }
     }
 
+    /// Pins that the builder refuses a zero `pipeline.io_threads` set in
+    /// code, which skips the load-time check.
+    #[test]
+    fn a_zero_io_thread_count_is_refused_at_build() {
+        let mut cfg = test_config(1);
+        cfg.pipeline.io_threads = 0;
+        let err = Pipeline::from_config(cfg).map(drop).expect_err("refused");
+        assert_eq!(
+            err.to_string(),
+            "invalid configuration: pipeline.io_threads: must be at least 1"
+        );
+    }
+
     /// A zero chunk set in code is refused before the queue divides by it.
     #[test]
     fn a_zero_chunk_with_a_queue_is_refused_not_a_panic() {
@@ -1889,7 +1915,7 @@ mod tests {
             .with_queue(QueueSection::new(1024 * 1024));
         assert_eq!(
             install_error(test_config(1), options),
-            "invalid configuration: sink: chunk.target_bytes must be greater than zero"
+            "invalid configuration: sink: chunk.target_bytes: must be greater than zero"
         );
     }
 
@@ -1904,19 +1930,19 @@ mod tests {
             ),
             (
                 "batch: {}",
-                SinkOptions::default().with_batch(BatchConfig::default()),
+                SinkOptions::default().with_batch(BatchSection::default()),
             ),
             (
                 "inflight: {}",
-                SinkOptions::default().with_inflight(InflightConfig::default()),
+                SinkOptions::default().with_inflight(InflightSection::default()),
             ),
             (
                 "retry: {}",
-                SinkOptions::default().with_retry(RetryConfig::default()),
+                SinkOptions::default().with_retry(RetrySection::default()),
             ),
             (
                 "breaker: {}",
-                SinkOptions::default().with_breaker(BreakerConfig::default()),
+                SinkOptions::default().with_breaker(BreakerSection::default()),
             ),
         ];
         for (block, options) in cases {
@@ -1953,7 +1979,7 @@ mod tests {
     #[test]
     fn a_yaml_pool_block_overlays_the_base_and_code_replaces_it() {
         let mut base = SinkPoolConfig::default();
-        base.batch.max_bytes = 1_000_001;
+        base.batch.max_bytes = ByteSize::b(1_000_001);
         base.retry.max_attempts = 5;
         base.breaker.failure_threshold = 9;
         base.inflight.max_per_shard = 6;
@@ -1965,7 +1991,10 @@ mod tests {
             base,
         )
         .expect("resolves");
-        assert_eq!((pool.batch.max_rows, pool.batch.max_bytes), (7, 1_000_001));
+        assert_eq!(
+            (pool.batch.max_rows, pool.batch.max_bytes),
+            (7, ByteSize::b(1_000_001))
+        );
         assert_eq!(
             (pool.retry.initial, pool.retry.max_attempts),
             (Duration::from_millis(1), 5)
@@ -1976,9 +2005,9 @@ mod tests {
         );
         assert_eq!(pool.inflight.max_per_shard, 6);
 
-        let code = SinkOptions::default().with_batch(BatchConfig::default());
+        let code = SinkOptions::default().with_batch(BatchSection::default());
         let pool = resolve_pool("{}", &code, base).expect("resolves");
-        assert_eq!(pool.batch, BatchConfig::default());
+        assert_eq!(pool.batch, BatchSection::default());
     }
 
     /// An overlay block is decoded with its path, and the merged pool is held

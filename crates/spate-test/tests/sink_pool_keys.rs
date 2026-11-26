@@ -7,7 +7,7 @@ use spate_core::error::ErrorPolicy;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions, SinkOptions};
 use spate_core::record::PartitionId;
-use spate_core::sink::{BatchConfig, KeyHashRouter, SinkPoolConfig};
+use spate_core::sink::{BatchSection, KeyHashRouter, SinkPoolConfig};
 use spate_core::source::LaneId;
 use spate_test::{BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, memory_source};
 use std::time::Duration;
@@ -92,7 +92,7 @@ fn a_yaml_batch_block_reaches_the_spawned_pool() {
 /// pool.
 #[test]
 fn a_batch_set_in_code_reaches_the_spawned_pool() {
-    let mut batch = BatchConfig::default();
+    let mut batch = BatchSection::default();
     batch.max_rows = 1;
     batch.linger = Duration::from_secs(3600);
     rows_are_written(config(""), SinkOptions::default().with_batch(batch));

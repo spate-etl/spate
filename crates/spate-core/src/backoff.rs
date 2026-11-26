@@ -4,7 +4,7 @@
 use crate::rng::SplitMix64;
 use std::time::Duration;
 
-/// The jitter fraction that [`RetryConfig::default`](crate::sink::RetryConfig)
+/// The jitter fraction that [`RetrySection::default`](crate::sink::RetrySection)
 /// uses and connector retry schedules pass to
 /// [`with_jitter`](Backoff::with_jitter): a delay lies in
 /// `[0.8 × step, step]`. [`Backoff::new`] sets no jitter.
@@ -238,7 +238,7 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::RetryConfig;
+    use crate::sink::RetrySection;
     use proptest::num;
     use proptest::prelude::*;
 
@@ -531,7 +531,7 @@ mod tests {
     /// Drawing seconds uniformly from `u64`, the obvious generator, is
     /// degenerate here. It puts every draw above 10^18 seconds, so no
     /// realistic policy is ever built, and under 0.1% of them pass
-    /// [`RetryConfig::validate`].
+    /// [`RetrySection::validate`].
     fn any_duration() -> impl Strategy<Value = Duration> {
         (0u32..128, num::u128::ANY).prop_map(|(magnitude, raw)| {
             let nanos = raw >> (127 - magnitude);
@@ -587,7 +587,7 @@ mod tests {
             seed in num::u64::ANY,
         ) {
             let initial = Duration::from_nanos(initial_nanos);
-            let cfg = RetryConfig {
+            let cfg = RetrySection {
                 initial,
                 max: initial + Duration::from_nanos(span_nanos),
                 multiplier,

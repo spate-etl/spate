@@ -78,8 +78,8 @@ impl DurationBounds {
 ///
 /// Its message states the bounds and the value, without the key, such as
 /// `must be from 20s to 1day; found 5s`. The caller composes
-/// `` "`feed.settling_window` {error}" ``, and adds the reason for the bound
-/// or the meaning of `0s` after it.
+/// `"feed.settling_window: {error}"`, and adds the reason for the bound or
+/// the meaning of `0s` after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("must be {}; found {}", Range(.bounds), format_duration(*.value))]
 pub struct DurationBoundsError {
@@ -125,8 +125,8 @@ impl fmt::Display for Range<'_> {
 /// assert!(check_duration(Duration::from_secs(60), WINDOW).is_ok());
 /// let err = check_duration(Duration::from_secs(5), WINDOW).unwrap_err();
 /// assert_eq!(
-///     format!("`window` {err}"),
-///     "`window` must be from 20s to 1h; found 5s"
+///     format!("window: {err}"),
+///     "window: must be from 20s to 1h; found 5s"
 /// );
 /// ```
 pub fn check_duration(value: Duration, bounds: DurationBounds) -> Result<(), DurationBoundsError> {

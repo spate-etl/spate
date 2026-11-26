@@ -397,8 +397,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         cpu::log_once();
         let threads = self.thread_count();
-        if threads == 0 || self.config.pipeline.io_threads == 0 {
-            return Err(StartError::Config("thread counts must be non-zero".into()));
+        if threads == 0 {
+            return Err(StartError::Config(
+                "pipeline.threads: must be at least 1".into(),
+            ));
+        }
+        if self.config.pipeline.io_threads == 0 {
+            return Err(StartError::Config(
+                "pipeline.io_threads: must be at least 1".into(),
+            ));
         }
         if self.options.max_records == 0 {
             return Err(StartError::Config(
@@ -454,7 +461,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 let drain_timeout = self.config.checkpoint.drain_timeout;
                 if feed.hands_back() && drain_timeout <= STOP_RESERVE {
                     return Err(StartError::Config(format!(
-                        "checkpoint.drain_timeout must be more than {STOP_RESERVE:?}, the stop \
+                        "checkpoint.drain_timeout: must be more than {STOP_RESERVE:?}, the stop \
                          reserve of the `{}` feed; found {drain_timeout:?}",
                         feed.backend()
                     )));

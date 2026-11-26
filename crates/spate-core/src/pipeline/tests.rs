@@ -3441,8 +3441,11 @@ fn a_zero_settling_window_passed_in_is_refused() {
     section.settling_window = Some(Duration::ZERO);
     cfg.feed = Some(section);
     let h = start_with_config(cfg, ok_chain);
-    let err = config_error_before_open(h);
-    assert!(err.contains("`feed.settling_window`"), "{err}");
+    assert_eq!(
+        config_error_before_open(h),
+        "invalid runtime configuration: invalid configuration: feed.settling_window: must be \
+         from 20s to 1day; found 0s"
+    );
 }
 
 /// Pins that `run` refuses a settling window above a day set on a section
@@ -3456,7 +3459,10 @@ fn a_settling_window_above_a_day_passed_in_is_refused() {
     let h = start_with_config(cfg, ok_chain);
     let err = config_error_before_open(h);
     assert!(
-        err.contains("`feed.settling_window`") && err.contains("1day"),
+        err.starts_with(
+            "invalid runtime configuration: invalid configuration: feed.settling_window: must \
+             be from 20s to 1day; found "
+        ),
         "{err}"
     );
 }
@@ -4868,6 +4874,24 @@ fn joined(h: &Harness) {
     });
 }
 
+/// Pins that `run` refuses a zero thread count set on a config built in code,
+/// which skips the load-time check, naming each key.
+#[test]
+fn a_zero_thread_count_passed_in_is_refused() {
+    let mut cfg = test_config(1);
+    cfg.pipeline.threads = Some(0);
+    assert_eq!(
+        config_error_before_open(start_with_config(cfg, ok_chain)),
+        "invalid runtime configuration: pipeline.threads: must be at least 1"
+    );
+    let mut cfg = test_config(1);
+    cfg.pipeline.io_threads = 0;
+    assert_eq!(
+        config_error_before_open(start_with_config(cfg, ok_chain)),
+        "invalid runtime configuration: pipeline.io_threads: must be at least 1"
+    );
+}
+
 /// A run that holds pipeline threads past their deadline.
 struct StuckRun {
     h: Harness,
@@ -5174,12 +5198,12 @@ fn a_feed_refuses_a_drain_timeout_within_the_read_reserve() {
             |runtime| runtime.with_feed(Arc::new(HandingBack::new(backend))),
             ok_chain,
         );
-        let err = config_error_before_open(h);
-        assert!(
-            err.contains("checkpoint.drain_timeout")
-                && err.contains("5s")
-                && err.contains(&format!("`{backend}`")),
-            "{err}"
+        assert_eq!(
+            config_error_before_open(h),
+            format!(
+                "invalid runtime configuration: checkpoint.drain_timeout: must be more than 5s, \
+                 the stop reserve of the `{backend}` feed; found 5s"
+            )
         );
     }
 

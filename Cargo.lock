@@ -4508,6 +4508,7 @@ name = "spate-test"
 version = "0.5.0"
 dependencies = [
  "bytes",
+ "bytesize",
  "crossbeam-channel",
  "metrics",
  "metrics-exporter-prometheus",

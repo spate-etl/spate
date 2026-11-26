@@ -1,13 +1,14 @@
 ---
-description: "The Kafka source pauses a partition at the consumer once its lane has stayed paused for 2 s, so a short pause keeps the prefetch and fetches nothing again."
+description: "Paused a Kafka partition at the consumer once its lane stayed paused for 2 s, so a short pause kept the prefetch. Superseded by ADR-0116."
 ---
 
 # ADR-0115 — A Kafka source pauses its client only after a lane has stayed paused for 2 s
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-11-26
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0116](0116-a-kafka-source-counts-unpolled-time-toward-its-client-pause.md)
 
 ## Context and problem statement
 

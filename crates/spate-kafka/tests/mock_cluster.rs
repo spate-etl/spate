@@ -4032,6 +4032,62 @@ fn a_message_with_no_timestamp_reports_no_event_time() {
     assert_eq!(seen, [(0, NO_EVENT_TIME_MS), (1, 5)]);
 }
 
+/// A poll of the lane between two short pauses starts the wait before a
+/// client pause again, so two pauses that together outlast it keep the
+/// prefetch.
+#[test]
+fn a_poll_between_short_pauses_keeps_the_prefetch() {
+    const RECORDS: usize = 1000;
+    // Three quarters of the 2 s wait before a client pause.
+    const SHORT: Duration = Duration::from_millis(1500);
+    let cluster = MockKafka::new();
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, RECORDS, 1, "p");
+    let clock = TestClock::frozen();
+    let mut w = Watched::open_on(
+        config(&brokers, "poll-between-pauses"),
+        Some(Arc::clone(&clock) as _),
+    );
+    let first = w.read(0, 1);
+    let pipeline = w.pipeline.clone();
+    let labels = [("pipeline", pipeline.as_str())];
+    let metric =
+        |rendered: &str, name: &str| spate_test::metric_sum(rendered, name, &labels).unwrap_or(0.0);
+    // Reads the messages received from a statistics snapshot taken after this
+    // call.
+    let received = |w: &mut Watched| {
+        let before = metric(&w.rendered(), "spate_kafka_rx_responses_total");
+        wait_until(HANG, "a newer statistics snapshot", || {
+            w.serve();
+            metric(&w.rendered(), "spate_kafka_rx_responses_total") > before
+        });
+        metric(&w.rendered(), "spate_kafka_rx_messages_total")
+    };
+    wait_until(HANG, "the rest is prefetched", || {
+        w.serve();
+        support::fetch_queue_entries(&w.rendered(), &pipeline) >= (RECORDS - first.len()) as f64
+    });
+    let prefetched = received(&mut w);
+    let lane = w.lanes[0].id();
+    w.source.pause(&[lane]).expect("pause");
+    clock.advance(SHORT);
+    w.serve();
+    w.source.resume(&[lane]).expect("resume");
+    let second = w.read(0, 1);
+    w.source.pause(&[lane]).expect("pause");
+    clock.advance(SHORT);
+    w.serve();
+    w.source.resume(&[lane]).expect("resume");
+    let rest = w.read(0, RECORDS - first.len() - second.len());
+    assert_eq!(first.len() + second.len() + rest.len(), RECORDS);
+    assert_eq!(
+        received(&mut w),
+        prefetched,
+        "the client fetched the partition again after the second pause"
+    );
+}
+
 /// A pause the runtime lifts before it has lasted the wait before a client
 /// pause leaves the partition's prefetch in place: the client receives each
 /// message once.

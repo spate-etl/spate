@@ -52,7 +52,7 @@ use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
 use spate_core::record::{NO_EVENT_TIME_MS, PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -73,6 +73,10 @@ pub(crate) struct Shared {
     /// The committed offset the assignment started at, where the group had
     /// one.
     pub(crate) committed: Option<i64>,
+    /// Polls of the partition's queue. A poll frees the fetch responses held
+    /// for the transaction markers ahead of its first record, so the source
+    /// counts a pause only across a stretch with no poll.
+    pub(crate) polls: AtomicU64,
 }
 
 impl Shared {
@@ -87,6 +91,7 @@ impl Shared {
             watermark: AtomicI64::new(i64::MIN),
             epochs: Mutex::new(epochs),
             committed,
+            polls: AtomicU64::new(0),
         }
     }
 
@@ -350,6 +355,7 @@ impl SourceLane for KafkaLane {
             return Err(e);
         }
 
+        self.shared.polls.fetch_add(1, Ordering::Relaxed);
         // First message: block up to `timeout` (idle lanes must not spin).
         match self.queue.poll(timeout) {
             None => return Ok(self.retire_offsets(timeout)),

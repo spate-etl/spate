@@ -40,7 +40,9 @@ revocation, one choreography tested constantly by every rebalance:
 2. **Chains flush.** Each driver flushes its operator chain: parked chunks
    and partial buffers are pushed to the shard queues, then the chain (and
    with it that thread's `ShardQueues` clone) is dropped as the thread
-   exits.
+   exits. A thread that has not exited 500ms after the drivers' deadline is
+   left running, and the drain goes on without it; see
+   [A pipeline thread that does not stop](#a-pipeline-thread-that-does-not-stop).
 3. **Sink batches complete**, bounded by `checkpoint.drain_timeout`. Once
    every queue sender is gone, the sink workers see their queues close,
    force-seal partial batches, and get the remaining deadline to finish
@@ -91,7 +93,8 @@ kubelet sends SIGKILL. The rule:
 Keep `drain_timeout` comfortably **below** `terminationGracePeriodSeconds`.
 Steps 1 to 3 run inside the budget; the gap has to absorb what follows it: the
 pool's one-second backstop, the final commit (step 4), the source and the feed
-closing (step 5) up to the end of its grace, and process teardown. The defaults
+closing (step 5) up to the end of its grace, and process teardown. A pipeline
+thread that does not stop adds 500ms to the backstop's second. The defaults
 (25s vs 30s) encode this; if you raise one, raise the other. With a feed that
 hands back, the stop's reading and the feed's close also run inside the
 budget, and startup refuses a `drain_timeout` of 5s or less. A feed's close
@@ -135,6 +138,8 @@ signal-initiated drain reports it even where the sink deadline expired and
 batches were abandoned (see below; the report's `sink_drain` field says so).
 A source that reaches the end of its input is held to more, needing every
 batch acknowledged and the final commit persisted, or the run exits `Failed`.
+A pipeline thread that does not stop also fails the run, with the component
+`driver-N` for the first such thread.
 `ExitState::Failed` carries the failing component and reason; Kubernetes
 restarts the pod and the data replays.
 
@@ -177,6 +182,36 @@ not being polled while the worker waits, and shutdown deadlocks rather than
 degrading. That is why dispatch parks a sealed batch waiting for a permit
 instead of awaiting one: an await there would be outside the `select!`, and the
 backstop would become the normal path instead of the never-fires path.
+
+### A pipeline thread that does not stop
+
+A pipeline thread stops when it takes its shutdown message between lane polls.
+A lane whose `poll` blocks past its `timeout` keeps the thread from taking it.
+`run` waits for each pipeline thread until 500ms past the drivers' deadline.
+A thread still running then is logged at `ERROR` with how long ago it last
+showed progress, and the run exits `Failed`. A recent heartbeat means the
+thread loops without taking its message, and an old one means it is held in a
+call.
+
+The thread runs on with its lanes, its chain and its `ShardQueues` clone. The
+sink drain then starts with no time left, so the sink abandons what it holds,
+as at the drain deadline. The thread's batches are never acknowledged, so the
+final commit does not pass them and they replay after restart.
+
+The drivers' deadline depends on how the drain started:
+
+- **Without a feed that hands back**, it is the drain deadline.
+- **With a feed that hands back**, it is one second before the drain deadline.
+  `run` gives up on the thread half a second before the drain deadline, which
+  leaves the feed's close in step 4 half a second or less. A unit the feed
+  cannot give up in time comes back after the feed's redelivery delay.
+- **After a controller panic**, there is no drain deadline. `run` tells the
+  threads to stop within `drain_timeout` and gives up 500ms after that.
+
+The thread ends when it next returns from the call that held it, or when the
+process exits. A program that calls `run` again in the same process under the
+same pipeline name fails to start until the old thread ends, because that
+thread still holds its metric series.
 
 ### Leaked queues {#leaked-queues-bounded-loud-contained}
 

@@ -1,0 +1,3 @@
+**`run` returns when a pipeline thread does not stop** (`spate-core`)
+
+`run` waits for each pipeline thread until 500 ms past the deadline the drain set for them, then logs each thread still running at `ERROR` with how long ago it last showed progress, and exits `Failed` with the component `driver-N`. The thread runs on in the background until it returns from the call that held it, or until the process exits. In previous versions `run` waited for it with no bound, so a lane whose `poll` blocked past its timeout during a shutdown kept the process from exiting. Pipeline threads also log to the `tracing` subscriber that is the default on the thread that calls `run`.

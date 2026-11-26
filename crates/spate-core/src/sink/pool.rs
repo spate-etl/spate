@@ -56,8 +56,11 @@ pub struct SinkPool<W: ShardWriter> {
 /// anyway (`pipeline::controller`). At an equal 2s the backstop could never
 /// fire *before* that, so the commit would race a pool still resolving.
 /// Ordering, tightest first: the worker's own `ABORT_GRACE` (500ms) < this <
-/// the controller's 2s. The ordering holds on real time, where the stop clock
-/// and the pool's `SystemClock` agree.
+/// the controller's 2s. A pipeline thread that has not stopped delays the
+/// drain's start by up to 500ms past the deadline, with no budget left, so
+/// the backstop fires 1.5s past the deadline, still inside the 2s. The
+/// ordering holds on real time, where the stop clock and the pool's
+/// `SystemClock` agree.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(1);
 
 impl<W: ShardWriter> SinkPool<W> {
@@ -254,7 +257,8 @@ impl<W: ShardWriter> SinkPool<W> {
     ///
     /// Contract: the caller must have dropped every
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
-    /// their drain phase once their queue closes.
+    /// their drain phase once their queue closes, or once the deadline is
+    /// published while a clone is still held.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
         let deadline_at = deadline_after(self.clock.now(), deadline);
         let _ = self.drain_tx.send(Some(deadline_at));

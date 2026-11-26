@@ -155,7 +155,9 @@ Without the attribute, serde drops the key and the default applies with no warni
 
 ### Word a refused value one way
 
-Start a refusal with the key's path, a colon, then the rule, as `SectionPath::invalid` writes it: `sinks.eu: batch.max_rows: must be at least 1`.
+Start a refusal with the key's path, a colon, then the rule, as `SectionPath::invalid` writes it: `sinks.eu.chunk.target_bytes: must be greater than zero`.
+A rule checked on a whole section after it loads, such as the sink pool rules at install, gives the section's path, a colon, then the key within it: `sinks.eu: batch.max_rows: must be at least 1`.
+A rule about several keys is a sentence that names each one in backticks, as the `backpressure` ratio rule does.
 Put any other key the rule names in backticks.
 When a component refuses a key of another section, the refusal names that section, a colon, then the key in backticks: ``feed: `location` must not be empty``.
 A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka: rdkafka."group.id" cannot be overridden: …`.

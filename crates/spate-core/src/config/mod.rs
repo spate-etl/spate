@@ -704,7 +704,7 @@ impl PipelineConfig {
         let (low, high) = (self.backpressure.low_ratio, self.backpressure.high_ratio);
         if !(low > 0.0 && low < high && high <= 1.0) {
             return fail(format!(
-                "backpressure ratios must satisfy 0 < low_ratio < high_ratio <= 1 \
+                "backpressure ratios must satisfy 0 < `low_ratio` < `high_ratio` <= 1 \
                  (got low_ratio={low}, high_ratio={high})"
             ));
         }
@@ -1618,13 +1618,13 @@ sinks:
             ),
             (
                 "pipeline: { name: x }\nbackpressure: { low_ratio: 0.9, high_ratio: 0.8 }",
-                "backpressure ratios must satisfy 0 < low_ratio < high_ratio <= 1 \
+                "backpressure ratios must satisfy 0 < `low_ratio` < `high_ratio` <= 1 \
                  (got low_ratio=0.9, high_ratio=0.8)"
                     .to_owned(),
             ),
             (
                 "pipeline: { name: x }\nbackpressure: { high_ratio: 1.5 }",
-                "backpressure ratios must satisfy 0 < low_ratio < high_ratio <= 1 \
+                "backpressure ratios must satisfy 0 < `low_ratio` < `high_ratio` <= 1 \
                  (got low_ratio=0.5, high_ratio=1.5)"
                     .to_owned(),
             ),

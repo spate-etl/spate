@@ -602,8 +602,7 @@ mod tests {
 
     #[test]
     fn the_error_messages_survived_the_move_into_the_framework() {
-        // Both sinks mirrored these strings before the rules moved here, and
-        // their config tests still assert on them under their own prefix.
+        // Pins each retry rule's whole message, led by its key.
         assert_eq!(
             RetrySectionError::Multiplier(0.5).to_string(),
             "retry.multiplier: must be a finite number in [1.0, 1e9] (got 0.5)"

@@ -158,6 +158,7 @@ A rule checked on a whole section after it loads, such as the sink pool rules at
 A rule about several keys is a sentence that names each one in backticks, as the `backpressure` ratio rule does.
 Put any other key the rule names in backticks.
 When a component refuses a key of another section, the refusal names that section, a colon, then the key in backticks: ``feed: `location` must not be empty``.
+A feed backend that refuses a key of `feed:` itself names `feed.<backend>`, so the refusal says which backend refuses it: ``feed.sqs: `attempt_cap` does not apply to `sqs`: …``.
 A passthrough key keeps the form `ReservedKeyError` writes: `source.kafka: rdkafka."group.id" cannot be overridden: …`.
 
 Word a zero or empty value by what the key holds:

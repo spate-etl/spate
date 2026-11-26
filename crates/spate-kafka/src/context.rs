@@ -36,7 +36,7 @@ use std::thread::{self, ThreadId};
 #[derive(Debug)]
 pub(crate) enum Intent {
     /// Partitions offered to this member. Not yet accepted: `poll_events`
-    /// calls `assign` (then pause → split → resume).
+    /// pauses them, calls `assign`, then pause → split → resume.
     Assign(TopicPartitionList),
     /// Partitions being taken away. Not yet released: `poll_events`
     /// surfaces `LanesRevoked`, the runtime drains and commits, and the

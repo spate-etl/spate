@@ -1,5 +1,5 @@
 ---
-description: "Pipeline::run waits for each pipeline thread until 500 ms past the drivers' deadline, then fails the run and returns while a thread that has not stopped runs on."
+description: "Pipeline::run waits for each pipeline thread until 500 ms past the drivers' deadline, then fails the run and returns while a stuck thread runs on."
 ---
 
 # ADR-0114 — `run` gives up on a pipeline thread 500 ms past the drivers' deadline

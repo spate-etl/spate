@@ -138,6 +138,7 @@ use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::telemetry::RateLimit;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -161,6 +162,20 @@ const START_RETRY_PACE: Duration = Duration::from_secs(1);
 /// before `misplaced_partition_timeout` can end the run, so a long
 /// `statistics_interval` cannot end it on two samples.
 const MIN_MISPLACED_SNAPSHOTS: u32 = 3;
+
+/// How long a lane stays paused by the runtime before its partition is paused
+/// at the client. A client pause drops the partition's prefetch, so a pause
+/// the runtime lifts sooner keeps it.
+const CLIENT_PAUSE_WAIT: Duration = Duration::from_secs(2);
+
+/// Where the runtime's pause of one partition stands at the client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnginePause {
+    /// Not paused at the client yet; due then.
+    Due(Instant),
+    /// Paused at the client.
+    Landed,
+}
 
 /// A broker call an accept or a commit flush is about to make, with the time it
 /// may take, for a test that moves the source's clock between calls.
@@ -229,9 +244,10 @@ struct Member {
     /// The partitions whose seek to their commit librdkafka refused. Each
     /// stays paused until a seek is accepted.
     validating: Validating<i32>,
-    /// The partitions whose lanes the runtime paused, which only its resume
-    /// resumes.
-    engine_paused: FastSet<i32>,
+    /// The partitions whose lanes the runtime paused, and whether each is
+    /// paused at the client yet. Only the runtime's resume resumes a landed
+    /// one.
+    engine_paused: FastMap<i32, EnginePause>,
     /// Owned partitions the latest statistics showed fetched from a broker
     /// other than their leader.
     misplaced: FastMap<i32, Misplaced>,
@@ -242,11 +258,15 @@ struct Member {
 }
 
 impl Member {
-    /// `partitions` without those waiting for a seek or paused by the runtime.
+    /// `partitions` without those waiting for a seek or paused by the runtime
+    /// at the client.
     fn resumable(&self, partitions: impl IntoIterator<Item = i32>) -> Vec<i32> {
         partitions
             .into_iter()
-            .filter(|p| !self.validating.contains(p) && !self.engine_paused.contains(p))
+            .filter(|p| {
+                !self.validating.contains(p)
+                    && self.engine_paused.get(p) != Some(&EnginePause::Landed)
+            })
             .collect()
     }
 
@@ -354,8 +374,13 @@ pub struct KafkaSource {
     /// brokers send fetches to a follower. Set at `open`.
     misplaced_limit: Duration,
     /// The clock the assignment windows, the hold, the accept's lookup and
-    /// commit bounds and the error's age read.
+    /// commit bounds, the error's age and the wait before a client pause read.
     clock: SyncClock,
+    /// The earliest instant a runtime pause is due at the client. `None` when
+    /// none is due.
+    client_pause_due: Option<Instant>,
+    /// Limits the warning for a client pause that failed.
+    client_pause_warn: RateLimit,
     /// Called before each broker call an accept makes.
     #[cfg(test)]
     on_broker_call: Option<Box<dyn FnMut(BrokerCall) + Send + Sync>>,
@@ -489,6 +514,8 @@ impl KafkaSource {
             lookup_timeout: crate::client::COMMITTED_LOOKUP_MAX,
             misplaced_limit: Duration::ZERO,
             clock: SyncClock::system(),
+            client_pause_due: None,
+            client_pause_warn: RateLimit::hot_path(),
             #[cfg(test)]
             on_broker_call: None,
             #[cfg(test)]
@@ -498,8 +525,9 @@ impl KafkaSource {
         })
     }
 
-    /// Read the assignment windows and the accept's lookup and commit bounds
-    /// from `clock` in place of the system clock.
+    /// Read the assignment windows, the accept's lookup and commit bounds and
+    /// the wait before a client pause from `clock` in place of the system
+    /// clock.
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     #[must_use]
@@ -2113,7 +2141,7 @@ impl Source for KafkaSource {
                 committed_at_assign: FastMap::default(),
                 watermarks: FastMap::default(),
                 validating: Validating::new(self.lookup_timeout),
-                engine_paused: FastSet::default(),
+                engine_paused: FastMap::default(),
                 misplaced: FastMap::default(),
                 #[cfg(test)]
                 generation: None,
@@ -2191,6 +2219,7 @@ impl Source for KafkaSource {
         for k in 0..self.members.len() {
             self.validate(k);
         }
+        self.land_client_pauses();
         self.publish_stats()?;
 
         // Rebalance intents recorded by the callbacks during the polls above
@@ -2329,15 +2358,25 @@ impl Source for KafkaSource {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// Records the pause; `poll_events` pauses the partitions at the client
+    /// once they have stayed paused for `CLIENT_PAUSE_WAIT`.
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
+        let due = self.clock.now() + CLIENT_PAUSE_WAIT;
+        let mut recorded = false;
         for member in &mut self.members {
-            let paused: Vec<i32> = lanes
-                .iter()
-                .filter_map(|l| member.assignment.get(l).copied())
-                .collect();
-            member.engine_paused.extend(paused);
+            for l in lanes {
+                if let Some(&p) = member.assignment.get(l) {
+                    member.engine_paused.entry(p).or_insert_with(|| {
+                        recorded = true;
+                        EnginePause::Due(due)
+                    });
+                }
+            }
         }
-        self.for_owning_consumers(lanes, "pause", |consumer, tpl| consumer.pause(tpl))
+        if recorded {
+            self.client_pause_due = Some(self.client_pause_due.map_or(due, |d| d.min(due)));
+        }
+        Ok(())
     }
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
@@ -2345,7 +2384,11 @@ impl Source for KafkaSource {
         for lane in lanes {
             for member in &mut self.members {
                 if let Some(&p) = member.assignment.get(lane) {
-                    member.engine_paused.remove(&p);
+                    // A pause that has not reached the client leaves nothing
+                    // to resume, and a resume would drop the prefetch.
+                    if let Some(EnginePause::Due(_)) = member.engine_paused.remove(&p) {
+                        continue;
+                    }
                     // A partition waiting for its seek resumes once it is
                     // accepted.
                     if !member.validating.contains(&p) {
@@ -2359,6 +2402,61 @@ impl Source for KafkaSource {
 }
 
 impl KafkaSource {
+    /// Pause at the client each partition whose runtime pause is due, one
+    /// call per consumer, and drop the entries of partitions a consumer no
+    /// longer holds live. A failed call leaves its partitions due for the next
+    /// pass.
+    fn land_client_pauses(&mut self) {
+        let now = self.clock.now();
+        if self.client_pause_due.is_none_or(|due| due > now) {
+            return;
+        }
+        let mut next: Option<Instant> = None;
+        for k in 0..self.members.len() {
+            let member = &mut self.members[k];
+            let live: FastSet<i32> = member.assignment.values().copied().collect();
+            member.engine_paused.retain(|p, _| live.contains(p));
+            let mut ready = Vec::new();
+            for (&p, state) in &member.engine_paused {
+                match *state {
+                    EnginePause::Due(at) if at <= now => ready.push(p),
+                    EnginePause::Due(at) => next = Some(next.map_or(at, |n| n.min(at))),
+                    EnginePause::Landed => {}
+                }
+            }
+            if ready.is_empty() {
+                continue;
+            }
+            ready.sort_unstable();
+            let tpl = self.tpl_for(ready.iter().copied());
+            let member = &mut self.members[k];
+            match member.consumer.pause(&tpl) {
+                Ok(()) => {
+                    for p in &ready {
+                        member.engine_paused.insert(*p, EnginePause::Landed);
+                    }
+                    tracing::debug!(
+                        consumer = k,
+                        partitions = ?ready,
+                        "paused partitions at the client"
+                    );
+                }
+                Err(e) => {
+                    next = Some(now);
+                    spate_core::rate_limited_warn!(
+                        self.client_pause_warn,
+                        at: now,
+                        consumer = k,
+                        partitions = ?ready,
+                        error = %e,
+                        "client pause failed; retrying on the next poll"
+                    );
+                }
+            }
+        }
+        self.client_pause_due = next;
+    }
+
     /// Apply `op` to each consumer with the partitions of `lanes` it holds
     /// live. librdkafka accepts a pause or resume for a partition the
     /// consumer does not hold and does nothing, so each partition must reach
@@ -2695,6 +2793,80 @@ mod tests {
         tpl
     }
 
+    /// Where the runtime's pause of `partition` on consumer 0 stands.
+    fn client_pause(source: &KafkaSource, partition: i32) -> Option<EnginePause> {
+        source.members[0].engine_paused.get(&partition).copied()
+    }
+
+    /// A second pause of a lane keeps the instant its first set, and the
+    /// pause reaches the client once that instant comes.
+    #[test]
+    fn a_repeated_pause_keeps_its_first_instant() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+    }
+
+    /// A pause that lands leaves one due later waiting for its own instant.
+    #[test]
+    fn a_landing_leaves_a_later_pause_due() {
+        let mut source = opened_source(&[(0, 0), (1, 1)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        source.pause(&[LaneId(1)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+        assert!(matches!(
+            client_pause(&source, 1),
+            Some(EnginePause::Due(_))
+        ));
+        clock.advance(CLIENT_PAUSE_WAIT / 2);
+        poll_quiet(&mut source);
+        assert_eq!(client_pause(&source, 1), Some(EnginePause::Landed));
+    }
+
+    /// A pause for a partition the consumer no longer holds is dropped when
+    /// it falls due.
+    #[test]
+    fn a_landing_drops_a_pause_for_a_partition_no_longer_held() {
+        let mut source = opened_source(&[(0, 0)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        source.members[0].assignment.clear();
+        clock.advance(CLIENT_PAUSE_WAIT);
+        poll_quiet(&mut source);
+        assert!(source.members[0].engine_paused.is_empty());
+    }
+
+    /// The runtime's resume ends a pause whether or not it reached the
+    /// client, and nothing lands afterwards.
+    #[test]
+    fn resume_ends_a_pause_whether_or_not_it_landed() {
+        let mut source = opened_source(&[(0, 0), (1, 1)]);
+        let clock = freeze(&mut source);
+        source.pause(&[LaneId(0)]).expect("pause");
+        clock.advance(CLIENT_PAUSE_WAIT);
+        poll_quiet(&mut source);
+        source.pause(&[LaneId(1)]).expect("pause");
+        assert_eq!(client_pause(&source, 0), Some(EnginePause::Landed));
+        assert!(matches!(
+            client_pause(&source, 1),
+            Some(EnginePause::Due(_))
+        ));
+        source.resume(&[LaneId(0), LaneId(1)]).expect("resume");
+        assert!(source.members[0].engine_paused.is_empty());
+        clock.advance(CLIENT_PAUSE_WAIT);
+        poll_quiet(&mut source);
+        assert!(source.members[0].engine_paused.is_empty());
+    }
+
     /// [`test_config`] under `latest`.
     fn latest_config() -> KafkaSourceConfig {
         let mut cfg = test_config();
@@ -3014,6 +3186,27 @@ mod tests {
         /// An assignment that arrives while another consumer has live lanes
         /// drains them, then accepts every consumer's partitions together as
         /// one new lane set with fresh lane ids.
+        /// A new assignment of a partition drops the runtime's pause of it
+        /// that had not reached the client, so the new lane is fetched.
+        #[test]
+        fn a_new_assignment_drops_a_pause_not_yet_landed() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            let clock = freeze(&mut source);
+            source.pause(&[LaneId(0)]).expect("pause");
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            assert!(matches!(
+                source.poll_events(Duration::ZERO),
+                Ok(SourceEvent::LanesRevoked { .. })
+            ));
+            assert!(matches!(
+                source.poll_events(Duration::ZERO),
+                Ok(SourceEvent::LanesAssigned(_))
+            ));
+            clock.advance(CLIENT_PAUSE_WAIT);
+            poll_quiet(&mut source);
+            assert!(source.members[0].engine_paused.is_empty());
+        }
+
         #[test]
         fn an_assignment_while_lanes_are_live_starts_a_new_epoch() {
             let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
@@ -3772,13 +3965,16 @@ mod tests {
             first.expect("a batch with a record")
         }
 
-        /// A partition whose seek to its commit is refused is not resumed by
-        /// the accept or by the runtime's resume, and the first accepted seek
-        /// in `poll_events` resumes it unless the runtime paused its lane.
-        #[test]
-        fn a_refused_seek_holds_its_lane_until_one_is_accepted() {
-            let cluster = mock_holding(5);
-            commit_positions(&cluster, 2);
+        /// A source with partition 0's seek refused until the returned flag is
+        /// cleared.
+        fn refusing_seeks(
+            cluster: &MockKafka,
+        ) -> (
+            KafkaSource,
+            Vec<KafkaLane>,
+            Arc<AtomicBool>,
+            Arc<AtomicUsize>,
+        ) {
             let refuse = Arc::new(AtomicBool::new(true));
             let calls = Arc::new(AtomicUsize::new(0));
             let (r, c) = (Arc::clone(&refuse), Arc::clone(&calls));
@@ -3790,7 +3986,20 @@ mod tests {
                     Ok(list)
                 }
             });
-            let (mut source, mut lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
+            let (source, lanes) = assigned_seeking(cluster, "earliest", &[], Some(seek));
+            (source, lanes, refuse, calls)
+        }
+
+        /// A partition whose seek to its commit is refused is not resumed by
+        /// the accept or by the runtime's resume, and the first accepted seek
+        /// in `poll_events` resumes it unless its runtime pause has reached
+        /// the client.
+        #[test]
+        fn a_refused_seek_holds_its_lane_until_one_is_accepted() {
+            let cluster = mock_holding(5);
+            commit_positions(&cluster, 2);
+            let (mut source, mut lanes, refuse, calls) = refusing_seeks(&cluster);
+            let clock = super::freeze(&mut source);
             assert!(source.members[0].validating.contains(&0));
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             let lane = lanes[0].id();
@@ -3803,16 +4012,47 @@ mod tests {
                 "a refused retry keeps it waiting"
             );
 
-            // The runtime pauses the lane; an accepted seek leaves it paused.
+            // The runtime pauses the lane long enough to reach the client; an
+            // accepted seek leaves it paused.
             source.pause(&[lane]).expect("pause");
+            clock.advance(CLIENT_PAUSE_WAIT);
+            source.poll_events(Duration::ZERO).expect("poll_events");
+            assert_eq!(
+                source.members[0].engine_paused.get(&0),
+                Some(&EnginePause::Landed)
+            );
             refuse.store(false, Ordering::SeqCst);
             source.poll_events(Duration::ZERO).expect("poll_events");
             assert!(source.members[0].validating.is_empty());
-            assert!(source.members[0].engine_paused.contains(&0));
+            assert_eq!(
+                source.members[0].engine_paused.get(&0),
+                Some(&EnginePause::Landed)
+            );
             assert!(source.members[0].resumable([0]).is_empty());
 
             source.resume(&[lane]).expect("resume");
             assert!(source.members[0].engine_paused.is_empty());
+            assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
+        }
+
+        /// An accepted seek resumes a partition whose runtime pause has not
+        /// reached the client, and the pause stays due.
+        #[test]
+        fn an_accepted_seek_resumes_a_partition_whose_pause_has_not_landed() {
+            let cluster = mock_holding(5);
+            commit_positions(&cluster, 2);
+            let (mut source, mut lanes, refuse, _calls) = refusing_seeks(&cluster);
+            super::freeze(&mut source);
+            let lane = lanes[0].id();
+            source.pause(&[lane]).expect("pause");
+            refuse.store(false, Ordering::SeqCst);
+            source.poll_events(Duration::ZERO).expect("poll_events");
+            assert!(source.members[0].validating.is_empty());
+            assert!(matches!(
+                source.members[0].engine_paused.get(&0),
+                Some(EnginePause::Due(_))
+            ));
+            assert_eq!(source.members[0].resumable([0]), vec![0]);
             assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
         }
 

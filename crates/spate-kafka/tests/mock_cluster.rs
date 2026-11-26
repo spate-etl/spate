@@ -4047,31 +4047,36 @@ fn a_short_pause_keeps_the_prefetch() {
         Some(TestClock::frozen() as _),
     );
     let first = w.read(0, 1);
-    // Everything not yet delivered sits in the partition's fetch queue.
     let pipeline = w.pipeline.clone();
+    let labels = [("pipeline", pipeline.as_str())];
+    let metric =
+        |rendered: &str, name: &str| spate_test::metric_sum(rendered, name, &labels).unwrap_or(0.0);
+    // Reads the messages received from a statistics snapshot taken after this
+    // call.
+    let received = |w: &mut Watched| {
+        let before = metric(&w.rendered(), "spate_kafka_rx_responses_total");
+        wait_until(HANG, "a newer statistics snapshot", || {
+            w.serve();
+            metric(&w.rendered(), "spate_kafka_rx_responses_total") > before
+        });
+        metric(&w.rendered(), "spate_kafka_rx_messages_total")
+    };
+    // Everything not yet delivered sits in the partition's fetch queue.
     wait_until(HANG, "the rest is prefetched", || {
         w.serve();
         support::fetch_queue_entries(&w.rendered(), &pipeline) >= (RECORDS - first.len()) as f64
     });
+    // Counted from here, so a fetch made before the pause is left out.
+    let prefetched = received(&mut w);
     let lane = w.lanes[0].id();
     w.source.pause(&[lane]).expect("pause");
     w.serve();
     w.source.resume(&[lane]).expect("resume");
     let rest = w.read(0, RECORDS - first.len());
     assert_eq!(first.len() + rest.len(), RECORDS);
-    let labels = [("pipeline", pipeline.as_str())];
-    let metric =
-        |rendered: &str, name: &str| spate_test::metric_sum(rendered, name, &labels).unwrap_or(0.0);
-    // The count is read from a statistics snapshot taken after the last
-    // message was delivered.
-    let before = metric(&w.rendered(), "spate_kafka_rx_responses_total");
-    wait_until(HANG, "a newer statistics snapshot", || {
-        w.serve();
-        metric(&w.rendered(), "spate_kafka_rx_responses_total") > before
-    });
     assert_eq!(
-        metric(&w.rendered(), "spate_kafka_rx_messages_total"),
-        RECORDS as f64,
+        received(&mut w),
+        prefetched,
         "the client fetched the partition again after the pause"
     );
 }

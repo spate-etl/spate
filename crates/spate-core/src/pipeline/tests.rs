@@ -4938,6 +4938,10 @@ fn start_stuck(
     }
 }
 
+// Redundant for the compiler. cargo-mutants skips an item under exactly
+// `cfg(test)`, and a mutant here only empties or hangs the waits of the tests
+// that call it.
+#[cfg(test)]
 impl StuckRun {
     /// Wait for a thread with no lane to flush on its `Shutdown`. On a frozen
     /// clock no other flush runs, and the drivers' deadline was read before

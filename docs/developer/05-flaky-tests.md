@@ -115,13 +115,17 @@ The test can then check that the paused lane received nothing:
 
 ```rust
 // One Fetch is in flight per broker, and its reply is handled before the
-// next is sent, so the second Fetch from here was sent after the produce
-// was answered.
-let fetched = cluster.received(RDKafkaApiKey::Fetch);
-wait_until(HANG, "a Fetch sent after the produce is answered", || {
-    serve_events(&mut source, &mut errors);
-    cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
-});
+// next is sent, so the second Fetch after a produce was sent after the
+// produce was answered.
+let mut produce_and_fetch = |source: &mut KafkaSource, prefix: &str| {
+    produce(&brokers, TOPIC, 5, 1, prefix);
+    let fetched = cluster.received(RDKafkaApiKey::Fetch);
+    wait_until(HANG, "a Fetch sent after the produce is answered", || {
+        serve_events(source, &mut errors);
+        cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
+    });
+};
+produce_and_fetch(&mut source, "c");
 assert!(lanes[paused].poll(64, Duration::ZERO).expect("poll").is_none());
 ```
 

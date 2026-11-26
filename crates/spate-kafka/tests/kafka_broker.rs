@@ -421,6 +421,7 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
     })
     .expect("install the exporter");
     let group = spate_test::unique_name("ceiling");
+    let clock = spate_core::clock::TestClock::frozen();
     let (sink, script) = spate_test::capture_sink(1, 1);
     script.enqueue_global(spate_test::WriteOutcome::ok().held());
     // A write per record, well inside the default `min_pause`, so the
@@ -448,7 +449,11 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
             handle_signals: false,
             ..spate_core::pipeline::RuntimeOptions::default()
         })
-        .into_runtime(KafkaSource::new(config(&brokers, &group)).expect("the config validates"))
+        .into_runtime(
+            KafkaSource::new(config(&brokers, &group))
+                .expect("the config validates")
+                .with_clock(Arc::clone(&clock) as _),
+        )
         .expect("runtime");
     let shutdown = runtime.shutdown_handle();
     let run = spate_test::PipelineRun::spawn(move || runtime.run());
@@ -485,8 +490,11 @@ fn real_broker_a_partition_at_the_ceiling_stops_fetching() {
     spate_test::wait_until(HANG, "the partition is paused at the source", || {
         metric(names::CHECKPOINT_CEILING_PAUSES_TOTAL) >= 1.0
     });
+    // The source pauses the client on the controller's next pass once the
+    // pause has lasted its wait.
+    clock.advance(Duration::from_secs(2));
     // The counter rises when the pause is asked for, so the first snapshot can
-    // still hold fetches made before the source applied it.
+    // still hold fetches made before the client was paused.
     received_after_a_snapshot();
     let before = received_after_a_snapshot();
     abort_and_commit(&producer, ONE_X..ONE_X * 10);

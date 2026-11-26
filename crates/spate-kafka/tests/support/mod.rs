@@ -692,12 +692,23 @@ pub(crate) struct Watched {
 impl Watched {
     /// Open `cfg` with its statistics on and begin an epoch on its first
     /// assignment.
-    pub(crate) fn open(mut cfg: KafkaSourceConfig) -> Watched {
+    pub(crate) fn open(cfg: KafkaSourceConfig) -> Watched {
+        Watched::open_on(cfg, None)
+    }
+
+    /// [`Watched::open`] with the source reading `clock` when one is given.
+    pub(crate) fn open_on(
+        mut cfg: KafkaSourceConfig,
+        clock: Option<spate_core::clock::SharedClock>,
+    ) -> Watched {
         cfg.statistics_interval = Duration::from_millis(100);
         let pipeline = spate_test::unique_name("markers");
         let (recorder, handle, meter) = recorded_meter(pipeline.clone());
         let mut cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg).expect("the config validates");
+        if let Some(clock) = clock {
+            source = source.with_clock(clock);
+        }
         let lanes = metrics::with_local_recorder(&recorder, || {
             let labels =
                 spate_core::metrics::ComponentLabels::new(pipeline.clone(), "source", "kafka");

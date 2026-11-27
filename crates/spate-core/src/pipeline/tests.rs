@@ -3391,39 +3391,20 @@ fn the_feed_section_defaults() {
 }
 
 /// Pins that `run` refuses a `location` on an in-process feed passed in
-/// through `Pipeline::feed`, which skips building the feed from the section.
+/// through `Pipeline::feed` or `Pipeline::seeded_feed`, which skip building
+/// the feed from the section, before the source is handed the feed. The
+/// source refuses any feed it is handed, so a check made after that fails on
+/// the text.
 #[test]
 fn a_memory_feed_passed_in_with_a_location_is_refused() {
-    let mut cfg = test_config(1);
-    cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
-    let h = start_with(
-        cfg,
-        test_options(),
-        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
-        ok_chain,
-    );
-    let err = config_error_before_open(h);
-    assert!(
-        err.contains("`feed.location`") && err.contains("`memory`"),
-        "{err}"
-    );
-}
-
-/// Pins that `run` asks a feed passed in code to check the section, for a
-/// feed given to `with_feed` and one given to `with_seeded_feed`, and that a
-/// refusal stops the run before the source is handed the feed. The source
-/// refuses any feed it is handed, so a run that skips the check fails on the
-/// text.
-#[test]
-fn a_passed_feed_that_refuses_the_section_stops_the_run() {
     for seeded in [false, true] {
         let mut cfg = test_config(1);
-        cfg.feed = feed_section("queue: {}\nattempt_cap: 3");
-        let feed: Arc<dyn crate::feed::Feed> = Arc::new(RefusingFeed(MemoryFeed::new()));
+        cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
         let h = start_with(
             cfg,
             test_options(),
             move |runtime| {
+                let feed = Arc::new(MemoryFeed::new());
                 if seeded {
                     runtime.with_seeded_feed(feed)
                 } else {
@@ -3434,7 +3415,10 @@ fn a_passed_feed_that_refuses_the_section_stops_the_run() {
         );
         let shared = Arc::clone(&h.shared);
         let err = config_error_before_open(h);
-        assert!(err.contains(RefusingFeed::REFUSAL), "seeded {seeded}: {err}");
+        assert!(
+            err.contains("`feed.location`") && err.contains("`memory`"),
+            "seeded {seeded}: {err}"
+        );
         assert_eq!(
             shared.lock().unwrap().feed_origin,
             None,
@@ -7541,47 +7525,6 @@ impl Drop for HookedSource {
         if let Some(hook) = self.on_drop.take() {
             hook();
         }
-    }
-}
-
-/// A [`MemoryFeed`] under the `queue` key that refuses every section.
-struct RefusingFeed(MemoryFeed);
-
-impl RefusingFeed {
-    const REFUSAL: &str = "feed.queue: `attempt_cap` does not apply to `queue`";
-}
-
-impl crate::feed::Feed for RefusingFeed {
-    fn backend(&self) -> &str {
-        "queue"
-    }
-    fn check_section(
-        &self,
-        _section: &crate::config::FeedSection,
-    ) -> Result<(), crate::config::ConfigError> {
-        Err(crate::config::ConfigError::Validation(Self::REFUSAL.into()))
-    }
-    fn set_waker(&self, waker: crate::feed::FeedWaker) {
-        self.0.set_waker(waker);
-    }
-    fn receive(&self, max: usize) -> Result<Vec<crate::feed::Delivery>, crate::feed::FeedError> {
-        self.0.receive(max)
-    }
-    fn renew(&self, receipt: crate::feed::Receipt) -> Result<(), crate::feed::FeedError> {
-        self.0.renew(receipt)
-    }
-    fn acknowledge(&self, receipt: crate::feed::Receipt) -> Result<(), crate::feed::FeedError> {
-        self.0.acknowledge(receipt)
-    }
-    fn fail(
-        &self,
-        receipt: crate::feed::Receipt,
-        reason: &str,
-    ) -> Result<(), crate::feed::FeedError> {
-        self.0.fail(receipt, reason)
-    }
-    fn publish(&self, unit: crate::feed::Unit) -> crate::feed::Confirmation {
-        self.0.publish(unit)
     }
 }
 

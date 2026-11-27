@@ -602,7 +602,9 @@ fn assert_malformed<T: Debug + Send + 'static>(
     let mut out = EmitCollector::new();
     let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
     assert!(
-        matches!(result, Err(spate_core::error::DeserError::Malformed { .. })),
+        result
+            .as_ref()
+            .is_err_and(|e| e.kind() == spate_core::error::DeserErrorKind::Malformed),
         "result={result:?}, emitted={:?}",
         out.records
     );
@@ -910,7 +912,7 @@ fn char_and_wide_integer_targets_diverge_by_design() {
             .deserialize(&raw_payload(datum), &ack, &mut single_pass)
             .unwrap_err();
         assert!(
-            matches!(err, spate_core::error::DeserError::Malformed { .. }),
+            err.kind() == spate_core::error::DeserErrorKind::Malformed,
             "{err}"
         );
         assert!(single_pass.records.is_empty());

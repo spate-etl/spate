@@ -75,7 +75,7 @@ metric_names! {
         /// Payloads dropped by the Skip error policy, by [`L_REASON`].
         DESER_RECORDS_DROPPED_TOTAL = "spate_deser_records_dropped_total",
         /// Payload replays awaiting an upstream dependency (e.g. a schema fetch),
-        /// one per `DeserError::NotReady` answer. Not an error and not
+        /// one per `DeserErrorKind::NotReady` answer. Not an error and not
         /// backpressure.
         DESER_NOT_READY_REPLAYS_TOTAL = "spate_deser_not_ready_replays_total",
 

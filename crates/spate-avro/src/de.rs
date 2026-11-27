@@ -140,7 +140,7 @@ fn check_depth(depth: u16, limit: u16) -> Result<(), DatumError> {
 }
 
 /// Decode error: a pre-rendered message, converted to
-/// `DeserError::Malformed` at the deserializer boundary.
+/// `DeserErrorKind::Malformed` at the deserializer boundary.
 #[derive(Debug)]
 pub(crate) struct DatumError(pub(crate) String);
 

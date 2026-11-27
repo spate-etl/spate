@@ -19,17 +19,15 @@ pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
     if let Some(&magic) = payload.first()
         && magic != 0x00
     {
-        return Err(DeserError::Malformed {
-            reason: format!("not Confluent wire format: magic byte {magic:#04x}, expected 0x00"),
-        });
+        return Err(DeserError::malformed(format!(
+            "not Confluent wire format: magic byte {magic:#04x}, expected 0x00"
+        )));
     }
     if payload.len() < 5 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "truncated Confluent header: {} bytes, need at least 5",
-                payload.len()
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "truncated Confluent header: {} bytes, need at least 5",
+            payload.len()
+        )));
     }
     let schema_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
     Ok((schema_id, &payload[5..]))
@@ -41,20 +39,16 @@ pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
 /// Returns the fingerprint and the datum slice.
 pub fn parse_single_object(payload: &[u8]) -> Result<(u64, &[u8]), DeserError> {
     if payload.len() < 10 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "truncated single-object header: {} bytes, need at least 10",
-                payload.len()
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "truncated single-object header: {} bytes, need at least 10",
+            payload.len()
+        )));
     }
     if payload[0] != 0xC3 || payload[1] != 0x01 {
-        return Err(DeserError::Malformed {
-            reason: format!(
-                "not Avro single-object encoding: magic {:#04x} {:#04x}, expected 0xc3 0x01",
-                payload[0], payload[1]
-            ),
-        });
+        return Err(DeserError::malformed(format!(
+            "not Avro single-object encoding: magic {:#04x} {:#04x}, expected 0xc3 0x01",
+            payload[0], payload[1]
+        )));
     }
     let fingerprint = u64::from_le_bytes(payload[2..10].try_into().expect("length checked"));
     Ok((fingerprint, &payload[10..]))
@@ -75,6 +69,15 @@ pub fn single_object_frame(fingerprint: u64, body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_object_with_only_its_header_has_an_empty_datum() {
+        let mut payload = vec![0xC3, 0x01];
+        payload.extend_from_slice(&7u64.to_le_bytes());
+        let (fingerprint, datum) = parse_single_object(&payload).unwrap();
+        assert_eq!(fingerprint, 7);
+        assert!(datum.is_empty());
+    }
 
     #[test]
     fn confluent_parses_id_and_datum() {

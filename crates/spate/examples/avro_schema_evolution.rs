@@ -48,7 +48,7 @@
 //! Nothing here can miss: `mode: raw` pins both schemas inline, so no registry
 //! is involved. In `confluent` mode a payload can arrive carrying a schema id
 //! that is not cached yet. That is neither an error nor a drop: the
-//! deserializer returns `DeserError::NotReady`, the chain converts it into a
+//! deserializer returns `DeserErrorKind::NotReady`, the chain converts it into a
 //! retriable `Blocked`, the fetch runs on the I/O runtime, and the driver
 //! re-pushes the same batch from the payload that blocked until the schema
 //! lands. A not-ready wait is an upstream dependency rather than sink

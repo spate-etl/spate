@@ -480,7 +480,7 @@ impl Direct {
         wait_until(HANG, what, || {
             got = match self.feed.receive(1) {
                 Ok(mut got) => got.pop(),
-                Err(e) if e.kind == FeedErrorKind::Retryable => None,
+                Err(e) if e.kind() == FeedErrorKind::Retryable => None,
                 Err(e) => panic!("{e}"),
             };
             if got.is_none() {
@@ -773,7 +773,7 @@ pub(crate) fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedErro
     let mut outcome = None;
     wait_until(HANG, "a depth or a fatal error", || {
         outcome = match reading.try_outcome() {
-            Some(Err(e)) if e.kind == FeedErrorKind::Retryable => {
+            Some(Err(e)) if e.kind() == FeedErrorKind::Retryable => {
                 reading = feed.read_depth(of).expect("the Kafka feed counts");
                 None
             }

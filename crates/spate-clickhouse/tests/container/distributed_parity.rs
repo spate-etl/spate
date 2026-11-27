@@ -150,9 +150,8 @@ impl Deserializer<Owned<SkuBatch>> for BatchDeser {
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, SkuBatch>,
     ) -> Result<(), DeserError> {
-        let text = std::str::from_utf8(raw.bytes).map_err(|e| DeserError::Malformed {
-            reason: e.to_string(),
-        })?;
+        let text =
+            std::str::from_utf8(raw.bytes).map_err(|e| DeserError::malformed(e.to_string()))?;
         let _ = out.emit(Record {
             payload: parse_batch(text),
             meta: raw.meta(),

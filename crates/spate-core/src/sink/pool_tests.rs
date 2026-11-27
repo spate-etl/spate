@@ -160,7 +160,7 @@ impl ShardWriter for MockWriter {
             }
             Outcome::Fail(class, delay) => {
                 self.pause(delay).await;
-                Err(SinkError::new(class, "scripted failure"))
+                Err(SinkError::from_class(class, "scripted failure"))
             }
             Outcome::Hang => {
                 // Held "concurrent" on purpose; aborted at drain deadline.

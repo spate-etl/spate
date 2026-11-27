@@ -655,7 +655,7 @@ impl KafkaSource {
     /// classified through the same table as every other consumer error.
     fn rebalance_error(&self, k: usize, code: rdkafka::error::RDKafkaErrorCode) -> SourceError {
         let started = self.members.get(k).is_some_and(|m| m.saw_first_assignment);
-        SourceError::new(
+        SourceError::from_class(
             crate::error::classify_consumer_error(code, started),
             format!("rebalance error: {code}"),
         )
@@ -3210,7 +3210,7 @@ mod tests {
         /// A poll reports its first fatal error, else its first error.
         #[test]
         fn a_poll_reports_its_first_fatal_error_else_its_first() {
-            let err = SourceError::new;
+            let err = SourceError::from_class;
             let reported = |errors: Vec<SourceError>| {
                 let mut kept = None;
                 for e in errors {

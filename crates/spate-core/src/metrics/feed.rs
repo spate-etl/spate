@@ -190,7 +190,7 @@ impl FeedMetrics {
         self.publish_duration.record(elapsed);
         match outcome {
             Ok(()) => self.published.increment(1),
-            Err(e) => self.error(FeedOp::Publish, e.kind),
+            Err(e) => self.error(FeedOp::Publish, e.kind()),
         }
     }
 }

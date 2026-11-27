@@ -17,7 +17,7 @@ use super::{BlockReason, Collector, CollectorFor, PushOutcome, RunnableChain};
 use crate::checkpoint::AckRef;
 use crate::config::ConfigError;
 use crate::deser::{Deserializer, EmitRecord, RecFamily};
-use crate::error::{DeserError, ErrorPolicy, FatalError};
+use crate::error::{DeserErrorKind, ErrorPolicy, FatalError};
 use crate::framing::FramingContract;
 use crate::metrics::{DeserMetrics, OperatorMetrics};
 use crate::record::{Flow, RawPayload, Record, RecordMeta};
@@ -500,10 +500,11 @@ where
 static DESER_SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// An owned copy of a payload whose deserialization returned
-/// [`DeserError::NotReady`], replayed on the next push. Owned because the
-/// chain is `'static`-erased and cannot hold `'buf` data across calls; the
-/// copy happens only on the rare not-ready path, which already implies an
-/// asynchronous round-trip (e.g. a schema-registry fetch).
+/// [`DeserErrorKind::NotReady`](crate::error::DeserErrorKind::NotReady),
+/// replayed on the next push. Owned because the chain is `'static`-erased and
+/// cannot hold `'buf` data across calls; the copy happens only on the rare
+/// not-ready path, which already implies an asynchronous round-trip (e.g. a
+/// schema-registry fetch).
 #[derive(Debug)]
 struct PendingPayload {
     bytes: Vec<u8>,
@@ -543,7 +544,8 @@ enum Step {
     /// backed up, so stop accepting further payloads.
     Backpressure,
     /// Payload untouched: deserialization reported
-    /// [`DeserError::NotReady`]; replay it later.
+    /// [`DeserErrorKind::NotReady`](crate::error::DeserErrorKind::NotReady);
+    /// replay it later.
     NotReady,
     /// A stage failed fatally.
     Fatal(FatalError),
@@ -615,18 +617,18 @@ where
         );
         *ok += emitted;
         match result {
-            Err(DeserError::NotReady { .. }) => {
+            Err(e) if e.kind() == DeserErrorKind::NotReady => {
                 debug_assert_eq!(
                     emitted, 0,
                     "NotReady after emitting records would duplicate them on replay"
                 );
                 return Step::NotReady;
             }
-            Err(DeserError::Fatal { reason }) => {
+            Err(e) if e.kind() == DeserErrorKind::Fatal => {
                 *fatal += 1;
-                return Step::Fatal(self.ops.take_fatal().unwrap_or(FatalError {
+                return Step::Fatal(self.ops.take_fatal().unwrap_or_else(|| FatalError {
                     component: "deserializer".to_string(),
-                    reason,
+                    reason: e.reason().to_owned(),
                 }));
             }
             Err(e) => {

@@ -831,7 +831,8 @@ mod tests {
             .latched()
             .cloned()
             .unwrap()
-            .reason;
+            .reason()
+            .to_owned();
         assert!(reason.contains("the attempt follower's poll"), "{reason}");
     }
 
@@ -1055,7 +1056,8 @@ mod tests {
                 .latched()
                 .cloned()
                 .unwrap()
-                .reason;
+                .reason()
+                .to_owned();
             assert!(reason.contains("the attempt follower's poll"), "{reason}");
         }
 
@@ -1077,7 +1079,8 @@ mod tests {
                 .latched()
                 .cloned()
                 .unwrap()
-                .reason;
+                .reason()
+                .to_owned();
             assert!(
                 reason.contains("offset 1 of `units-attempts` partition 1"),
                 "{reason}"

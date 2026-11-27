@@ -21,7 +21,7 @@ use super::{FeedError, FeedErrorKind, FeedWaker};
 /// signal.set_waker(waker, false);
 /// let (error, first) = signal.latch("the queue was deleted");
 /// assert!(first);
-/// assert_eq!(error.kind, FeedErrorKind::Fatal);
+/// assert_eq!(error.kind(), FeedErrorKind::Fatal);
 /// assert!(park.park(Duration::ZERO));
 /// assert_eq!(signal.check(), Err(error));
 /// ```

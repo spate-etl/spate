@@ -75,6 +75,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -243,27 +244,37 @@ pub enum FeedErrorKind {
     Fatal,
 }
 
-/// Error from a feed backend.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("feed error ({kind:?}): {reason}")]
-#[non_exhaustive]
-pub struct FeedError {
-    /// How the caller must react; see [`FeedErrorKind`].
-    pub kind: FeedErrorKind,
-    /// Human-readable cause.
-    pub reason: String,
-}
-
-impl FeedError {
-    /// Build an error. Backends outside this crate construct it here, as the
-    /// struct is `#[non_exhaustive]`.
-    pub fn new(kind: FeedErrorKind, reason: impl Into<String>) -> FeedError {
-        FeedError {
-            kind,
-            reason: reason.into(),
+impl FeedErrorKind {
+    /// [`Gone`](FeedErrorKind::Gone) and [`Refused`](FeedErrorKind::Refused)
+    /// map to [`Fatal`](ErrorClass::Fatal). A caller answered `Gone` lets go of
+    /// the delivery before classifying, and a caller answered `Refused` can
+    /// stop on this class.
+    pub(crate) fn class(self) -> ErrorClass {
+        match self {
+            FeedErrorKind::Retryable => ErrorClass::Retryable,
+            FeedErrorKind::Gone | FeedErrorKind::Refused | FeedErrorKind::Fatal => {
+                ErrorClass::Fatal
+            }
         }
     }
+}
 
+/// Error from a feed backend.
+///
+/// Two errors are equal when their kind and reason match and they carry the
+/// same source: both none, or the same attached error. Clones of one error
+/// are equal; errors given equal but separate sources are not.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct FeedError {
+    kind: FeedErrorKind,
+    reason: String,
+    source: Option<crate::error::Source>,
+}
+
+crate::error::role_error_methods!(FeedError, FeedErrorKind);
+
+impl FeedError {
     /// A [`Gone`](FeedErrorKind::Gone) error for `receipt`, which the feed
     /// named by `held_by` (such as `"in-process feed"`) no longer holds.
     #[must_use]
@@ -273,23 +284,27 @@ impl FeedError {
             format!("{receipt} is not held by the {held_by}"),
         )
     }
+}
 
-    /// Map to the framework error taxonomy.
-    ///
-    /// [`Gone`](FeedErrorKind::Gone) and [`Refused`](FeedErrorKind::Refused)
-    /// map to [`Fatal`](ErrorClass::Fatal). A caller answered `Gone` lets go of
-    /// the delivery before classifying, and a caller answered `Refused` can
-    /// stop on this class.
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self.kind {
-            FeedErrorKind::Retryable => ErrorClass::Retryable,
-            FeedErrorKind::Gone | FeedErrorKind::Refused | FeedErrorKind::Fatal => {
-                ErrorClass::Fatal
-            }
-        }
+impl std::fmt::Display for FeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "feed error ({:?}): {}", self.kind, self.reason)
     }
 }
+
+impl PartialEq for FeedError {
+    fn eq(&self, other: &FeedError) -> bool {
+        self.kind == other.kind
+            && self.reason == other.reason
+            && match (&self.source, &other.source) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for FeedError {}
 
 /// A queue of work units, read and filled without waiting.
 ///
@@ -771,6 +786,38 @@ fn unsettled() -> FeedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("client error")]
+    struct ClientError;
+
+    /// Equal kind, reason and source make equal errors, where the source
+    /// counts as equal when both are none or both are one shared error.
+    #[test]
+    fn feed_errors_are_equal_on_kind_reason_and_the_same_source() {
+        let plain = || FeedError::new(FeedErrorKind::Retryable, "a");
+        assert_eq!(plain(), plain());
+        assert_ne!(plain(), FeedError::new(FeedErrorKind::Fatal, "a"));
+        assert_ne!(plain(), FeedError::new(FeedErrorKind::Retryable, "b"));
+
+        let sourced = plain().with_source(ClientError);
+        assert_ne!(plain(), sourced);
+        assert_ne!(sourced, plain());
+        assert_eq!(sourced, sourced.clone());
+        assert_ne!(sourced, plain().with_source(ClientError));
+    }
+
+    /// An attached source is what `source()` returns, and `find_source`
+    /// reaches it.
+    #[test]
+    fn with_source_is_the_source_of_a_feed_error() {
+        let err = FeedError::new(FeedErrorKind::Fatal, "a").with_source(ClientError);
+        let source = std::error::Error::source(&err).expect("the attached source");
+        assert_eq!(source.to_string(), "client error");
+        assert!(crate::error::find_source::<ClientError>(&err).is_some());
+        let plain = FeedError::new(FeedErrorKind::Fatal, "a");
+        assert!(std::error::Error::source(&plain).is_none());
+    }
 
     /// A feed with nothing in it, which only has to compile behind `dyn`.
     struct EmptyFeed;

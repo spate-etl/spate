@@ -170,7 +170,7 @@ fn a_publish_is_confirmed_through_the_feed_trait() {
     script.refuse_next_publish(FeedErrorKind::Refused);
     let mut refused = feed.publish(unit_over(&data, "refused.ndjson"));
     let outcome = refused.try_outcome().expect("a refusal settles at once");
-    assert_eq!(outcome.unwrap_err().kind, FeedErrorKind::Refused);
+    assert_eq!(outcome.unwrap_err().kind(), FeedErrorKind::Refused);
 
     script.hold_publishes();
     let mut held = feed.publish(unit_over(&data, "held.ndjson"));

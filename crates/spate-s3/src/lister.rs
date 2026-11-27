@@ -297,7 +297,8 @@ impl Lister {
             match confirmation.await {
                 Ok(()) => return Ok(()),
                 Err(e)
-                    if e.kind == FeedErrorKind::Retryable && attempt < LISTER_PUBLISH_ATTEMPTS =>
+                    if e.kind() == FeedErrorKind::Retryable
+                        && attempt < LISTER_PUBLISH_ATTEMPTS =>
                 {
                     // Per retry, so DEBUG; a unit that exhausts its attempts
                     // fails the run with the feed's error.
@@ -323,7 +324,7 @@ impl Lister {
                             unit.id
                         )
                     };
-                    return Err(SourceError::new(e.class(), reason));
+                    return Err(SourceError::from_class(e.class(), reason));
                 }
             }
         }

@@ -124,19 +124,13 @@ where
         let names = writer
             .datum
             .as_ref()
-            .map_err(|reason| DeserError::SchemaUnavailable {
-                reason: reason.clone(),
-            })?;
+            .map_err(|reason| DeserError::schema_unavailable(reason.clone()))?;
         let schema = writer
             .schema
             .as_ref()
-            .map_err(|reason| DeserError::SchemaUnavailable {
-                reason: reason.clone(),
-            })?;
-        let payload: F::Rec<'buf> =
-            de::decode_datum(schema, names, datum).map_err(|e| DeserError::Malformed {
-                reason: format!("avro datum decode failed: {e}"),
-            })?;
+            .map_err(|reason| DeserError::schema_unavailable(reason.clone()))?;
+        let payload: F::Rec<'buf> = de::decode_datum(schema, names, datum)
+            .map_err(|e| DeserError::malformed(format!("avro datum decode failed: {e}")))?;
         let _ = out.emit(Record {
             payload,
             meta: raw.meta(),
@@ -154,6 +148,7 @@ mod tests {
     use apache_avro::Schema;
     use apache_avro::to_avro_datum;
     use spate_core::deser::Owned;
+    use spate_core::error::DeserErrorKind;
     use spate_test::EmitCollector;
     use std::sync::Arc;
 
@@ -226,7 +221,7 @@ mod tests {
         let err = AvroDatumDeserializer::<Owned<Event>>::new(raw_core())
             .deserialize(&raw_payload(&[0xFF, 0xFF, 0xFF]), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
     }
 
     #[test]
@@ -241,7 +236,7 @@ mod tests {
         let err = AvroDatumDeserializer::<Owned<Wrong>>::new(raw_core())
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap_err();
-        assert!(matches!(err, DeserError::Malformed { .. }), "{err}");
+        assert_eq!(err.kind(), DeserErrorKind::Malformed, "{err}");
     }
 
     #[test]
@@ -259,7 +254,7 @@ mod tests {
             .deserialize(&raw_payload(&datum(4, "poison")), &test_ack(), &mut out)
             .unwrap_err();
         assert!(
-            matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("nope")),
+            err.kind() == DeserErrorKind::SchemaUnavailable && err.reason().contains("nope"),
             "{err}"
         );
         assert!(out.records.is_empty());

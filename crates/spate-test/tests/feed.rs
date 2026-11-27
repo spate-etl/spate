@@ -42,7 +42,7 @@ fn a_reader_holds_a_redelivered_unit_by_its_new_receipt() -> Result<(), FeedErro
     // lets go of it. Any other error keeps the delivery for the next pass.
     held.retain(|receipt, _| match feed.renew(*receipt) {
         Ok(()) => true,
-        Err(e) => e.kind != FeedErrorKind::Gone,
+        Err(e) => e.kind() != FeedErrorKind::Gone,
     });
     assert_eq!(held.keys().copied().collect::<Vec<_>>(), vec![second]);
 
@@ -63,7 +63,7 @@ fn a_refused_publish_is_reported_and_never_delivered() {
     script.refuse_next_publish(FeedErrorKind::Refused);
     let mut confirmation = feed.publish(Unit::new("too-big", vec![0; 16]));
     let refused = confirmation.try_outcome().unwrap().unwrap_err();
-    assert_eq!(refused.kind, FeedErrorKind::Refused);
+    assert_eq!(refused.kind(), FeedErrorKind::Refused);
     assert!(feed.receive(8).unwrap().is_empty());
     assert_eq!(script.published().len(), 1);
 }
@@ -189,7 +189,10 @@ fn a_scripted_feed_records_hand_backs_and_closes() {
     feed.stop_receiving();
     feed.hand_back(first).unwrap();
     feed.hand_back(second).unwrap();
-    assert_eq!(feed.hand_back(first).unwrap_err().kind, FeedErrorKind::Gone);
+    assert_eq!(
+        feed.hand_back(first).unwrap_err().kind(),
+        FeedErrorKind::Gone
+    );
     let mut closed = feed.close(Duration::from_secs(2)).expect("the feed closes");
     assert!(matches!(closed.try_outcome(), Some(Ok(()))));
 

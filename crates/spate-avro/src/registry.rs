@@ -1,9 +1,9 @@
 //! The registry fetcher: the only place that talks HTTP.
 //!
-//! Pipeline threads never touch the network. On a cache miss the
-//! deserializer asks for the schema id here (a non-blocking send on a
-//! bounded queue) and returns [`DeserError::NotReady`](spate_core::error::DeserError); this
-//! task fetches, parses, and publishes the schema into the shared cache,
+//! Pipeline threads never touch the network. On a cache miss the deserializer
+//! asks for the schema id here (a non-blocking send on a bounded queue) and
+//! returns a [`NotReady`](spate_core::error::DeserErrorKind::NotReady) error;
+//! this task fetches, parses, and publishes the schema into the shared cache,
 //! and the driver's blocked-batch retry picks it up.
 //!
 //! # Transient, permanent and rejected

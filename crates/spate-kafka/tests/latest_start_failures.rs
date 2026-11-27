@@ -888,7 +888,7 @@ mod silent_coordinator {
         let settled = settled.expect("the close did not settle");
         let err = settled.expect_err("an unanswered commit is a failed one");
         assert_eq!(
-            err.kind,
+            err.kind(),
             spate_core::feed::FeedErrorKind::Retryable,
             "{err}"
         );

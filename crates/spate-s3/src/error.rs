@@ -118,7 +118,7 @@ fn delete_rejected(e: &object_store::Error) -> bool {
 /// An error for a failed store request made while `doing`, classed by
 /// [`classify`], with the store's text bound by [`bounded_reason`].
 pub(crate) fn store_error(doing: impl fmt::Display, e: &object_store::Error) -> SourceError {
-    SourceError::new(classify(e), format!("{doing}: {}", bounded_reason(e)))
+    SourceError::from_class(classify(e), format!("{doing}: {}", bounded_reason(e)))
 }
 
 /// The most of a store's response body an S3 source error carries. A store

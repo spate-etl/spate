@@ -127,6 +127,7 @@ Pass a value the role cannot run without to `new`, never to a `with_*` setter.
 
 Report a role's run-time failure through that role's error type, and give every role's type the same methods: `kind()`, `class()`, `reason()`, its constructors, and `source()` holding the client's error.
 Mark every public error type `#[non_exhaustive]`.
+A role's methods that run once it is built, such as `Source::open`, return its run-time error, and a check that does no I/O, such as `Deserializer::check_source_framing`, returns `ConfigError`.
 
 A constructor that does no I/O returns `ConfigError`.
 One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
@@ -134,8 +135,8 @@ One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
 **Why:** a caller then asks "retry or stop?" the same way of every role, and the client's error survives for logging.
 A meaning that belongs to one role, such as `NotReady` on a deserializer, stays on that role.
 
-**Departs:** core's role error types have other shapes, and the ClickHouse sink returns its own `SchemaError` and `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)).
-Until core's types change, a connector uses them as they are.
+**Departs:** the ClickHouse sink's `connect` returns its own `SchemaError` and its `validate_distributed` its own `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)), and no connector attaches its client's error as `source()` yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
+Until one does, a connector keeps the client error's text in the reason.
 
 **Checked by:** review.
 

@@ -148,7 +148,7 @@ pub enum BlockReason {
     /// permit.
     Capacity,
     /// A deserializer reported
-    /// [`DeserError::NotReady`](crate::error::DeserError::NotReady): the
+    /// [`DeserErrorKind::NotReady`](crate::error::DeserErrorKind::NotReady): the
     /// payload replays once its dependency arrives. Counted on
     /// `spate_deser_not_ready_replays_total`.
     NotReady,

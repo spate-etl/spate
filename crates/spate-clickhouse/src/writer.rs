@@ -401,7 +401,7 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
         // tokens and visible through breaker metrics if persistent.
         _ => ErrorClass::Retryable,
     };
-    SinkError::new(class, crate::http::error_reason(&err))
+    SinkError::from_class(class, crate::http::error_reason(&err))
 }
 
 /// Extract the exception code from a ClickHouse error reason. Servers send

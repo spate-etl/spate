@@ -159,7 +159,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
     settle_tasks().await;
     assert_eq!(queue.visibility().len(), 3, "no extension past the hold");
     assert_eq!(
-        feed.renew(second.receipt).unwrap_err().kind,
+        feed.renew(second.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 }
@@ -234,7 +234,7 @@ async fn a_failed_publish_entry_settles_only_its_own_confirmation() {
                 } else {
                     FeedErrorKind::Retryable
                 };
-                assert_eq!(outcome.unwrap_err().kind, expected, "entry {i}");
+                assert_eq!(outcome.unwrap_err().kind(), expected, "entry {i}");
             } else {
                 assert!(
                     outcome.is_ok(),
@@ -283,7 +283,7 @@ async fn a_renewal_entry_the_queue_refuses_makes_only_its_receipt_gone() {
         for (i, r) in receipts.iter().enumerate() {
             if i == index {
                 assert_eq!(
-                    feed.renew(*r).unwrap_err().kind,
+                    feed.renew(*r).unwrap_err().kind(),
                     FeedErrorKind::Gone,
                     "{code}"
                 );
@@ -316,7 +316,10 @@ async fn a_failed_delete_entry_is_dropped() {
             feed.acknowledge(d.receipt).unwrap();
         }
         for d in &deliveries {
-            assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
+            assert_eq!(
+                feed.renew(d.receipt).unwrap_err().kind(),
+                FeedErrorKind::Gone
+            );
         }
         until("the deletes are sent", || !queue.deletes().is_empty()).await;
         let failed = queue.deletes()[0][index].handle.clone();
@@ -370,11 +373,11 @@ async fn publishes_are_cut_at_ten_entries_or_one_mib() {
     let mut over = feed.publish(Unit::new("over", "o".repeat(MAX_MESSAGE_BYTES)));
     let mut binary = feed.publish(Unit::new("binary", vec![0xff, 0xfe]));
     assert_eq!(
-        over.try_outcome().unwrap().unwrap_err().kind,
+        over.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Refused
     );
     assert_eq!(
-        binary.try_outcome().unwrap().unwrap_err().kind,
+        binary.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Refused
     );
     settle_tasks().await;
@@ -457,7 +460,7 @@ async fn a_failed_unit_is_set_visible_with_a_zero_visibility() {
     let sent: Vec<i32> = queue.visibility()[0].iter().map(|e| e.seconds).collect();
     assert_eq!(sent, [0]);
     assert_eq!(
-        feed.renew(delivery.receipt).unwrap_err().kind,
+        feed.renew(delivery.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 }
@@ -472,7 +475,10 @@ async fn a_fatal_receive_is_sticky_and_a_retryable_one_is_returned_once() {
     queue.fail_next_receive(CallError::retryable("throttled"));
     assert!(feed.receive(1).unwrap().is_empty());
     until("the failure wakes the reader", || park.park(Duration::ZERO)).await;
-    assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Retryable);
+    assert_eq!(
+        feed.receive(1).unwrap_err().kind(),
+        FeedErrorKind::Retryable
+    );
     assert!(feed.receive(1).unwrap().is_empty());
 
     let (feed, queue) = start(MINUTE);
@@ -482,15 +488,15 @@ async fn a_fatal_receive_is_sticky_and_a_retryable_one_is_returned_once() {
     assert!(feed.receive(1).unwrap().is_empty());
     until("the failure wakes the reader", || park.park(Duration::ZERO)).await;
     for _ in 0..2 {
-        assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+        assert_eq!(feed.receive(1).unwrap_err().kind(), FeedErrorKind::Fatal);
     }
     assert_eq!(
-        feed.renew(Receipt(0)).unwrap_err().kind,
+        feed.renew(Receipt(0)).unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
     let mut published = feed.publish(Unit::new("u", "x"));
     assert_eq!(
-        published.try_outcome().unwrap().unwrap_err().kind,
+        published.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
 }
@@ -767,7 +773,7 @@ async fn a_fatal_delete_rejects_every_held_publish() {
     })
     .await;
     for (i, c) in publishes.iter_mut().enumerate() {
-        let kind = c.try_outcome().unwrap().unwrap_err().kind;
+        let kind = c.try_outcome().unwrap().unwrap_err().kind();
         let expected = if i < 10 {
             FeedErrorKind::Retryable
         } else {
@@ -855,10 +861,10 @@ async fn a_batch_shape_failure_refuses_its_publishes_and_stops_the_feed() {
     let mut published = feed.publish(Unit::new("u", "body"));
     until("the publish settles", || published.try_outcome().is_some()).await;
     assert_eq!(
-        published.try_outcome().unwrap().unwrap_err().kind,
+        published.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Refused
     );
-    assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+    assert_eq!(feed.receive(1).unwrap_err().kind(), FeedErrorKind::Fatal);
 }
 
 /// Pins the receipt rules past a deadline: a fail after the visibility lapsed
@@ -874,7 +880,7 @@ async fn past_the_deadline_a_fail_is_gone_and_an_acknowledge_still_deletes() {
     let got = receive_n(&feed, &park, 2).await;
     tokio::time::advance(MINUTE + Duration::from_secs(1)).await;
     assert_eq!(
-        feed.fail(got[0].receipt, "late").unwrap_err().kind,
+        feed.fail(got[0].receipt, "late").unwrap_err().kind(),
         FeedErrorKind::Gone
     );
     feed.acknowledge(got[1].receipt).unwrap();
@@ -1027,7 +1033,7 @@ async fn a_unit_handed_out_before_a_tick_is_kept_by_its_first_renew() {
     let renewed_at = Instant::now();
     feed.renew(d.receipt).unwrap();
     step(Duration::from_secs(21)).await;
-    let renew = feed.renew(d.receipt).map_err(|e| e.kind);
+    let renew = feed.renew(d.receipt).map_err(|e| e.kind());
     assert_eq!(
         renew,
         Ok(()),
@@ -1044,7 +1050,7 @@ async fn renew_through(feed: &SqsFeed, receipts: &[Receipt], d: Duration, what: 
     for _ in 0..d.as_millis() / 100 {
         for &receipt in receipts {
             assert_eq!(
-                feed.renew(receipt).map_err(|e| e.kind),
+                feed.renew(receipt).map_err(|e| e.kind()),
                 Ok(()),
                 "{what}: the unit lapsed {:?} in, renewed every 100 ms",
                 Instant::now() - start
@@ -1376,7 +1382,7 @@ async fn a_renewal_entry_refused_with_another_code_keeps_its_deadline() {
     feed.renew(delivery.receipt).unwrap();
     tokio::time::advance(MINUTE).await;
     assert_eq!(
-        feed.renew(delivery.receipt).unwrap_err().kind,
+        feed.renew(delivery.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 }
@@ -1400,7 +1406,10 @@ async fn a_marked_receipt_past_its_deadline_is_not_extended() {
         "a lapsed receipt was extended: {:?}",
         queue.visibility()
     );
-    assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
+    assert_eq!(
+        feed.renew(d.receipt).unwrap_err().kind(),
+        FeedErrorKind::Gone
+    );
 }
 
 /// Pins that a publish retrying a failed send stops once another task stops
@@ -1483,7 +1492,7 @@ async fn a_send_retried_into_a_fatal_reads_retryable() {
     until("the first send", || queue.sends().len() == 1).await;
     tokio::time::advance(Duration::from_millis(200)).await;
     until("the publish settles", || c.try_outcome().is_some()).await;
-    let kind = c.try_outcome().unwrap().unwrap_err().kind;
+    let kind = c.try_outcome().unwrap().unwrap_err().kind();
     assert_eq!(queue.sends().len(), 2);
     assert_eq!(
         kind,
@@ -1501,7 +1510,7 @@ async fn a_send_fatal_on_its_first_attempt_reads_fatal() {
     until("the publish settles", || c.try_outcome().is_some()).await;
     assert_eq!(queue.sends().len(), 1);
     assert_eq!(
-        c.try_outcome().unwrap().unwrap_err().kind,
+        c.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
 }
@@ -1576,7 +1585,7 @@ async fn a_send_timed_out_then_denied_reads_retryable() {
     let c = feed.publish(Unit::new("p", "body"));
     let e = tokio::time::timeout(MINUTE, c).await.unwrap().unwrap_err();
     assert_eq!(calls.load(Ordering::SeqCst), 2, "{e}");
-    assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+    assert_eq!(e.kind(), FeedErrorKind::Retryable, "{e}");
     assert!(e.to_string().contains("AccessDenied"), "{e}");
 }
 
@@ -1592,7 +1601,7 @@ async fn a_batch_shape_failure_after_a_retried_send_reads_refused() {
     until("the publish settles", || c.try_outcome().is_some()).await;
     assert_eq!(queue.sends().len(), 2);
     assert_eq!(
-        c.try_outcome().unwrap().unwrap_err().kind,
+        c.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Refused
     );
 }
@@ -1870,7 +1879,10 @@ async fn a_receive_answered_with_a_receive_failure_keeps_buffered_units() {
         // `receive` answers with it, handing out nothing.
         queue.fail_next_receive(CallError::retryable("InternalError"));
         step(Duration::from_secs(25)).await;
-        assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Retryable);
+        assert_eq!(
+            feed.receive(1).unwrap_err().kind(),
+            FeedErrorKind::Retryable
+        );
     }
     step(Duration::from_secs(35)).await; // t near 85 s
     assert_eq!(
@@ -1987,16 +1999,16 @@ async fn a_failed_count_read_keeps_its_class() {
     let (feed, queue) = start(MINUTE);
     queue.fail_attributes(DEAD_URL, CallError::fatal("AccessDenied"));
     let e = depth(&feed, DepthOf::DeadLetters).await.unwrap_err();
-    assert_eq!(e.kind, FeedErrorKind::Fatal);
+    assert_eq!(e.kind(), FeedErrorKind::Fatal);
     assert!(
-        e.reason.contains("AccessDenied") && e.reason.contains(DEAD_URL),
+        e.reason().contains("AccessDenied") && e.reason().contains(DEAD_URL),
         "{e}"
     );
     queue.fail_attributes(QUEUE_URL, CallError::retryable("throttled"));
     let e = depth(&feed, DepthOf::Feed).await.unwrap_err();
-    assert_eq!(e.kind, FeedErrorKind::Retryable);
+    assert_eq!(e.kind(), FeedErrorKind::Retryable);
     assert!(
-        e.reason.contains("throttled") && e.reason.contains(QUEUE_URL),
+        e.reason().contains("throttled") && e.reason().contains(QUEUE_URL),
         "{e}"
     );
 }
@@ -2096,11 +2108,11 @@ async fn a_reply_without_the_counts_reads_as_fatal() {
     );
     for (of, url) in [(DepthOf::Feed, QUEUE_URL), (DepthOf::DeadLetters, DEAD_URL)] {
         let e = depth(&feed, of).await.unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Fatal, "{of:?}");
+        assert_eq!(e.kind(), FeedErrorKind::Fatal, "{of:?}");
         assert!(
-            e.reason
+            e.reason()
                 .contains("reported no `ApproximateNumberOfMessages`")
-                && e.reason.contains(url),
+                && e.reason().contains(url),
             "{e}"
         );
     }
@@ -2151,13 +2163,16 @@ async fn a_handed_back_unit_is_set_visible_at_once() {
     assert_eq!(handed_back(&queue.visibility()), ["h0"]);
     assert_eq!(queue.visibility().len(), 1, "one call");
     assert_eq!(queue.visibility_within(), [Some(MINUTE / 3)]);
-    assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
     assert_eq!(
-        feed.acknowledge(d.receipt).unwrap_err().kind,
+        feed.renew(d.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
     assert_eq!(
-        feed.hand_back(d.receipt).unwrap_err().kind,
+        feed.acknowledge(d.receipt).unwrap_err().kind(),
+        FeedErrorKind::Gone
+    );
+    assert_eq!(
+        feed.hand_back(d.receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
 }
@@ -2190,7 +2205,7 @@ async fn a_hand_back_at_its_deadline_is_gone_and_unsent() {
             answer.unwrap();
             assert_eq!(handed_back(&queue.visibility()), ["h0"]);
         } else {
-            assert_eq!(answer.unwrap_err().kind, FeedErrorKind::Gone);
+            assert_eq!(answer.unwrap_err().kind(), FeedErrorKind::Gone);
             assert!(handed_back(&queue.visibility()).is_empty());
         }
     }
@@ -2212,7 +2227,7 @@ async fn a_gone_unknown_or_buffered_receipt_handed_back_is_gone() {
     .await;
     for receipt in [taken.receipt, Receipt(999), buffered] {
         assert_eq!(
-            feed.hand_back(receipt).unwrap_err().kind,
+            feed.hand_back(receipt).unwrap_err().kind(),
             FeedErrorKind::Gone,
             "{receipt}"
         );
@@ -2858,12 +2873,12 @@ async fn the_stop_methods_on_a_fatal_feed_answer_at_once() {
     feed.stop_receiving();
     assert_eq!(feed.buffered(), 1, "the stop gave back a buffered unit");
     assert_eq!(
-        feed.hand_back(got[1].receipt).unwrap_err().kind,
+        feed.hand_back(got[1].receipt).unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
     let mut closed = feed.close(Duration::from_secs(10)).unwrap();
     assert_eq!(
-        closed.try_outcome().unwrap().unwrap_err().kind,
+        closed.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
     settle_tasks().await;
@@ -2891,7 +2906,7 @@ async fn a_fatal_during_close_rejects_it() {
     settle_tasks().await;
     assert!(Instant::now() < bound);
     assert_eq!(
-        closed.try_outcome().unwrap().unwrap_err().kind,
+        closed.try_outcome().unwrap().unwrap_err().kind(),
         FeedErrorKind::Fatal
     );
 }
@@ -2942,7 +2957,12 @@ async fn a_close_that_drops_a_delete_settles_err() {
     feed.acknowledge(d.receipt).unwrap();
     let mut closed = feed.close(Duration::from_secs(10)).unwrap();
     settle_tasks().await;
-    let e = closed.try_outcome().unwrap().unwrap_err().reason;
+    let e = closed
+        .try_outcome()
+        .unwrap()
+        .unwrap_err()
+        .reason()
+        .to_owned();
     assert!(
         e.starts_with("the close gave up 1 of its deletes, fails and hand-backs unapplied"),
         "{e}"
@@ -3013,7 +3033,12 @@ async fn a_close_reaching_its_bound_with_entries_unsent_settles_err() {
     assert!(closed.try_outcome().is_none(), "settled before the bound");
     // tokio rounds a timer up to the next millisecond.
     step(Duration::from_millis(200)).await;
-    let e = closed.try_outcome().unwrap().unwrap_err().reason;
+    let e = closed
+        .try_outcome()
+        .unwrap()
+        .unwrap_err()
+        .reason()
+        .to_owned();
     assert!(
         e.starts_with("the close reached its bound with 1 deletes, fails or hand-backs unsent;"),
         "{e}"
@@ -3209,7 +3234,7 @@ async fn hand_back_after_abandon_answers_ok_until_the_deadline() {
     feed.hand_back(got[0].receipt).unwrap();
     tokio::time::advance(MINUTE + Duration::from_secs(1)).await;
     assert_eq!(
-        feed.hand_back(got[1].receipt).unwrap_err().kind,
+        feed.hand_back(got[1].receipt).unwrap_err().kind(),
         FeedErrorKind::Gone
     );
     assert!(queue.visibility().is_empty());
@@ -3378,7 +3403,7 @@ async fn a_fatal_renewal_is_sticky() {
     until("the extension is sent", || queue.visibility().len() == 1).await;
     until("the failure wakes the reader", || park.park(Duration::ZERO)).await;
     for _ in 0..2 {
-        assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+        assert_eq!(feed.receive(1).unwrap_err().kind(), FeedErrorKind::Fatal);
     }
 }
 
@@ -3728,7 +3753,12 @@ async fn a_close_waits_for_a_hand_back_given_up_at_the_period() {
     step(Duration::from_secs(10)).await;
     let mut closed = feed.close(Duration::from_secs(30)).unwrap();
     step(Duration::from_secs(31)).await;
-    let e = closed.try_outcome().unwrap().unwrap_err().reason;
+    let e = closed
+        .try_outcome()
+        .unwrap()
+        .unwrap_err()
+        .reason()
+        .to_owned();
     assert!(
         e.starts_with("the close reached its bound with 1 deletes, fails or hand-backs unsent")
             || e.starts_with("the close gave up 1 of"),
@@ -3882,7 +3912,7 @@ async fn renew_with_counts(
     let start = Instant::now();
     for _ in 0..d.as_millis() / 100 {
         assert_eq!(
-            feed.renew(held.receipt).map_err(|e| e.kind),
+            feed.renew(held.receipt).map_err(|e| e.kind()),
             Ok(()),
             "the unit lapsed {:?} in: extensions answered {}, credential loads started {}, \
              finished {}",
@@ -4278,14 +4308,14 @@ async fn the_deadline_guards_on_a_pipeline_thread_read_the_injected_clock() {
             match when {
                 When::AtDeadline => {
                     assert_eq!(
-                        answer.map_err(|e| e.kind),
+                        answer.map_err(|e| e.kind()),
                         Err(FeedErrorKind::Gone),
                         "{call:?} {when:?}"
                     );
                     assert!(sent.is_empty(), "{call:?} {when:?}: {sent:?}");
                 }
                 When::TokioPast | When::JustBefore => {
-                    assert_eq!(answer.map_err(|e| e.kind), Ok(()), "{call:?} {when:?}");
+                    assert_eq!(answer.map_err(|e| e.kind()), Ok(()), "{call:?} {when:?}");
                     let expected: &[&str] = match call {
                         Call::Renew => &[],
                         Call::Fail | Call::HandBack => &["h0"],
@@ -4317,7 +4347,7 @@ async fn a_fail_or_hand_back_queued_until_its_deadline_is_dropped_unsent() {
                 feed.hand_back(receipt)
             }
         });
-        assert_eq!(answer.map_err(|e| e.kind), Ok(()), "fail {fail}");
+        assert_eq!(answer.map_err(|e| e.kind()), Ok(()), "fail {fail}");
         // The runtime has not run since the call, so the send is still queued.
         clock.advance(Duration::from_millis(1));
         settle_tasks().await;
@@ -4766,7 +4796,7 @@ fn a_refused_extension_is_counted_by_its_code() {
                 Err(FeedErrorKind::Gone)
             };
             assert_eq!(
-                feed.renew(receipts[1]).map_err(|e| e.kind),
+                feed.renew(receipts[1]).map_err(|e| e.kind()),
                 expected,
                 "{code:?}"
             );
@@ -4799,7 +4829,7 @@ fn refused_extensions_count_each_entry_and_a_lapsing_one_stays_held() {
         )
         .await;
         assert_eq!(
-            feed.renew(receipts[0]).unwrap_err().kind,
+            feed.renew(receipts[0]).unwrap_err().kind(),
             FeedErrorKind::Gone
         );
         assert_eq!(feed.deadline_of(receipts[1]), Some(ticked + MINUTE));
@@ -5073,12 +5103,12 @@ fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
         let (receipts, _) =
             extend_three(&feed, &queue, vec![failure(0, "ReceiptHandleIsInvalid")]).await;
         assert_eq!(
-            feed.fail(receipts[0], "refused").unwrap_err().kind,
+            feed.fail(receipts[0], "refused").unwrap_err().kind(),
             FeedErrorKind::Gone
         );
         tokio::time::advance(2 * MINUTE).await;
         assert_eq!(
-            feed.fail(receipts[1], "late").unwrap_err().kind,
+            feed.fail(receipts[1], "late").unwrap_err().kind(),
             FeedErrorKind::Gone
         );
         settle_tasks().await;
@@ -5543,7 +5573,7 @@ async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply
     let taken = loop {
         match feed.receive(1) {
             Ok(got) => break got,
-            Err(e) => assert_eq!(e.kind, FeedErrorKind::Retryable),
+            Err(e) => assert_eq!(e.kind(), FeedErrorKind::Retryable),
         }
     };
     assert_eq!(taken.len(), 1);
@@ -5741,8 +5771,8 @@ async fn a_second_fatal_error_logs_nothing_and_keeps_the_first() {
         .count();
     assert_eq!(logged, 1, "one stop, one line: {lines:#?}");
     let rejected = closed.try_outcome().unwrap().unwrap_err();
-    assert_eq!(rejected.reason, "first");
-    assert_eq!(feed.receive(1).unwrap_err().reason, "first");
+    assert_eq!(rejected.reason(), "first");
+    assert_eq!(feed.receive(1).unwrap_err().reason(), "first");
 }
 
 /// Pins that a latched feed's tasks send nothing more: no queued delete, no
@@ -5808,6 +5838,6 @@ async fn a_latched_feed_abandoned_still_returns_its_error() {
     feed.shared.set_fatal(&CallError::fatal("stopped"));
     feed.abandon();
     let error = feed.receive(1).unwrap_err();
-    assert_eq!(error.kind, FeedErrorKind::Fatal);
-    assert_eq!(error.reason, "stopped");
+    assert_eq!(error.kind(), FeedErrorKind::Fatal);
+    assert_eq!(error.reason(), "stopped");
 }

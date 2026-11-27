@@ -41,6 +41,17 @@ use std::time::Duration;
 /// The attempt topic's partition count in these tests.
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
+/// The feed's producer for `core`, built from `config`.
+fn feed_producer(config: &KafkaFeedConfig, core: &Arc<Core>) -> write::Producer {
+    config
+        .base(false)
+        .create::<write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(core)),
+        )
+        .unwrap()
+}
+
 pub(super) fn core(cap: u32) -> Core {
     core_on(cap, TestClock::frozen())
 }
@@ -722,13 +733,7 @@ fn unreachable_config(extra: &str) -> KafkaFeedConfig {
 fn idle_feed() -> KafkaFeed {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = config
-        .base(false)
-        .create::<super::write::Producer, _>(
-            &config.client(FeedRole::Producer),
-            FeedProducerHooks::new(Arc::clone(&core)),
-        )
-        .unwrap();
+    let producer = feed_producer(&config, &core);
     KafkaFeed {
         core,
         producer,
@@ -742,13 +747,7 @@ fn idle_feed() -> KafkaFeed {
 /// A publisher whose producer reaches no broker, over `config`.
 fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
     let core = Arc::new(Core::new(config, TWO, SyncClock::system()));
-    let producer = config
-        .base(false)
-        .create::<super::write::Producer, _>(
-            &config.client(FeedRole::Producer),
-            FeedProducerHooks::new(Arc::clone(&core)),
-        )
-        .unwrap();
+    let producer = feed_producer(config, &core);
     KafkaFeedPublisher::from_parts(core, producer)
 }
 
@@ -1666,13 +1665,7 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
         NonZeroU32::new(4).unwrap(),
         SyncClock::system(),
     ));
-    let producer = config
-        .base(false)
-        .create::<super::write::Producer, _>(
-            &config.client(FeedRole::Producer),
-            FeedProducerHooks::new(Arc::clone(&core)),
-        )
-        .unwrap();
+    let producer = feed_producer(&config, &core);
     let mut seen = std::collections::BTreeSet::new();
     let mut offsets = Vec::new();
     for offset in 0.. {
@@ -1766,13 +1759,7 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
 fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     let config = unreachable_config("  delivery_timeout: 1h\n");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = config
-        .base(false)
-        .create::<super::write::Producer, _>(
-            &config.client(FeedRole::Producer),
-            FeedProducerHooks::new(Arc::clone(&core)),
-        )
-        .unwrap();
+    let producer = feed_producer(&config, &core);
     {
         let mut st = core.lock();
         st.tracker.assign([tp(0)]);
@@ -1814,13 +1801,7 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
 fn a_latched_feed_ends_its_gate_thread() {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = config
-        .base(false)
-        .create::<super::write::Producer, _>(
-            &config.client(FeedRole::Producer),
-            FeedProducerHooks::new(Arc::clone(&core)),
-        )
-        .unwrap();
+    let producer = feed_producer(&config, &core);
     let handle = super::gate::Gate::new(
         Arc::clone(&core),
         producer,
@@ -1852,13 +1833,7 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
             NonZeroU32::new(4).unwrap(),
             SyncClock::system(),
         ));
-        let producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer = feed_producer(&config, &core);
         let mut seen = std::collections::BTreeSet::new();
         let mut offsets = Vec::new();
         for offset in 0.. {
@@ -2091,15 +2066,13 @@ mod cluster {
     use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH, Wait, tpl_of};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
-    use super::super::producer::FeedProducerHooks;
     use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
-    use super::{TWO, assert_returns, returns_within};
+    use super::{TWO, assert_returns, feed_producer, returns_within};
     use crate::client::read_position;
     use crate::client::testing::mark_errors;
     use crate::context::Intent;
-    use crate::feed::FeedRole;
     use crate::testutil::mock::MockKafka;
     use crate::testutil::raw::{Raw as _, raw_config};
     use crate::testutil::wire::{self, Marker};
@@ -3183,13 +3156,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3256,13 +3223,7 @@ mod cluster {
         );
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3325,13 +3286,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let on = |partition| {
             (0..)
                 .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
@@ -3383,13 +3338,7 @@ mod cluster {
         let group = spate_test::unique_name("leaderless");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let on = |partition| {
             (0..)
                 .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
@@ -3448,13 +3397,7 @@ mod cluster {
         let group = spate_test::unique_name("gate-no-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let offset = (0..)
             .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 0)
             .unwrap();
@@ -3524,13 +3467,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3586,13 +3523,7 @@ mod cluster {
         let group = spate_test::unique_name("refused-reread");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3675,13 +3606,7 @@ mod cluster {
             std::num::NonZeroU32::new(3).unwrap(),
             SyncClock::new(clock.clone()),
         ));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let on = |partition| {
             (0..)
                 .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
@@ -3780,13 +3705,7 @@ mod cluster {
             std::num::NonZeroU32::MIN,
             SyncClock::new(clock.clone()),
         ));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3839,13 +3758,7 @@ mod cluster {
         let group = spate_test::unique_name("gate-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let offset = (0..)
             .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 1)
             .unwrap();
@@ -3921,13 +3834,7 @@ mod cluster {
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
@@ -3998,13 +3905,7 @@ mod cluster {
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
@@ -6386,13 +6287,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
-        let producer: Producer = config
-            .base(false)
-            .create::<Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -6612,13 +6507,7 @@ mod cluster {
         let group = spate_test::unique_name("close-fence");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer = config
-            .base(false)
-            .create::<Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer: Producer = feed_producer(&config, &core);
         core.fences.fetch_add(1, Ordering::AcqRel);
         write::send(
             &core,
@@ -6656,6 +6545,7 @@ mod docker {
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
+    use super::feed_producer;
     use crate::feed::FeedRole;
     use crate::feed::KafkaFeed;
     use crate::testutil::raw::{Raw as _, raw_config};
@@ -6926,13 +6816,7 @@ mod docker {
                 .is_ok_and(|(lwm, hwm)| lwm == 0 && hwm >= 2)
         });
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
-        let producer = config
-            .base(false)
-            .create::<super::write::Producer, _>(
-                &config.client(FeedRole::Producer),
-                FeedProducerHooks::new(Arc::clone(&core)),
-            )
-            .unwrap();
+        let producer = feed_producer(&config, &core);
         // Each client has read the partition once, so neither connects
         // inside the pass.
         wait_until(HANG, "the producer reads the partition", || {

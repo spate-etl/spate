@@ -15,7 +15,7 @@ use crate::error::{ErrorClass, FatalError};
 use crate::feed::STOP_RESERVE;
 use crate::hash::{FastMap, FastSet};
 use crate::metrics::{
-    CheckpointMetrics, InflightBudgetMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics,
+    CheckpointMetrics, InflightBudgetMetrics, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::record::PartitionId;
 use crate::sink::SinkFailures;
@@ -103,16 +103,10 @@ pub(crate) struct ControllerContext<S: Source> {
     pub budget: Arc<InflightBudget>,
     /// The budget gauge's single owner.
     pub budget_metrics: InflightBudgetMetrics,
-    /// Shared with the source at `open` so it can publish consumer lag, which
-    /// only the client can measure. The controller records everything else.
+    /// The source series' owner. The source holds a clone, from
+    /// `Source::attach_metrics`, to publish consumer lag, which only the
+    /// client can measure. The controller records everything else.
     pub source_metrics: Arc<SourceMetrics>,
-    /// The source's custom-metrics scope (`spate_<component_type>_source_*`),
-    /// handed to it at `open`. `None` unless the source declared a
-    /// non-reserved `component_type`.
-    pub source_meter: Option<Meter>,
-    /// `metrics.per_partition_detail`, forwarded to the source so its own
-    /// per-partition families honor the same cardinality gate.
-    pub per_partition_detail: bool,
     pub pipeline_metrics: PipelineMetrics,
 }
 
@@ -140,8 +134,6 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         budget,
         budget_metrics,
         source_metrics,
-        source_meter,
-        per_partition_detail,
         pipeline_metrics,
     } = ctx;
 
@@ -162,9 +154,6 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     if let Err(e) = source.open(
         SourceCtx::new(checkpointer.handle())
             .with_stop(stop_signal.clone())
-            .with_meter(source_meter)
-            .with_stage_metrics(Some(Arc::clone(&source_metrics)))
-            .with_partition_detail(per_partition_detail)
             .with_threads(NonZeroUsize::new(control_txs.len())),
     ) {
         state.failure = Some(FatalError {

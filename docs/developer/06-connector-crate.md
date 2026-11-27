@@ -156,7 +156,6 @@ A classifier that adds one operation's context, such as whether an insert body i
 
 **Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
 
-- spate-sqs: `classify`.
 - spate-avro: the registry's `failure`.
 - spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
 
@@ -287,9 +286,15 @@ Declare in a connector's config only the keys its own code reads.
 Keys the framework reads for every backend of a role sit beside the backend's key in the role's section, as `units_held` does in a `feed:` section.
 A sink leaves out `batch`, `inflight`, `retry` and `breaker` and passes a default pool in its `SinkParts`, which the sink section's blocks overlay.
 
+A feed backend that cannot honor one of the framework's `feed:` keys refuses it in `Feed::check_section`.
+The runtime calls that method on every feed before the source opens, so the refusal also reaches a feed that code built from a config.
+
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 
 **Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
+`check_section` in [`crates/spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs) for a refused feed key.
+
+**Departs:** the SQS feed, which refuses `attempt_cap` and a `settling_window` below one minute only when it is built from the section ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 
@@ -340,9 +345,6 @@ Resolve a component's metric handles in its `attach_metrics` hook, from the cont
 **Why:** every role then receives its `Meter` the same way.
 
 **Follow:** [`crates/spate-json/src/deser.rs`](repo:crates/spate-json/src/deser.rs).
-
-**Departs:** a source reads its `Meter` from `SourceCtx` in `open`, because `Source` has no `attach_metrics` ([#2320](https://github.com/spate-etl/spate/issues/2320)).
-Until it does, a new source reads it from `SourceCtx`.
 
 **Checked by:** review.
 

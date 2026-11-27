@@ -11,7 +11,9 @@ use spate_core::clock::TestClock;
 use spate_core::error::ErrorClass;
 use spate_core::metrics::names;
 use spate_core::record::{NO_EVENT_TIME_MS, PartitionId};
-use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::source::{
+    PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane, SourceMetricsCtx,
+};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, metric_series, wait_for_value, wait_until};
 use spate_test_support::assert_returns;
@@ -177,9 +179,8 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
         .expect("the config validates")
         .with_clock(Arc::clone(&clock) as _);
     let meter = spate_core::metrics::Meter::with_namespace("kafka", "pause", "source", "kafka");
-    source
-        .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
-        .expect("open");
+    source.attach_metrics(SourceMetricsCtx::new(Some(meter)));
+    source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 2);
     cp.begin_epoch(&[PartitionId(0), PartitionId(1)], 1);
@@ -414,9 +415,8 @@ fn a_restarted_member_publishes_lag_before_committing() {
         ));
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg).expect("the config validates");
-        source
-            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(None).with_stage_metrics(metrics));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let _lanes = await_assignment(&mut source, HANG);
         support::await_lag_series(&mut source, &handle, 1);
     });
@@ -692,13 +692,8 @@ fn statistics_populate_kafka_source_metrics() {
         // `Meter::for_component`; tests use the public constructor (prefix
         // `spate_kafka_` instead of the role-scoped `spate_kafka_source_`).
         let meter = spate_core::metrics::Meter::with_namespace("kafka", "stats", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         // A failure carries the source's warnings: a partition that is not
         // fetching, with its fetch state, and any main-queue rewind.
         spate_test::show_logs(tracing::Level::WARN, || {
@@ -783,8 +778,8 @@ fn not_fetching(partition: i32) -> String {
 #[test]
 fn statistics_disabled_registers_no_families() {
     // `statistics_interval: 0s` must disable the whole `spate_kafka_source_*`
-    // family, not just stop updating it. Registering the fixed handles at
-    // `open` regardless would leave them frozen at their unset default (e.g.
+    // family, not just stop updating it. Registering the fixed handles in
+    // `attach_metrics` regardless would leave them frozen at their unset default (e.g.
     // `group_healthy 0`, a documented alert signal) even though librdkafka
     // never emits a snapshot.
     let cluster = MockKafka::new();
@@ -803,13 +798,8 @@ fn statistics_disabled_registers_no_families() {
         // `component_type`); only the disabled interval should suppress the
         // families.
         let meter = spate_core::metrics::Meter::with_namespace("kafka", "stats", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         // Drive the control plane a few times; with stats off no snapshot
         // ever arrives and nothing should register.
         let _lanes = await_assignment(&mut source, HANG);
@@ -834,9 +824,9 @@ fn statistics_disabled_registers_no_families() {
 /// a permanent `0` on every Kafka pipeline. The two properties it pins are the
 /// ones that failed:
 ///
-/// 1. the framework's source-stage handles reach the connector at `open` (via
-///    `SourceCtx::stage_metrics`); the existing statistics test opens without
-///    them, so it could never have caught this;
+/// 1. the framework's source-stage handles reach the connector through
+///    `Source::attach_metrics`; the existing statistics test attaches none, so
+///    it could never have caught this;
 /// 2. the published value is the real backlog, per partition, rather than a
 ///    registered-but-never-written gauge's zero.
 #[test]
@@ -870,9 +860,8 @@ fn a_backlogged_consumer_publishes_its_lag() {
 
         let mut cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg).expect("the config validates");
-        source
-            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(None).with_stage_metrics(metrics));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
 
         let mut lanes = await_assignment(&mut source, HANG);
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
@@ -1090,13 +1079,8 @@ fn a_corrupt_batch_fails_the_lane() {
         let mut source = KafkaSource::new(cfg).expect("the config validates");
         let meter =
             spate_core::metrics::Meter::with_namespace("kafka", "corrupt-batch", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[PartitionId(0)], 1);
         let lane = &mut lanes[0];
@@ -1217,13 +1201,8 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
             "source",
             "kafka",
         );
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[PartitionId(0)], 1);
         let lane = &mut lanes[0];
@@ -1288,15 +1267,18 @@ struct Driver {
 
 impl Driver {
     fn open(cfg: KafkaSourceConfig) -> Driver {
-        Driver::open_with(
-            KafkaSource::new(cfg).expect("the config validates"),
-            |ctx| ctx,
-        )
+        Driver::open_with(KafkaSource::new(cfg).expect("the config validates"))
     }
 
-    fn open_with(mut source: KafkaSource, ctx: impl FnOnce(SourceCtx) -> SourceCtx) -> Driver {
+    /// [`Driver::open_with`] after handing `source` its metrics.
+    fn open_attached(mut source: KafkaSource, metrics: SourceMetricsCtx) -> Driver {
+        source.attach_metrics(metrics);
+        Driver::open_with(source)
+    }
+
+    fn open_with(mut source: KafkaSource) -> Driver {
         let cp = Checkpointer::new();
-        source.open(ctx(SourceCtx::new(cp.handle()))).expect("open");
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         Driver {
             source,
             cp,
@@ -1315,7 +1297,7 @@ impl Driver {
     fn open_watched(source: KafkaSource, group: &str) -> Driver {
         let (recorder, handle, meter) = support::recorded_meter(group.to_owned());
         let mut driver = metrics::with_local_recorder(&recorder, || {
-            Driver::open_with(source, |ctx| ctx.with_meter(Some(meter)))
+            Driver::open_attached(source, SourceMetricsCtx::new(Some(meter)))
         });
         driver.statistics = Some(handle);
         driver
@@ -1611,7 +1593,6 @@ fn pause_reaches_the_owning_consumer() {
         KafkaSource::new(cfg)
             .expect("the config validates")
             .with_clock(Arc::clone(&clock) as _),
-        |ctx| ctx,
     );
     driver.settle(4);
     let paused: Vec<_> = driver
@@ -2021,9 +2002,9 @@ fn two_consumers_publish_lag_before_committing() {
         let metrics = Arc::new(spate_core::metrics::SourceMetrics::new(
             &spate_core::metrics::ComponentLabels::new("lag-each", "source", "kafka"),
         ));
-        let mut driver = Driver::open_with(
+        let mut driver = Driver::open_attached(
             KafkaSource::new(cfg).expect("the config validates"),
-            |ctx| ctx.with_stage_metrics(Some(metrics)),
+            SourceMetricsCtx::new(None).with_stage_metrics(metrics),
         );
         driver.settle(2);
         wait_until(HANG, "lag published", || {
@@ -2066,9 +2047,9 @@ fn two_consumers_publish_their_own_statistics() {
         cfg.statistics_interval = interval;
         let (recorder, handle, meter) = support::recorded_meter(group);
         metrics::with_local_recorder(&recorder, || {
-            let mut driver = Driver::open_with(
+            let mut driver = Driver::open_attached(
                 KafkaSource::new(cfg).expect("the config validates"),
-                |ctx| ctx.with_meter(Some(meter)).with_partition_detail(true),
+                SourceMetricsCtx::new(Some(meter)).with_partition_detail(true),
             );
             driver.settle(2);
             driver.read(5);
@@ -2125,9 +2106,9 @@ fn consumer_series_carry_no_passthrough_value() {
     let (recorder, handle, meter) = support::recorded_meter("no-secret");
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         metrics::with_local_recorder(&recorder, || {
-            let mut driver = Driver::open_with(
+            let mut driver = Driver::open_attached(
                 KafkaSource::new(cfg).expect("the config validates"),
-                |ctx| ctx.with_meter(Some(meter)),
+                SourceMetricsCtx::new(Some(meter)),
             );
             driver.settle(2);
             wait_until(HANG, "statistics", || {
@@ -3358,7 +3339,7 @@ mod latest_start {
             let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
                 .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
-            let mut first = Driver::open_with(first, |ctx| ctx);
+            let mut first = Driver::open_with(first);
             wait_until(HANG, "the failed start", || {
                 first.step(Duration::from_millis(50));
                 capture
@@ -3413,7 +3394,7 @@ mod latest_start {
             let first = KafkaSource::new(config())
                 .expect("the config validates")
                 .with_clock(Arc::clone(&clock) as _);
-            let mut first = Driver::open_with(first, |ctx| ctx);
+            let mut first = Driver::open_with(first);
             wait_until(HANG, "the failed start", || {
                 first.step(Duration::from_millis(50));
                 capture
@@ -3458,7 +3439,7 @@ mod latest_start {
         let source = KafkaSource::new(cfg)
             .expect("the config validates")
             .with_clock(Arc::clone(&clock) as _);
-        let mut driver = Driver::open_with(source, |ctx| ctx);
+        let mut driver = Driver::open_with(source);
         driver.settle(1);
         // On the rejoin the partition has a commit, so its lookup is what fails.
         cluster.request_errors(
@@ -3920,9 +3901,8 @@ mod latest_start {
             ));
             let cp = Checkpointer::new();
             let mut source = KafkaSource::new(cfg).expect("the config validates");
-            source
-                .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
-                .expect("open");
+            source.attach_metrics(SourceMetricsCtx::new(None).with_stage_metrics(metrics));
+            source.open(SourceCtx::new(cp.handle())).expect("open");
             let _lanes = await_assignment(&mut source, HANG);
             support::await_lag_series(&mut source, &handle, 1);
         });

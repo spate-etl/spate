@@ -301,7 +301,7 @@ When the backend is faster for some data and slower for other data, each compone
 
 ### Declare the component type once
 
-Declare the key a role's YAML section sits under once, as a `pub(crate) const COMPONENT_TYPE` in the crate, such as `"s3"`.
+Declare the key a role's YAML section sits under once, as a `COMPONENT_TYPE` constant at the narrowest visibility its users need, such as `pub(crate) const COMPONENT_TYPE: &str = "s3";`.
 Return it from the role's `component_type` method, or pass it to `SinkParts::new` for a sink, and build `SectionPath` from it.
 One crate that serves several roles under one key declares it once for all of them, as spate-kafka does.
 

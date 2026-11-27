@@ -137,7 +137,7 @@ mod tests {
     /// answer with no exception code, as a proxy's 503 page has, is
     /// retryable.
     #[test]
-    fn class_of_names_each_variant_and_defers_the_rest() {
+    fn classify_client_error_names_each_variant_and_defers_the_rest() {
         use ErrorClass::{Fatal, Retryable};
         use clickhouse::error::Error as E;
         let boxed = || -> Box<dyn std::error::Error + Send + Sync> { "x".into() };

@@ -500,8 +500,8 @@ fn documented_unsupported_column_types_are_rejected_at_build() {
     }
 }
 
-/// A row that serializes as anything but a struct, tuple or sequence is
-/// refused as `NotARow`.
+/// A row that serializes as anything but a struct, tuple or sequence, a
+/// flattened struct's map included, is refused as `NotARow`.
 #[test]
 fn a_row_that_is_not_a_struct_or_tuple_is_refused() {
     #[derive(Serialize)]
@@ -510,6 +510,8 @@ fn a_row_that_is_not_a_struct_or_tuple_is_refused() {
     enum Variant {
         Unit,
         Newtype(u32),
+        Tuple(u32, u32),
+        Struct { id: u32 },
     }
     fn refused<R: Serialize>(row: R) {
         let err = ClickHouseNativeEncoder::<()>::block_of(schema(&[("id", "UInt32")]), &[row])
@@ -538,6 +540,10 @@ fn a_row_that_is_not_a_struct_or_tuple_is_refused() {
     refused(Unit);
     refused(Variant::Unit);
     refused(Variant::Newtype(1));
+    refused(Variant::Tuple(1, 2));
+    refused(Variant::Struct { id: 1 });
+    // `#[serde(flatten)]` lowers a struct to a map.
+    refused(std::collections::BTreeMap::from([("id", 1u32)]));
 }
 
 #[test]

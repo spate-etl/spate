@@ -92,7 +92,7 @@ pub enum NativeError {
     /// A tuple/geo value serialized more elements than its column has.
     #[error("tuple value has more elements than the column type")]
     TupleArity,
-    /// The row did not serialize as a struct/tuple of columns.
+    /// The row did not serialize as a struct, tuple or sequence of columns.
     #[error("row must serialize as a struct or tuple of columns")]
     NotARow,
     /// A `LowCardinality` column reached 2^32 distinct values in one block,

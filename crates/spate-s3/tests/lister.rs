@@ -1025,8 +1025,8 @@ struct RefusingSection(ScriptedFeed);
 const SECTION_REFUSAL: &str = "feed.scripted: `attempt_cap` does not apply to `scripted`";
 
 impl Feed for RefusingSection {
-    fn backend(&self) -> &str {
-        self.0.backend()
+    fn component_type(&self) -> &str {
+        self.0.component_type()
     }
     fn check_section(&self, _section: &FeedSection) -> Result<(), ConfigError> {
         Err(ConfigError::Validation(SECTION_REFUSAL.into()))

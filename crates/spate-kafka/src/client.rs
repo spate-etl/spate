@@ -246,7 +246,7 @@ const STATISTICS_INTERVAL: DurationBounds = DurationBounds::at_least(Duration::f
     .or_zero();
 
 /// The key that selects Kafka in a `source:`, `sink:` or `feed:` section.
-pub(crate) const TAG: &str = "kafka";
+pub(crate) const COMPONENT_TYPE: &str = "kafka";
 
 /// What every client of one connector section shares: its brokers, its
 /// passthrough and its statistics interval.

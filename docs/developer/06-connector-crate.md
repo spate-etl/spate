@@ -327,6 +327,18 @@ When the backend is faster for some data and slower for other data, each compone
 
 **Checked by:** review.
 
+### Declare the component type once
+
+Declare the key a role's YAML section sits under once, as a `COMPONENT_TYPE` constant at the narrowest visibility its users need, such as `pub(crate) const COMPONENT_TYPE: &str = "s3";`.
+Return it from the role's `component_type` method, or pass it to `SinkParts::new` for a sink, and build `SectionPath` from it.
+One crate that serves several roles under one key declares it once for all of them, as spate-kafka does.
+
+**Why:** the same string is the YAML key, the `component_type` label on the role's series and the namespace of its `Meter`, so one declaration keeps the three equal.
+
+**Follow:** [`crates/spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs).
+
+**Checked by:** the compiler for the method, which every role must implement, and review for the constant.
+
 ### Name its metrics
 
 Name each metric family and label key the crate registers by [Instrumenting connectors § Contracts](../user-guide/06-extending/instrumenting-connectors.mdx#contracts).

@@ -21,7 +21,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The key that names this backend in a `feed:` section.
-pub const BACKEND: &str = "memory";
+pub const COMPONENT_TYPE: &str = "memory";
 
 /// What a [`MemoryFeed`] holds at one moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,7 +118,7 @@ impl MemoryFeed {
         #[serde(deny_unknown_fields)]
         struct Body {}
 
-        let _: Option<Body> = section.backend_body(BACKEND, "in-process")?;
+        let _: Option<Body> = section.backend_body(COMPONENT_TYPE, "in-process")?;
         refuse_section_keys(section)?;
         Ok(MemoryFeed::with_attempt_cap(
             section.attempt_cap_or_default(),
@@ -198,8 +198,8 @@ fn gone(receipt: Receipt) -> FeedError {
 }
 
 impl Feed for MemoryFeed {
-    fn backend(&self) -> &str {
-        BACKEND
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
     }
 
     fn set_waker(&self, waker: FeedWaker) {

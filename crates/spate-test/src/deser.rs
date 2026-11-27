@@ -65,7 +65,14 @@ impl TestDeserializer {
     }
 }
 
+/// The key [`TestDeserializer`] reports.
+const COMPONENT_TYPE: &str = "test";
+
 impl Deserializer<Owned<Vec<u8>>> for TestDeserializer {
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -276,6 +283,10 @@ mod tests {
     }
 
     impl Deserializer<Owned<Vec<u8>>> for Waiting {
+        fn component_type(&self) -> &str {
+            "waiting"
+        }
+
         fn deserialize<'buf>(
             &mut self,
             raw: &RawPayload<'buf>,
@@ -298,6 +309,12 @@ mod tests {
                 Answer::Fatal => Err(DeserError::fatal("rejected")),
             }
         }
+    }
+
+    /// Pins the type that labels a chain's stage over the test deserializer.
+    #[test]
+    fn the_test_deserializer_reports_the_test_type() {
+        assert_eq!(TestDeserializer::passthrough().component_type(), "test");
     }
 
     /// Each `NotReady` is followed by one `between` and one replay, and the

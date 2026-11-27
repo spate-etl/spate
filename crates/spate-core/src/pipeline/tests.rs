@@ -3014,6 +3014,10 @@ fn the_source_drops_before_the_io_runtime_stops() {
     }
     impl Source for NeedsIoOnDrop {
         type Lane = FakeLane;
+
+        fn component_type(&self) -> &str {
+            "source"
+        }
         fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
             self.inner.open(ctx)
         }
@@ -3517,6 +3521,10 @@ fn the_default_configure_feed_refuses_the_section() {
     struct NoFeed(FakeSource);
     impl Source for NoFeed {
         type Lane = FakeLane;
+
+        fn component_type(&self) -> &str {
+            "source"
+        }
         fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
             self.0.open(ctx)
         }
@@ -3656,8 +3664,8 @@ struct DeadLetterReads {
 }
 
 impl crate::feed::Feed for DeadLetterReads {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
     fn set_waker(&self, waker: crate::feed::FeedWaker) {
         self.inner.set_waker(waker);
@@ -3809,7 +3817,7 @@ fn keyed_feed(
     }
 
     impl<A: Fn(FeedMetricsCtx) + Send + Sync> Feed for Keyed<A> {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             self.key
         }
         fn set_waker(&self, waker: FeedWaker) {
@@ -4102,10 +4110,10 @@ fn a_seeded_feed_without_a_feed_section_names_its_setter() {
     );
 }
 
-/// Pins that a feed passed in whose backend differs from the section's key
-/// fails startup, naming both.
+/// Pins that a feed passed in whose component type differs from the section's
+/// key fails startup, naming both.
 #[test]
-fn a_feed_whose_backend_differs_from_the_section_fails_startup() {
+fn a_feed_whose_component_type_differs_from_the_section_fails_startup() {
     let mut cfg = test_config(1);
     cfg.feed = feed_section("sqs: {}");
     let h = start_with(
@@ -5624,6 +5632,10 @@ fn a_source_that_does_not_read_on_drains_at_once() {
     struct Plain(FakeSource);
     impl Source for Plain {
         type Lane = FakeLane;
+
+        fn component_type(&self) -> &str {
+            "source"
+        }
         fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
             self.0.open(ctx)
         }
@@ -7629,8 +7641,8 @@ impl HookedFeed {
 }
 
 impl crate::feed::Feed for HookedFeed {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
     fn set_waker(&self, waker: crate::feed::FeedWaker) {
         self.inner.set_waker(waker);

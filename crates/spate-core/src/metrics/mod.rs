@@ -871,13 +871,15 @@ mod tests {
 
     #[test]
     fn for_component_scopes_by_role_and_gates_ineligible_types() {
-        // A reserved component_type (an undeclared source's default) yields no
-        // Meter rather than panicking.
+        // A reserved component_type yields no Meter rather than panicking.
         assert!(Meter::for_component("source", MetricRole::Source, "p", "c").is_none());
         assert!(Meter::for_component("sink", MetricRole::Sink, "p", "c").is_none());
-        // The `custom` author bucket is off-limits to component scoping (a
-        // sink's default `component_type`), so it too gets no Meter.
+        // The `custom` author bucket is off-limits to component scoping, so it
+        // too gets no Meter.
         assert!(Meter::for_component("custom", MetricRole::Sink, "p", "c").is_none());
+        // `deserializer` is neither a reserved root nor `custom`, so it scopes a
+        // family.
+        assert!(Meter::for_component("deserializer", MetricRole::Deser, "p", "c").is_some());
         // A malformed component_type (a legal label, an illegal name segment)
         // yields None (a warning is logged, not asserted here).
         assert!(Meter::for_component("clickhouse-v2", MetricRole::Sink, "p", "c").is_none());
@@ -916,21 +918,6 @@ mod tests {
     #[should_panic(expected = "the role segment `deser_`")]
     fn a_local_name_may_not_lead_with_the_deser_role() {
         let _ = Meter::new("p", "c", "t").counter("deser_items_total", &[]);
-    }
-
-    /// The deserializer default opts out under the deserializer role only.
-    #[test]
-    fn the_deserializer_default_scopes_a_family_in_other_roles() {
-        assert!(
-            Meter::for_component(names::DESERIALIZER_DEFAULT, MetricRole::Deser, "p", "c")
-                .is_none()
-        );
-        for role in [MetricRole::Source, MetricRole::Sink, MetricRole::Feed] {
-            assert!(
-                Meter::for_component(names::DESERIALIZER_DEFAULT, role, "p", "c").is_some(),
-                "{role:?}"
-            );
-        }
     }
 
     /// Pins the `# Panics` section of `counter`, `gauge` and `histogram`, in a

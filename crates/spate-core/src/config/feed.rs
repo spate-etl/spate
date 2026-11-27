@@ -92,7 +92,7 @@ impl FeedSection {
     /// ));
     /// feed.units_held = NonZeroUsize::new(32);
     ///
-    /// assert_eq!(feed.backend().type_tag(), "memory");
+    /// assert_eq!(feed.backend().component_type(), "memory");
     /// ```
     #[must_use]
     pub fn new(mut backend: ComponentConfig) -> FeedSection {
@@ -107,8 +107,9 @@ impl FeedSection {
     }
 
     /// The backend component (`<backend>: { ... }`). Its
-    /// [`type_tag`](ComponentConfig::type_tag) is the key a feed's
-    /// [`backend`](crate::feed::Feed::backend) must return.
+    /// [`component_type`](ComponentConfig::component_type) is the one the
+    /// feed's [`Feed::component_type`](crate::feed::Feed::component_type)
+    /// must return.
     #[must_use]
     pub fn backend(&self) -> &ComponentConfig {
         &self.backend
@@ -171,7 +172,7 @@ impl FeedSection {
         tag: &str,
         name: &str,
     ) -> Result<T, ConfigError> {
-        let named = self.backend.type_tag();
+        let named = self.backend.component_type();
         if named != tag {
             return Err(ConfigError::Component {
                 context: "feed".into(),
@@ -262,7 +263,7 @@ mod tests {
              settling_window: 2m 30s\nmemory: { x: 7 }\n",
         )
         .unwrap();
-        assert_eq!(s.backend().type_tag(), "memory");
+        assert_eq!(s.backend().component_type(), "memory");
         assert_eq!(s.units_held, NonZeroUsize::new(12));
         assert_eq!(s.attempt_cap, NonZeroU32::new(3));
         assert_eq!(s.location.as_deref(), Some("s3://ops/jobs/a/"));

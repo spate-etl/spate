@@ -422,6 +422,9 @@ impl CaptureSink {
     }
 }
 
+/// The key [`CaptureSink`] reports.
+const COMPONENT_TYPE: &str = "capture";
+
 impl SinkBundle for CaptureSink {
     type Writer = CaptureWriter;
 
@@ -438,9 +441,8 @@ impl SinkBundle for CaptureSink {
         // The separate-probe-clients rule matters for real connectors with a
         // live pool, not an in-memory fake.
         let probe = endpoint_probe(self.writer.clone(), Arc::new(endpoints.clone()));
-        let parts = SinkParts::new(self.writer, endpoints, self.pool)
-            .with_component_type("capture")
-            .with_probe(probe);
+        let parts =
+            SinkParts::new(COMPONENT_TYPE, self.writer, endpoints, self.pool).with_probe(probe);
         match self.codec {
             Some(codec) => parts.with_frame_codec(codec),
             None => parts,

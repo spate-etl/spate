@@ -75,8 +75,8 @@ projection, this is usually why.
 pub trait Deserializer<F: RecFamily>: Send {
     fn deserialize<'buf>(&mut self, raw: &RawPayload<'buf>, ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>) -> Result<(), DeserError>;
-    /// The `component_type` label; defaults to "deserializer".
-    fn component_type(&self) -> &str { "deserializer" }
+    /// The key this deserializer registers under, such as "json".
+    fn component_type(&self) -> &str;
     /// Receives the deserializer's own `Meter`; the default ignores it.
     fn attach_metrics(&mut self, _cx: DeserMetricsCtx) {}
     /// Accepts or refuses the source's framing at start; the default accepts.
@@ -88,9 +88,9 @@ Records go out through the emitter rather than back through a return value, so
 a payload that contains a thousand records does not allocate a collection to
 hand them over.
 
-Two of the defaulted methods label the deserializer's metrics. A chain built
-with `with_metrics` reads `component_type` for its deserializer stage and passes
-the deserializer a `Meter` through `attach_metrics`.
+Two methods label the deserializer's metrics. A chain built with
+`with_metrics` reads `component_type` for its deserializer stage and passes the
+deserializer a `Meter` through `attach_metrics`.
 [Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)
 covers both.
 

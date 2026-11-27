@@ -818,13 +818,14 @@ impl Pipeline {
     /// the section, wrapped so the source's calls on it are recorded under
     /// `spate_feed_*`.
     ///
-    /// The feed's [`backend`](Feed::backend) must equal the key the section
-    /// names, and the config must have a `feed:` section; `run` fails at
-    /// startup otherwise. `run` also hands the section to
+    /// The feed's [`component_type`](Feed::component_type) must equal the key
+    /// the section names, and the config must have a `feed:` section; `run`
+    /// fails at startup otherwise. `run` also hands the section to
     /// [`Feed::check_section`] before the source opens, and fails with the
-    /// feed's refusal of a key it cannot honor. The section's backend keys, and `attempt_cap` as
-    /// the feed's delivery cap, apply only when a feed is built from the
-    /// section, so a feed passed here keeps the settings it was built with.
+    /// feed's refusal of a key it cannot honor. The section's backend keys, and
+    /// `attempt_cap` as the feed's delivery cap, apply only when a feed is
+    /// built from the section, so a feed passed here keeps the settings it
+    /// was built with.
     /// The source still reads `units_held`, `location`, `settling_window`
     /// and, as the cap of a source that re-enqueues units, `attempt_cap`
     /// from the section. Without this call, `run`
@@ -1063,11 +1064,11 @@ mod tests {
 
     fn null_sink(shards: usize) -> SinkParts<NullWriter> {
         SinkParts::new(
+            "null",
             NullWriter,
             (0..shards).map(|_| vec![()]).collect(),
             SinkPoolConfig::default(),
         )
-        .with_component_type("null")
     }
 
     fn fake_chain(
@@ -1104,20 +1105,20 @@ mod tests {
 
     /// The builder hands a sink writer one context whose `Meter` is scoped to
     /// the sink role and the declared `component_type`, and no `Meter` when
-    /// the sink keeps the default `"custom"`.
+    /// the sink declares the author bucket `"custom"`.
     #[test]
     fn a_sink_writer_receives_one_context_scoped_to_the_sink_role() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let cfg = test_config(1);
         let name = cfg.pipeline.name.clone();
         let parts = SinkParts::new(
+            "probe",
             ProbeWriter {
                 seen: Arc::clone(&seen),
             },
             vec![vec![()]],
             SinkPoolConfig::default(),
-        )
-        .with_component_type("probe");
+        );
         let _pipeline = Pipeline::from_config(cfg)
             .expect("builder")
             .sink(parts)
@@ -1148,6 +1149,7 @@ mod tests {
 
         let seen = Arc::new(Mutex::new(Vec::new()));
         let parts = SinkParts::new(
+            "custom",
             ProbeWriter {
                 seen: Arc::clone(&seen),
             },
@@ -1160,7 +1162,7 @@ mod tests {
             .expect("sink");
         let seen = seen.lock().expect("probe lock");
         assert_eq!(seen.len(), 1, "attach_metrics runs once per writer");
-        assert!(seen[0].is_none(), "the default `custom` type gets no Meter");
+        assert!(seen[0].is_none(), "the `custom` type gets no Meter");
     }
 
     #[test]
@@ -1259,11 +1261,12 @@ mod tests {
     #[test]
     fn bad_topologies_error_instead_of_panicking() {
         let p = Pipeline::from_config(test_config(1)).expect("builder");
-        let empty = SinkParts::new(NullWriter, Vec::new(), SinkPoolConfig::default());
+        let empty = SinkParts::new("null", NullWriter, Vec::new(), SinkPoolConfig::default());
         assert!(matches!(p.sink(empty).err(), Some(BuildError::Sink(_))));
 
         let p = Pipeline::from_config(test_config(1)).expect("builder");
         let ragged = SinkParts::new(
+            "null",
             NullWriter,
             vec![vec![()], vec![]],
             SinkPoolConfig::default(),
@@ -1271,8 +1274,13 @@ mod tests {
         assert!(matches!(p.sink(ragged).err(), Some(BuildError::Sink(_))));
 
         let p = Pipeline::from_config(test_config(1)).expect("builder");
-        let bad_labels = SinkParts::new(NullWriter, vec![vec![()]], SinkPoolConfig::default())
-            .with_replica_labels(vec![vec!["a".into(), "b".into()]]);
+        let bad_labels = SinkParts::new(
+            "null",
+            NullWriter,
+            vec![vec![()]],
+            SinkPoolConfig::default(),
+        )
+        .with_replica_labels(vec![vec!["a".into(), "b".into()]]);
         assert!(matches!(
             p.sink(bad_labels).err(),
             Some(BuildError::Sink(_))
@@ -1546,7 +1554,7 @@ mod tests {
             ),
         ];
         for (pool, key) in cases {
-            let sink = SinkParts::new(NullWriter, vec![vec![()]], pool).with_component_type("null");
+            let sink = SinkParts::new("null", NullWriter, vec![vec![()]], pool);
             let err = Pipeline::from_config(test_config(1))
                 .expect("builder")
                 .sink(sink)
@@ -1559,8 +1567,12 @@ mod tests {
         }
         // A named sink installed beside the `sink:` form reads as a `sinks:`
         // entry.
-        let sink = SinkParts::new(NullWriter, vec![vec![()]], pool(|c| c.batch.max_rows = 0))
-            .with_component_type("null");
+        let sink = SinkParts::new(
+            "null",
+            NullWriter,
+            vec![vec![()]],
+            pool(|c| c.batch.max_rows = 0),
+        );
         let err = Pipeline::from_config(test_config(1))
             .expect("builder")
             .add_sink_with("eu", sink, SinkOptions::default())
@@ -1591,7 +1603,7 @@ mod tests {
             .expect("the live pipeline claims the sink series");
         let mut pool = SinkPoolConfig::default();
         pool.batch.max_rows = 0;
-        let sink = SinkParts::new(NullWriter, vec![vec![()]], pool).with_component_type("null");
+        let sink = SinkParts::new("null", NullWriter, vec![vec![()]], pool);
         let err = Pipeline::from_config(named())
             .expect("builder")
             .sink(sink)

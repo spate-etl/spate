@@ -162,9 +162,8 @@ impl Meter {
 
     /// The scope the framework hands a component (a `Source`, a sink
     /// `ShardWriter`, a `Feed` backend or a chain's `Deserializer`). The
-    /// namespace is the component's `component_type`, which for a feed backend
-    /// is its `Feed::backend` key, and
-    /// `role` (derived from the wiring position) is appended, giving
+    /// namespace is the component's `component_type`, and `role` (derived from
+    /// the wiring position) is appended, giving
     /// `spate_<component_type>_<role>_*`. The `component_type` is also the
     /// standard `component_type` label, so a family joins the component's stage
     /// metrics.
@@ -172,17 +171,11 @@ impl Meter {
     /// Returns `None` (rather than panicking, unlike [`Meter::with_namespace`])
     /// when `component_type` cannot scope a family:
     ///
-    /// - a **reserved root** (a source's default `"source"`, a sink set to
-    ///   `"sink"`) or the **`custom`** author bucket (a sink's default
-    ///   `component_type`). A silent opt-out, so an undeclared component gets
-    ///   no custom `Meter`. `custom` is reserved for pipeline-author
-    ///   metrics ([`Meter::new`]); a component keeps its families out of that
-    ///   shared bucket by declaring a distinct `component_type`.
-    /// - a deserializer's default `"deserializer"`
-    ///   ([`DESERIALIZER_DEFAULT`](super::names::DESERIALIZER_DEFAULT)), under
-    ///   the deserializer role only. A silent opt-out, so an undeclared
-    ///   deserializer gets no `Meter`. The same string in another role scopes a
-    ///   family as usual.
+    /// - a **reserved root** (such as `"source"` or `"sink"`) or the
+    ///   **`custom`** author bucket. A silent opt-out: the component gets no
+    ///   custom `Meter`, and its stage metrics are unaffected. `custom` is
+    ///   reserved for pipeline-author metrics ([`Meter::new`]), so a
+    ///   component's families never share that bucket.
     /// - a **malformed** string (not a `[a-z][a-z0-9_]*` segment). The same
     ///   `None`, but logged at `warn`. A `component_type` that is a legal label
     ///   yet an illegal metric-name segment (e.g. `"clickhouse-v2"`) is almost
@@ -200,11 +193,6 @@ impl Meter {
         if component_type == super::names::CUSTOM_NAMESPACE {
             return None;
         }
-        // An undeclared deserializer's default type, like a source's reserved
-        // `"source"`, is no declaration of a family.
-        if role == MetricRole::Deser && component_type == super::names::DESERIALIZER_DEFAULT {
-            return None;
-        }
         match classify_namespace(component_type) {
             Ok(()) => Some(Meter {
                 labels: ComponentLabels::new(pipeline, component, component_type.to_string()),
@@ -214,8 +202,8 @@ impl Meter {
                     role.segment()
                 ),
             }),
-            // A reserved root is a legitimate default (a source's `"source"`).
-            // No `Meter`, and the component's stage metrics stay intact.
+            // A reserved root opts out: no `Meter`, and the component's stage
+            // metrics stay intact.
             Err(NamespaceRejection::Reserved) => None,
             // Empty/malformed is a wiring mistake. Surface it rather than drop
             // the component's families silently.

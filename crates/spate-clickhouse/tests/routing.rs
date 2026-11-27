@@ -44,6 +44,10 @@ fn sku_key(row: &SkuRow) -> ShardKey<'_> {
 struct LineDeser;
 
 impl Deserializer<Owned<SkuRow>> for LineDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

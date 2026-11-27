@@ -1,6 +1,6 @@
 //! The `kafka:` body of a `feed:` section, decoded and checked.
 
-use crate::client::{Base, Keys, Role, TAG, check_message_timeout};
+use crate::client::{Base, COMPONENT_TYPE, Keys, Role, check_message_timeout};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, SectionPath, redact};
 use spate_core::error::ConnectError;
@@ -8,9 +8,6 @@ use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
-
-/// The key that names this backend in a `feed:` section.
-pub(crate) const BACKEND: &str = TAG;
 
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "Kafka";
@@ -316,9 +313,9 @@ impl KafkaFeedConfig {
     /// `attempt_cap`, else
     /// [`DEFAULT_ATTEMPT_CAP`](spate_core::feed::DEFAULT_ATTEMPT_CAP).
     pub(crate) fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
-        let body: Body = section.backend_body(BACKEND, NAME)?;
+        let body: Body = section.backend_body(COMPONENT_TYPE, NAME)?;
         if body.attempt_cap.is_some() {
-            return Err(SectionPath::feed(BACKEND)
+            return Err(SectionPath::feed(COMPONENT_TYPE)
                 .invalid("attempt_cap", "is a key of `feed:` itself, beside `kafka:`"));
         }
         let config = KafkaFeedConfig {
@@ -357,12 +354,12 @@ impl KafkaFeedConfig {
         bundle: impl FnOnce(&TlsSection) -> Result<Option<String>, String>,
     ) -> Result<KafkaFeedConfig, ConnectError> {
         self.ca_pem = bundle(&self.tls)
-            .map_err(|why| SectionPath::feed(BACKEND).invalid("tls.root_ca", why))?;
+            .map_err(|why| SectionPath::feed(COMPONENT_TYPE).invalid("tls.root_ca", why))?;
         Ok(self)
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        let at = SectionPath::feed(BACKEND);
+        let at = SectionPath::feed(COMPONENT_TYPE);
         for (key, value) in [
             ("brokers", &self.brokers),
             ("group_id", &self.group_id),

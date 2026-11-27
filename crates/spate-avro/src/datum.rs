@@ -108,7 +108,7 @@ where
     for<'buf> F::Rec<'buf>: serde::Deserialize<'buf>,
 {
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn deserialize<'buf>(

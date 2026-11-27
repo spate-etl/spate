@@ -500,6 +500,46 @@ fn documented_unsupported_column_types_are_rejected_at_build() {
     }
 }
 
+/// A row that serializes as anything but a struct, tuple or sequence is
+/// refused as `NotARow`.
+#[test]
+fn a_row_that_is_not_a_struct_or_tuple_is_refused() {
+    #[derive(Serialize)]
+    struct Unit;
+    #[derive(Serialize)]
+    enum Variant {
+        Unit,
+        Newtype(u32),
+    }
+    fn refused<R: Serialize>(row: R) {
+        let err = ClickHouseNativeEncoder::<()>::block_of(schema(&[("id", "UInt32")]), &[row])
+            .expect_err("a row that is not a struct or tuple");
+        assert!(matches!(err, super::NativeError::NotARow), "{err:?}");
+    }
+    refused(true);
+    refused(1i8);
+    refused(1i16);
+    refused(1i32);
+    refused(1i64);
+    refused(1i128);
+    refused(1u8);
+    refused(1u16);
+    refused(1u32);
+    refused(1u64);
+    refused(1u128);
+    refused(1f32);
+    refused(1f64);
+    refused('x');
+    refused("x");
+    refused(Raw(b"x"));
+    refused(None::<u32>);
+    refused(Some(1u32));
+    refused(());
+    refused(Unit);
+    refused(Variant::Unit);
+    refused(Variant::Newtype(1));
+}
+
 #[test]
 fn zero_rows_produce_no_bytes() {
     #[derive(Serialize)]

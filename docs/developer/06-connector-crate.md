@@ -290,6 +290,7 @@ A sink leaves out `batch`, `inflight`, `retry` and `breaker` and passes a defaul
 
 A feed backend that cannot honor one of the framework's `feed:` keys refuses it in `Feed::check_section`.
 The runtime calls that method on every feed before the source opens, so the refusal also reaches a feed that code built from a config.
+A lister run calls it on the feed it publishes to, so a backend with a separate publish-only handle refuses the same keys there.
 
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 

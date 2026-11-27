@@ -433,7 +433,9 @@ A backend also answers to its name in the `feed:` section:
   not yours. Decode your own keys from the section's backend body.
 - Refuse a common key your backend cannot honor in `check_section`. The
   runtime calls it before the source opens, on a feed built from the section
-  and on one that code passed in. Refuse the same keys when you build from the
+  and on one that code passed in. A lister run such as `S3Source::list_once`
+  calls it on the feed it publishes to, so implement it on a separate
+  publish-only handle too. Refuse the same keys when you build from the
   section, since code can build the backend without a pipeline.
 
 The in-process feed,

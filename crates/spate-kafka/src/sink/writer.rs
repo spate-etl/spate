@@ -20,6 +20,7 @@
 //! producer's latest SASL or TLS rejection by a broker is inside the
 //! rejection window, and its reason carries the rejection's text.
 
+use crate::error::classify_producer_error;
 use crate::sink::context::{BatchInflight, SinkContext};
 use crate::sink::frame::{FrameParser, MessageRef};
 use crate::sink::metrics::KafkaProducerStatsMetrics;
@@ -29,7 +30,7 @@ use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, Producer, ThreadedProducer};
 use spate_core::backoff::Backoff;
 use spate_core::clock::tokio::Clock as IoClock;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::sink::{SealedBatch, ShardWriter, SinkMetricsCtx};
 use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
@@ -257,7 +258,7 @@ impl ShardWriter for KafkaWriter {
                         record = returned;
                     }
                     Err((error, _returned)) => {
-                        return Err(classify(
+                        return Err(producer_error(
                             error.rdkafka_error_code(),
                             &format!("produce to \"{}\" failed: {error}", self.topic),
                         ));
@@ -312,7 +313,9 @@ impl ShardWriter for KafkaWriter {
             let metadata = producer
                 .client()
                 .fetch_metadata(Some(&topic), PROBE_TIMEOUT)
-                .map_err(|e| classify(e.rdkafka_error_code(), &format!("metadata fetch: {e}")))?;
+                .map_err(|e| {
+                    producer_error(e.rdkafka_error_code(), &format!("metadata fetch: {e}"))
+                })?;
             let Some(meta) = metadata.topics().iter().find(|t| t.name() == topic) else {
                 return Err(SinkError::retryable(format!(
                     "metadata response omitted topic \"{topic}\""
@@ -320,7 +323,7 @@ impl ShardWriter for KafkaWriter {
             };
             if let Some(err) = meta.error() {
                 let code: RDKafkaErrorCode = err.into();
-                return Err(classify(
+                return Err(producer_error(
                     Some(code),
                     &format!("topic \"{topic}\" metadata error: {code}"),
                 ));
@@ -349,9 +352,11 @@ impl ShardWriter for KafkaWriter {
 
 /// Map a failed delivery report onto the framework taxonomy.
 ///
-/// A `MessageTimedOut` report is [`ErrorClass::Fatal`] when `rejection`, the
-/// age and text of a rejection by a broker, is present, and its reason ends
-/// with that rejection. Any other report defers to [`classify`].
+/// A `MessageTimedOut` report is
+/// [`ErrorClass::Fatal`](spate_core::error::ErrorClass::Fatal) when
+/// `rejection`, the age and text of a rejection by a broker, is present, and
+/// its reason ends with that rejection. Any other report defers to
+/// [`producer_error`].
 fn report_error(
     code: Option<RDKafkaErrorCode>,
     reason: &str,
@@ -361,7 +366,7 @@ fn report_error(
         Some(rejection) if code == Some(RDKafkaErrorCode::MessageTimedOut) => {
             SinkError::fatal(with_rejection(reason, &rejection))
         }
-        _ => classify(code, reason),
+        _ => producer_error(code, reason),
     }
 }
 
@@ -370,18 +375,12 @@ fn with_rejection(reason: &str, (age, text): &(Duration, String)) -> String {
     format!("{reason}; a broker rejected the connection {age:?} ago: {text}")
 }
 
-/// Map a produce/report error onto the framework taxonomy.
-///
-/// Fatal covers what retrying cannot heal: authorization and configuration
-/// errors, an unknown topic, a message the broker's limits reject, and the
-/// idempotent producer's fenced/fatal states (retrying those would spin
-/// until the stalled-watermark deadline instead of surfacing the cause).
-/// Everything else (transport failures, timeouts, purges, and unknown codes)
-/// is retryable: with idempotence enabled a re-produce is safe in-session,
-/// and a batch replay costs duplicates, never loss.
-fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
+/// A failed produce or delivery report as a [`SinkError`], classed by
+/// [`classify_producer_error`], with the remedy for an unknown topic or an
+/// oversized message added to `reason`.
+fn producer_error(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
     use RDKafkaErrorCode as C;
-    let class = report_class(code);
+    let class = classify_producer_error(code);
     let reason = match code {
         Some(C::UnknownTopicOrPartition) => format!(
             "{reason} — the topic does not exist (create it, or check the \
@@ -397,31 +396,13 @@ fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
     SinkError::from_class(class, reason)
 }
 
-/// The class of a failed produce or delivery report, by [`classify`]'s
-/// table.
-pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
-    use RDKafkaErrorCode as C;
-    match code {
-        Some(
-            C::UnknownTopicOrPartition
-            | C::TopicAuthorizationFailed
-            | C::Authentication
-            | C::SaslAuthenticationFailed
-            | C::InvalidRequiredAcks
-            | C::MessageSizeTooLarge
-            | C::PolicyViolation,
-        ) => ErrorClass::Fatal,
-        Some(code) if crate::error::ends_idempotent_producer(code) => ErrorClass::Fatal,
-        _ => ErrorClass::Retryable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sink::context::tests::on_test_clock;
     use crate::sink::frame::write_message;
     use spate_core::clock::tokio::SystemClock as IoSystemClock;
+    use spate_core::error::ErrorClass;
     use spate_core::metrics::Meter;
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
@@ -458,7 +439,7 @@ mod tests {
         ];
         for code in fatal {
             assert_eq!(
-                classify(Some(code), "x").class(),
+                producer_error(Some(code), "x").class(),
                 ErrorClass::Fatal,
                 "{code:?} must be fatal"
             );
@@ -477,22 +458,22 @@ mod tests {
         ];
         for code in retryable {
             assert_eq!(
-                classify(Some(code), "x").class(),
+                producer_error(Some(code), "x").class(),
                 ErrorClass::Retryable,
                 "{code:?} must be retryable"
             );
         }
         // Unknown / uncoded errors stay retryable (conservative: replays
         // duplicate, never lose).
-        assert_eq!(classify(None, "x").class(), ErrorClass::Retryable);
+        assert_eq!(producer_error(None, "x").class(), ErrorClass::Retryable);
     }
 
     #[test]
     fn classify_actionable_messages() {
-        let err = classify(Some(RDKafkaErrorCode::UnknownTopicOrPartition), "ctx");
+        let err = producer_error(Some(RDKafkaErrorCode::UnknownTopicOrPartition), "ctx");
         assert!(err.reason().contains("topic"), "actionable: {err}");
 
-        let err = classify(Some(RDKafkaErrorCode::MessageSizeTooLarge), "ctx");
+        let err = producer_error(Some(RDKafkaErrorCode::MessageSizeTooLarge), "ctx");
         assert!(
             err.reason().contains("max_message_bytes"),
             "actionable: {err}"

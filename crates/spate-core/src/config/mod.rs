@@ -58,7 +58,7 @@
 //! assert_eq!(cfg.pipeline.name, "demo");
 //! assert_eq!(cfg.pipeline.io_threads, 2);                    // default
 //! assert_eq!(cfg.checkpoint.max_pending_batches, 1024);      // default
-//! assert_eq!(cfg.source.type_tag(), "memory");
+//! assert_eq!(cfg.source.component_type(), "memory");
 //! ```
 
 mod chunk;
@@ -511,7 +511,7 @@ impl PipelineConfig {
     /// cfg.checkpoint.interval = Duration::from_secs(10);
     /// cfg.validate()?;
     ///
-    /// assert_eq!(cfg.sink_config("default")?.type_tag(), "memory");
+    /// assert_eq!(cfg.sink_config("default")?.component_type(), "memory");
     /// # Ok::<(), spate_core::config::ConfigError>(())
     /// ```
     #[must_use]
@@ -582,7 +582,7 @@ impl PipelineConfig {
     /// .with_deserializer(ComponentConfig::new("json", body()));
     ///
     /// assert_eq!(
-    ///     cfg.deserializer.as_ref().map(ComponentConfig::type_tag),
+    ///     cfg.deserializer.as_ref().map(ComponentConfig::component_type),
     ///     Some("json")
     /// );
     /// ```
@@ -746,7 +746,12 @@ impl PipelineConfig {
             }
         }
         self.reject_body_chunk()?;
-        self.reject_keys_on_memory()?;
+        // The runtime asks the feed itself through `Feed::check_section`.
+        if let Some(feed) = &self.feed
+            && feed.backend().component_type() == memory::COMPONENT_TYPE
+        {
+            memory::refuse_section_keys(feed)?;
+        }
         self.reject_bad_settling_window()?;
         // Resolve every declared sink's framework blocks now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
@@ -781,7 +786,7 @@ impl PipelineConfig {
                     "chunk",
                     format!(
                         "`chunk:` sits beside `{}:` in the sink section, not inside it",
-                        backend.type_tag()
+                        backend.component_type()
                     ),
                 ));
             }
@@ -794,18 +799,6 @@ impl PipelineConfig {
         let single = self.sink.iter().map(|s| ("default", s));
         let named = self.sinks.iter().flatten().map(|(n, s)| (n.as_str(), s));
         single.chain(named)
-    }
-
-    /// Reject the `feed:` keys the in-process feed cannot honor. Split out of
-    /// [`validate`](Self::validate) so the runtime, which a programmatic
-    /// config reaches without validation, enforces it too.
-    pub(crate) fn reject_keys_on_memory(&self) -> Result<(), ConfigError> {
-        match &self.feed {
-            Some(feed) if feed.backend().type_tag() == memory::BACKEND => {
-                memory::refuse_section_keys(feed)
-            }
-            _ => Ok(()),
-        }
     }
 
     /// Reject a `checkpoint.interval` or `checkpoint.drain_timeout` above a
@@ -838,7 +831,7 @@ impl PipelineConfig {
     /// a deadline. Split out of [`validate`](Self::validate) so the runtime,
     /// which a programmatic config reaches without validation, enforces it
     /// too. It passes an in-range window on the in-process feed, which
-    /// [`reject_keys_on_memory`](Self::reject_keys_on_memory) refuses.
+    /// refuses any window itself.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
         const SETTLING_WINDOW: DurationBounds =
             DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL).at_most(ONE_DAY);
@@ -1311,7 +1304,10 @@ sink: { memory: {} }
         assert!(PipelineConfig::from_str(base).unwrap().feed.is_none());
 
         let cfg = PipelineConfig::from_str(&format!("{base}feed:\n  memory: {{}}\n")).unwrap();
-        assert_eq!(cfg.feed.expect("section").backend().type_tag(), "memory");
+        assert_eq!(
+            cfg.feed.expect("section").backend().component_type(),
+            "memory"
+        );
 
         let err = PipelineConfig::from_str(&format!("{base}feed: {{ units_held: 2 }}\n"))
             .unwrap_err()
@@ -1378,9 +1374,12 @@ metrics: { exporter: prometheus }
 "#;
         let cfg = PipelineConfig::from_str(yaml).unwrap();
         assert_eq!(cfg.pipeline.threads, Some(4));
-        assert_eq!(cfg.source.type_tag(), "kafka");
-        assert_eq!(cfg.deserializer.as_ref().unwrap().type_tag(), "avro");
-        assert_eq!(cfg.sink_config("default").unwrap().type_tag(), "clickhouse");
+        assert_eq!(cfg.source.component_type(), "kafka");
+        assert_eq!(cfg.deserializer.as_ref().unwrap().component_type(), "avro");
+        assert_eq!(
+            cfg.sink_config("default").unwrap().component_type(),
+            "clickhouse"
+        );
 
         // Interpolated default landed inside the opaque body, and the kafka
         // body carries the required group_id.
@@ -1436,7 +1435,10 @@ metrics: { exporter: prometheus }
     fn single_sink_resolves_as_default() {
         let cfg = PipelineConfig::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.sink_names(), vec!["default".to_string()]);
-        assert_eq!(cfg.sink_config("default").unwrap().type_tag(), "memory");
+        assert_eq!(
+            cfg.sink_config("default").unwrap().component_type(),
+            "memory"
+        );
         assert!(cfg.sink_config("other").is_err());
     }
 
@@ -1454,8 +1456,14 @@ sinks:
             cfg.sink_names(),
             vec!["type_a".to_string(), "type_b".to_string()]
         );
-        assert_eq!(cfg.sink_config("type_a").unwrap().type_tag(), "memory");
-        assert_eq!(cfg.sink_config("type_b").unwrap().type_tag(), "memory");
+        assert_eq!(
+            cfg.sink_config("type_a").unwrap().component_type(),
+            "memory"
+        );
+        assert_eq!(
+            cfg.sink_config("type_b").unwrap().component_type(),
+            "memory"
+        );
         // The single-sink alias is not present in a `sinks:` config.
         assert!(cfg.sink_config("default").is_err());
     }

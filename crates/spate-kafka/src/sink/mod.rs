@@ -35,7 +35,7 @@ pub use encoder::{
     BytesKeyFn, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KeyFn,
     MessageEncoder,
 };
+pub(crate) use writer::owned_headers;
 pub use writer::{KafkaEndpoint, KafkaWriter};
 #[cfg(feature = "testing")]
 pub(crate) use writer::{message_headers, parse_messages};
-pub(crate) use writer::{owned_headers, report_class};

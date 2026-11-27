@@ -2,7 +2,8 @@
 //! it stops, and the stalled check on a real bounded job.
 
 use spate_core::clock::tokio::TestClock;
-use spate_core::config::PipelineConfig;
+use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{DepthOf, Feed, FeedErrorKind, Unit, wake_channel};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_json::JsonLinesFramer;
@@ -42,7 +43,7 @@ fn acknowledged(script: &FeedScript, n: usize) {
 fn the_recording_passes_each_call_on_and_records_it() {
     let (feed, script) = scripted_feed();
     let recording = Recording::new(Arc::new(feed));
-    assert_eq!(recording.backend(), "scripted");
+    assert_eq!(recording.component_type(), "scripted");
     let first = script.deliver(Unit::new("a", b"a".to_vec()));
     let before = Instant::now();
     assert_eq!(recording.receive(8).unwrap().len(), 1);
@@ -83,6 +84,15 @@ fn the_recording_passes_each_call_on_and_records_it() {
 }
 
 /// The waker reaches the feed, which signals it for a unit already queued.
+#[test]
+fn the_recording_passes_the_section_check_on() {
+    let recording = Recording::new(Arc::new(MemoryFeed::new()));
+    let section: FeedSection =
+        serde_yaml::from_str("memory: {}\nlocation: s3://ops/jobs/1/").expect("section");
+    let err = recording.check_section(&section).unwrap_err().to_string();
+    assert!(err.contains("`feed.location`"), "{err}");
+}
+
 #[test]
 fn the_recording_passes_the_waker_on() {
     let (feed, script) = scripted_feed();
@@ -286,7 +296,7 @@ fn the_pipeline_file_carries_each_section() {
     );
     assert!(config.feed.is_some());
     let feed: PipelineConfigFeed = serde_yaml::from_str(SCRIPTED).unwrap();
-    assert_eq!(feed.feed.backend().type_tag(), "scripted");
+    assert_eq!(feed.feed.backend().component_type(), "scripted");
 }
 
 // ------------------------------------------------------------ stalled --

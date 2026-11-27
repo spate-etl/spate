@@ -15,6 +15,7 @@ use crate::pipeline::runtime::{RuntimeOptions, ShutdownHandle};
 use crate::record::{PartitionId, RawPayload};
 use crate::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
+    SourceMetricsCtx,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
@@ -48,10 +49,14 @@ pub(crate) struct SourceLog {
     pub(crate) opened: bool,
     /// The contract `framing_contract` reports; `None` is `PerRecord`.
     pub(crate) framing: Option<crate::framing::FramingContract>,
-    /// Whether `open` received the framework's source-stage handles. Guards
-    /// the seam a source publishes consumer lag through; if the handles never
-    /// arrive, the lag gauge renders a permanent zero on every pipeline.
-    pub(crate) stage_metrics_attached: bool,
+    /// What each `attach_metrics` call carried. Guards the seam a source
+    /// publishes consumer lag through; if the stage handles never arrive, the
+    /// lag gauge renders a permanent zero on every pipeline.
+    pub(crate) metrics_attached: Vec<MetricsAttached>,
+    /// `attach_metrics`, `configure_feed` and `open`, in the order called.
+    pub(crate) hooks: Vec<&'static str>,
+    /// The `component_type` the source reports; `None` is the trait default.
+    pub(crate) component_type: Option<&'static str>,
     /// The thread count `open` received.
     pub(crate) threads: Option<NonZeroUsize>,
     /// Lanes that report `finished` from the empty poll after their last
@@ -159,7 +164,15 @@ pub(crate) struct LaneSpec {
 pub(crate) type SharedLog = Arc<Mutex<SourceLog>>;
 pub(crate) type SharedScript = Arc<Mutex<VecDeque<Script>>>;
 
-/// The lag `FakeSource` publishes for partition 0 at `open`. Distinctive so a
+/// What one [`Source::attach_metrics`] call handed `FakeSource`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MetricsAttached {
+    pub(crate) meter: bool,
+    pub(crate) stage_metrics: bool,
+    pub(crate) per_partition_detail: bool,
+}
+
+/// The lag `FakeSource` publishes for partition 0 in `attach_metrics`. Distinctive so a
 /// test can prove it came from this source and not a registration default.
 pub(crate) const FAKE_SOURCE_LAG: u64 = 4242;
 
@@ -190,6 +203,36 @@ impl FakeSource {
 impl Source for FakeSource {
     type Lane = FakeLane;
 
+    fn component_type(&self) -> &str {
+        self.shared
+            .lock()
+            .unwrap()
+            .component_type
+            .unwrap_or("source")
+    }
+
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        {
+            let mut log = self.shared.lock().unwrap();
+            log.hooks.push("attach_metrics");
+            log.metrics_attached.push(MetricsAttached {
+                meter: cx.meter.is_some(),
+                stage_metrics: cx.stage_metrics.is_some(),
+                per_partition_detail: cx.per_partition_detail,
+            });
+        }
+        if let Some(meter) = &cx.meter {
+            meter.counter("attached_total", &[]).increment(1);
+        }
+        // Publish a lag figure like a real source would, so a test can tell
+        // whether the handle set it was given owns the series. Only the owner
+        // registers a per-partition gauge; a shadow's write is dropped and the
+        // series never appears.
+        if let Some(m) = &cx.stage_metrics {
+            m.set_partition_lag(PartitionId(0), FAKE_SOURCE_LAG);
+        }
+    }
+
     // `PerRecord` unless a test sets another, so tests can tell the source's
     // own contract from the trait default.
     fn framing_contract(&self) -> crate::framing::FramingContract {
@@ -203,22 +246,15 @@ impl Source for FakeSource {
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         {
             let mut log = self.shared.lock().unwrap();
+            log.hooks.push("open");
             if log.fail_open {
                 return Err(SourceError::fatal("scripted open failure"));
             }
             log.opened = true;
-            log.stage_metrics_attached = ctx.stage_metrics.is_some();
             log.threads = ctx.threads;
             if let Some((clock, by)) = &log.advance_in_open {
                 clock.advance(*by);
             }
-        }
-        // Publish a lag figure like a real source would, so a test can tell
-        // whether the handle set it was given owns the series. Only the owner
-        // registers a per-partition gauge; a shadow's write is dropped and the
-        // series never appears.
-        if let Some(m) = &ctx.stage_metrics {
-            m.set_partition_lag(PartitionId(0), FAKE_SOURCE_LAG);
         }
         self.issuer = Some(ctx.issuer);
         self.stop = ctx.stop;
@@ -388,6 +424,7 @@ impl Source for FakeSource {
         origin: crate::feed::FeedOrigin,
     ) -> Result<(), crate::config::ConfigError> {
         let _ = section;
+        self.shared.lock().unwrap().hooks.push("configure_feed");
         self.shared.lock().unwrap().feed_origin = Some(origin);
         self.shared.lock().unwrap().feed = Some(feed);
         if self.shared.lock().unwrap().accept_feed {
@@ -590,7 +627,7 @@ impl HandingBack {
 }
 
 impl crate::feed::Feed for HandingBack {
-    fn backend(&self) -> &str {
+    fn component_type(&self) -> &str {
         self.backend
     }
 

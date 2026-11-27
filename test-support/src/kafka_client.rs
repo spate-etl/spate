@@ -1,7 +1,7 @@
 //! What a test does to a broker through a Kafka client: create topics and
 //! wait until the broker lists them, produce records, and read a group's
 //! committed offsets, a partition's high watermark, a topic's partition count
-//! or a topic from its start. A reader named `_once` makes one call, for a
+//! or a topic from its start. A reader named `_once` reads once, for a
 //! caller whose own wait reads again.
 
 use std::time::{Duration, Instant};
@@ -211,7 +211,8 @@ fn committed_read(topic: &str) -> String {
 }
 
 /// The high watermark of `partition` of `topic`, at the isolation level of
-/// `consumer`'s settings. A failed answer is read again until `bound` passes.
+/// `consumer`'s settings, each read asking for the topic's metadata first. A
+/// failed answer is read again until `bound` passes.
 ///
 /// # Errors
 ///
@@ -231,9 +232,10 @@ where
     })
 }
 
-/// [`high_watermark`] as one client call of at most 10 s, for a caller whose
-/// own wait reads again. librdkafka sends a request for each watermark in
-/// that call and retries some refusals inside it.
+/// [`high_watermark`] as one read of at most 10 s, for a caller whose own
+/// wait reads again: a metadata request for the topic, then one watermark
+/// call. librdkafka sends a request for each watermark in that call and
+/// retries some refusals inside it.
 ///
 /// # Errors
 ///
@@ -249,7 +251,9 @@ where
     )
 }
 
-/// The high watermark of one watermark call, waiting at most `timeout`.
+/// The high watermark of one watermark call, after a metadata request for
+/// `topic`, the two together waiting at most `timeout`. The metadata answer
+/// is not read: any failure comes from the watermark call.
 fn high_within<C, K>(
     consumer: &K,
     topic: &str,
@@ -260,8 +264,12 @@ where
     C: ConsumerContext,
     K: Consumer<C>,
 {
+    let deadline = Instant::now() + timeout;
+    // librdkafka answers a partition its cache holds with no leader from that
+    // cache, without asking the broker again.
+    let _ = consumer.fetch_metadata(Some(topic), timeout);
     consumer
-        .fetch_watermarks(topic, partition, timeout)
+        .fetch_watermarks(topic, partition, request_bound(deadline, Instant::now()))
         .map(|(_, high)| high)
 }
 
@@ -878,6 +886,18 @@ mod tests {
             Ok(vec![Offset::Offset(3)])
         );
         assert_eq!(high_watermark(&reader, "units", 0, HANG), Ok(2));
+    }
+
+    #[test]
+    fn a_read_again_answers_once_a_leaderless_partition_has_a_leader() {
+        let (holder, brokers) = mock_with("units", 1);
+        let cluster = holder.client().mock_cluster().unwrap();
+        cluster.partition_leader("units", 0, None).unwrap();
+        let reader = consumer(&brokers, &[]).unwrap();
+        let leaderless = high_watermark_once(&reader, "units", 0).unwrap_err();
+        assert!(leaderless.contains("UnknownPartition"), "{leaderless}");
+        cluster.partition_leader("units", 0, Some(1)).unwrap();
+        assert_eq!(high_watermark(&reader, "units", 0, HANG), Ok(0));
     }
 
     #[test]

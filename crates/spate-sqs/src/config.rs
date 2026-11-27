@@ -11,7 +11,7 @@ use std::time::Duration;
 use url::Url;
 
 /// The key that names this backend in a `feed:` section.
-pub(crate) const BACKEND: &str = "sqs";
+pub(crate) const COMPONENT_TYPE: &str = "sqs";
 
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "SQS";
@@ -53,7 +53,7 @@ const URL: UrlRule<'static> =
 /// `http` or `https` URL, or carries userinfo.
 pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
     URL.check(queue_url)
-        .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", e.to_string()))
+        .map_err(|e| SectionPath::feed(COMPONENT_TYPE).invalid("queue_url", e.to_string()))
 }
 
 /// The keys under `feed: { sqs: … }`.
@@ -102,10 +102,10 @@ impl fmt::Debug for SqsFeedConfig {
 impl SqsFeedConfig {
     /// Decode and check the `sqs:` body of `section`.
     pub(crate) fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
-        let config: SqsFeedConfig = section.backend_body(BACKEND, NAME)?;
+        let config: SqsFeedConfig = section.backend_body(COMPONENT_TYPE, NAME)?;
         // Both keys sit beside `sqs:`, so the refusal names the backend that
         // refuses them.
-        let at = SectionPath::feed(BACKEND);
+        let at = SectionPath::feed(COMPONENT_TYPE);
         if section.attempt_cap.is_some() {
             return Err(at.error(
                 "`attempt_cap` does not apply to `sqs`: SQS counts deliveries through the \
@@ -124,7 +124,7 @@ impl SqsFeedConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        let at = SectionPath::feed(BACKEND);
+        let at = SectionPath::feed(COMPONENT_TYPE);
         check_duration(self.visibility, VISIBILITY)
             .map_err(|e| at.invalid("visibility", e.to_string()))?;
         let url = queue_url(&self.queue_url)?;

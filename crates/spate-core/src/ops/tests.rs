@@ -51,6 +51,10 @@ impl RecFamily for SubF {
 struct LogDeser;
 
 impl Deserializer<LogF> for LogDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -89,6 +93,10 @@ impl Deserializer<LogF> for LogDeser {
 struct EmitThenFailDeser;
 
 impl Deserializer<SubF> for EmitThenFailDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -322,6 +330,10 @@ fn decode_block(frame: &[u8]) -> Vec<Vec<u8>> {
 struct OwnedPassthrough;
 
 impl Deserializer<Owned<Vec<u8>>> for OwnedPassthrough {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -342,6 +354,10 @@ impl Deserializer<Owned<Vec<u8>>> for OwnedPassthrough {
 struct RefusesPerRecord;
 
 impl Deserializer<Owned<Vec<u8>>> for RefusesPerRecord {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -2483,39 +2499,22 @@ fn a_deserializer_receives_a_meter_scoped_and_labeled_like_its_stage() {
     );
 }
 
+/// Pins the type the shipped `BytesPassthrough` declares, which labels its
+/// chain's deserializer stage.
 #[test]
-fn a_deserializer_that_declares_no_type_labels_its_stage_deserializer() {
+fn a_passthrough_deserializer_labels_its_stage_passthrough() {
     let rendered = crate::metrics::render_local(|| {
-        let _chain =
-            chain_owned::<Vec<u8>, _>(OwnedPassthrough).with_metrics("deser-untyped", "main");
+        let _chain = chain_owned::<Vec<u8>, _>(crate::deser::BytesPassthrough)
+            .with_metrics("deser-passthrough", "main");
     });
     assert!(
         !spate_test::metric_series(
             &rendered,
             names::DESER_RECORDS_TOTAL,
             &[
-                ("pipeline", "deser-untyped"),
+                ("pipeline", "deser-passthrough"),
                 ("component", "main.deserializer"),
-                ("component_type", "deserializer"),
-            ],
-        )
-        .is_empty(),
-        "{rendered}"
-    );
-}
-
-#[test]
-fn an_undeclared_deserializer_gets_no_meter_and_keeps_the_default_label() {
-    let (received, rendered) = chain_with_typed_deser("deser-default", names::DESERIALIZER_DEFAULT);
-    assert_eq!(received, Some(false), "{rendered}");
-    assert!(
-        !spate_test::metric_series(
-            &rendered,
-            names::DESER_RECORDS_TOTAL,
-            &[
-                ("pipeline", "deser-default"),
-                ("component", "main.deserializer"),
-                ("component_type", "deserializer"),
+                ("component_type", "passthrough"),
             ],
         )
         .is_empty(),
@@ -2955,6 +2954,10 @@ struct FlakyDeser {
 }
 
 impl Deserializer<LogF> for FlakyDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -3110,6 +3113,10 @@ struct FatalDeser {
 }
 
 impl Deserializer<LogF> for FatalDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -3180,6 +3187,10 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
 struct SchemaUnavailableDeser;
 
 impl Deserializer<LogF> for SchemaUnavailableDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

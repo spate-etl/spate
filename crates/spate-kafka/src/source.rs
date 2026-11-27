@@ -139,7 +139,7 @@ use spate_core::error::{ErrorClass, SourceError};
 use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
-use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
 use spate_core::telemetry::RateLimit;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -350,10 +350,15 @@ pub struct KafkaSource {
     /// One per [`KafkaSourceConfig::consumers`], created at `open`.
     members: Vec<Member>,
     issuer: Option<AckIssuer>,
-    /// The framework's source-stage handles, shared by the runtime at `open`.
-    /// Only consumer lag is published through them; the runtime records
-    /// everything else. `None` when the source is driven outside a pipeline.
+    /// The framework's source-stage handles, shared by the runtime through
+    /// `attach_metrics`. Only consumer lag is published through them; the
+    /// runtime records everything else. `None` when the source is driven
+    /// outside a pipeline.
     metrics: Option<Arc<SourceMetrics>>,
+    /// One statistics translator per consumer, resolved in `attach_metrics`
+    /// and handed to the members at `open`. Empty without a `Meter` or with
+    /// statistics off.
+    consumer_stats: Vec<KafkaConsumerStatsMetrics>,
     next_lane: u32,
     /// Any consumer has accepted an assignment, empty or not.
     saw_first_assignment: bool,
@@ -516,6 +521,7 @@ impl KafkaSource {
             members: Vec::new(),
             issuer: None,
             metrics: None,
+            consumer_stats: Vec::new(),
             next_lane: 0,
             saw_first_assignment: false,
             after_drain: None,
@@ -2070,7 +2076,37 @@ impl Source for KafkaSource {
     type Lane = KafkaLane;
 
     fn component_type(&self) -> &str {
-        "kafka"
+        crate::client::COMPONENT_TYPE
+    }
+
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        self.metrics = cx.stage_metrics;
+        // Registered only when statistics are enabled. With
+        // `statistics_interval: 0s` librdkafka never emits a snapshot, so
+        // registering the families would leave them frozen at their unset
+        // default forever (e.g. `group_healthy 0`, a documented alert signal).
+        // `absolute()`-mapped counters are scoped to a consumer's lifetime,
+        // which is sound because `open` creates each consumer exactly once
+        // (see the `metrics` module docs).
+        let Some(meter) = cx
+            .meter
+            .filter(|_| !self.config.statistics_interval.is_zero())
+        else {
+            return;
+        };
+        let mut stats = Vec::new();
+        // `open` refuses a consumer count it cannot allocate.
+        if stats.try_reserve_exact(self.config.consumers).is_err() {
+            return;
+        }
+        stats.extend((0..self.config.consumers).map(|k| {
+            KafkaConsumerStatsMetrics::for_source_consumer(
+                meter.clone(),
+                cx.per_partition_detail,
+                crate::config::Consumer::member(&self.config, k).1,
+            )
+        }));
+        self.consumer_stats = stats;
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
@@ -2079,9 +2115,8 @@ impl Source for KafkaSource {
         }
         crate::security::warn_sasl_plaintext(
             &self.config.rdkafka,
-            &SectionPath::source(crate::client::TAG),
+            &SectionPath::source(crate::client::COMPONENT_TYPE),
         );
-        self.metrics = ctx.stage_metrics.clone();
         if self.config.statistics_interval.is_zero() {
             // Consumer lag is derived from the statistics snapshot and has no
             // other source, so disabling statistics removes a golden signal
@@ -2099,12 +2134,12 @@ impl Source for KafkaSource {
         members
             .try_reserve_exact(self.config.consumers)
             .map_err(|_| {
-                let at = SectionPath::source(crate::client::TAG);
+                let at = SectionPath::source(crate::client::COMPONENT_TYPE);
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
         let ca_pem = crate::security::ca_bundle(&self.config.tls).map_err(|why| {
-            let at = SectionPath::source(crate::client::TAG);
+            let at = SectionPath::source(crate::client::COMPONENT_TYPE);
             SourceError::fatal(at.invalid("tls.root_ca", why).to_string())
         })?;
         let base = self
@@ -2121,27 +2156,10 @@ impl Source for KafkaSource {
         } else {
             self.config.misplaced_partition_timeout
         };
+        let mut consumer_stats = std::mem::take(&mut self.consumer_stats).into_iter();
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
-            // Resolve the connector-owned metric handles once, before the
-            // poll loop, and only when statistics are enabled. With
-            // `statistics_interval: 0s` librdkafka never emits a snapshot, so
-            // registering the families would leave them frozen at their unset
-            // default forever (e.g. `group_healthy 0`, a documented alert
-            // signal). `absolute()`-mapped counters are scoped to this
-            // consumer's lifetime, which is sound because open() creates each
-            // consumer exactly once (see the `metrics` module docs).
-            let stats = if self.config.statistics_interval.is_zero() {
-                None
-            } else {
-                ctx.meter.as_ref().map(|m| {
-                    KafkaConsumerStatsMetrics::for_source_consumer(
-                        m.clone(),
-                        ctx.per_partition_detail,
-                        role.1,
-                    )
-                })
-            };
+            let stats = consumer_stats.next();
             let consumer: BaseConsumer<SourceContext> = base
                 .create(&role, SourceHooks::default())
                 .map_err(|reason| SourceError::fatal(format!("create consumer: {reason}")))?;
@@ -3995,12 +4013,18 @@ mod tests {
         }
 
         /// `open` refuses a consumer count it cannot allocate with an error
-        /// naming the key.
+        /// naming the key, after `attach_metrics` with statistics on.
         #[test]
         fn open_refuses_a_count_it_cannot_allocate() {
             let mut config = test_config();
             config.consumers = usize::MAX;
+            config.statistics_interval = Duration::from_secs(1);
             let mut source = KafkaSource::new(config).expect("the config validates");
+            // `attach_metrics` resolves one statistics set per consumer, and
+            // leaves a count it cannot allocate for `open` to refuse.
+            source.attach_metrics(SourceMetricsCtx::new(Some(
+                spate_core::metrics::Meter::with_namespace("kafka", "orders", "source", "kafka"),
+            )));
             let cp = Checkpointer::new();
             match source.open(SourceCtx::new(cp.handle())) {
                 Err(e) => {

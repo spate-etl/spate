@@ -4,4 +4,4 @@
 # a server change reaches CI first. The version matrix runs no separate job while
 # it resolves to the same image as the `lts` lane. ../README.md has the account.
 
-FROM clickhouse/clickhouse-server:26.10.3.7@sha256:739e099abd1157390960a59e4532d21781d8fde57e6e4151cb920ea02c30b1ce
+FROM clickhouse/clickhouse-server:26.10.8.34@sha256:cb030c0616aa80d8daf03033ba68d6297a1c86735b142a8e82b96f4cf119ec98

@@ -18,7 +18,7 @@ use spate_core::config::{ComponentConfig, ConfigError};
 use spate_core::error::SourceError;
 use spate_core::framing::FramingContract;
 use spate_core::record::PartitionId;
-use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -48,6 +48,9 @@ pub struct DatagenSource {
     drained: bool,
     /// Times every lane's rate gate.
     clock: SyncClock,
+    /// The source's own handles, resolved in `attach_metrics` and moved into
+    /// the open state at `open`.
+    metrics: Option<DatagenSourceMetrics>,
 }
 
 impl DatagenSource {
@@ -75,6 +78,7 @@ impl DatagenSource {
             handed_out: false,
             drained: false,
             clock: SyncClock::system(),
+            metrics: None,
         })
     }
 
@@ -120,13 +124,19 @@ impl Source for DatagenSource {
     type Lane = DatagenLane;
 
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn framing_contract(&self) -> FramingContract {
         // One event per payload, always. The generator writes the frames, so
         // there is nothing for a deserializer to split.
         FramingContract::PerRecord
+    }
+
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        self.metrics = cx.meter.as_ref().map(|meter| {
+            DatagenSourceMetrics::new(meter, self.config.partitions, cx.per_partition_detail)
+        });
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
@@ -145,9 +155,7 @@ impl Source for DatagenSource {
             issuer: ctx.issuer,
             shared: Arc::new(Shared::new(partitions, budgets.as_deref())),
             encoder: Arc::new(Encoder::new(self.config.encoding)?),
-            metrics: ctx.meter.as_ref().map(|meter| {
-                DatagenSourceMetrics::new(meter, self.config.partitions, ctx.per_partition_detail)
-            }),
+            metrics: self.metrics.take(),
             budgets,
         });
         Ok(())
@@ -304,9 +312,8 @@ mod tests {
         meter: Option<Meter>,
     ) -> (DatagenSource, Checkpointer, Vec<DatagenLane>) {
         let cp = Checkpointer::new();
-        source
-            .open(SourceCtx::new(cp.handle()).with_meter(meter))
-            .unwrap();
+        source.attach_metrics(SourceMetricsCtx::new(meter));
+        source.open(SourceCtx::new(cp.handle())).unwrap();
         let SourceEvent::LanesAssigned(lanes) = source.poll_events(POLL).unwrap() else {
             panic!("the first poll assigns every lane");
         };

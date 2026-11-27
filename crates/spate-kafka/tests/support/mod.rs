@@ -18,6 +18,7 @@ use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
+    SourceMetricsCtx,
 };
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
@@ -310,7 +311,7 @@ pub(crate) fn log_end(brokers: &str, topic: &str, partition: i32) -> i64 {
     high_watermark(brokers, topic, partition, "read_uncommitted")
 }
 
-/// [`log_end`] as one client call, for a caller whose own wait reads again.
+/// [`log_end`] as one read, for a caller whose own wait reads again.
 pub(crate) fn log_end_once(brokers: &str, topic: &str, partition: i32) -> Result<i64, String> {
     high_watermark_once(brokers, topic, partition, "read_uncommitted")
 }
@@ -340,7 +341,7 @@ fn high_watermark(brokers: &str, topic: &str, partition: i32, isolation: &str) -
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// [`high_watermark`] as one client call.
+/// [`high_watermark`] as one read.
 fn high_watermark_once(
     brokers: &str,
     topic: &str,
@@ -712,16 +713,12 @@ impl Watched {
         let lanes = metrics::with_local_recorder(&recorder, || {
             let labels =
                 spate_core::metrics::ComponentLabels::new(pipeline.clone(), "source", "kafka");
-            source
-                .open(
-                    SourceCtx::new(cp.handle())
-                        .with_stage_metrics(Some(Arc::new(
-                            spate_core::metrics::SourceMetrics::new(&labels),
-                        )))
-                        .with_meter(Some(meter))
-                        .with_partition_detail(true),
-                )
-                .expect("open");
+            source.attach_metrics(
+                SourceMetricsCtx::new(Some(meter))
+                    .with_stage_metrics(Arc::new(spate_core::metrics::SourceMetrics::new(&labels)))
+                    .with_partition_detail(true),
+            );
+            source.open(SourceCtx::new(cp.handle())).expect("open");
             await_assignment(&mut source, HANG)
         });
         let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();

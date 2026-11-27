@@ -18,7 +18,7 @@ use super::inflight::{Tp, offsets};
 use super::producer::FeedProducerHooks;
 use super::write::{
     self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
-    Write, WriteClass, classify, route,
+    Write, WriteClass, classify_write, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedPublisher, Ready};
 use crate::testutil::raw::raw_config;
@@ -222,14 +222,17 @@ fn a_message_names_a_unit_by_its_key() {
 /// librdkafka has marked missing or no code is retried.
 #[test]
 fn a_failed_write_is_classified_by_the_sink_table() {
-    assert_eq!(classify(Some(C::MessageSizeTooLarge)), WriteClass::Refused);
+    assert_eq!(
+        classify_write(Some(C::MessageSizeTooLarge)),
+        WriteClass::Refused
+    );
     for fatal in [
         C::UnknownTopicOrPartition,
         C::TopicAuthorizationFailed,
         C::InvalidProducerEpoch,
         C::Fatal,
     ] {
-        assert_eq!(classify(Some(fatal)), WriteClass::Fatal, "{fatal:?}");
+        assert_eq!(classify_write(Some(fatal)), WriteClass::Fatal, "{fatal:?}");
     }
     for retryable in [
         C::MessageTimedOut,
@@ -239,12 +242,12 @@ fn a_failed_write_is_classified_by_the_sink_table() {
         C::UnknownTopic,
     ] {
         assert_eq!(
-            classify(Some(retryable)),
+            classify_write(Some(retryable)),
             WriteClass::Retryable,
             "{retryable:?}"
         );
     }
-    assert_eq!(classify(None), WriteClass::Retryable);
+    assert_eq!(classify_write(None), WriteClass::Retryable);
 }
 
 /// Pins the bound on the committed-offset read: a quarter of
@@ -785,7 +788,7 @@ fn a_publish_only_handle_reports_no_depth() {
 #[test]
 fn a_publisher_answers_the_receive_side() {
     let publisher = idle_publisher();
-    assert_eq!(publisher.backend(), "kafka");
+    assert_eq!(publisher.component_type(), "kafka");
     assert!(!publisher.hands_back());
     let err = publisher.receive(8).unwrap_err();
     assert_eq!(err.kind(), FeedErrorKind::Fatal);

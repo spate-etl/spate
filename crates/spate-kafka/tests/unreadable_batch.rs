@@ -6,7 +6,7 @@ mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::ErrorClass;
-use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
+use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane, SourceMetricsCtx};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
 use std::collections::BTreeMap;
@@ -98,13 +98,8 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
             KafkaSource::new(source_cfg(&brokers, "unreadable")).expect("the config validates");
         let meter =
             spate_core::metrics::Meter::with_namespace("kafka", "unreadable", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
 
@@ -166,13 +161,8 @@ fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
         let mut source =
             KafkaSource::new(source_cfg(&brokers, "tail")).expect("the config validates");
         let meter = spate_core::metrics::Meter::with_namespace("kafka", "tail", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
 
@@ -260,15 +250,13 @@ fn a_record_at_the_top_of_the_offset_range_fails_the_lane() {
         let mut cp = Checkpointer::new();
         let mut source =
             KafkaSource::new(source_cfg(&brokers, name)).expect("the config validates");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(spate_core::metrics::Meter::with_namespace(
-                        "kafka", name, "source", "kafka",
-                    )))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(
+            SourceMetricsCtx::new(Some(spate_core::metrics::Meter::with_namespace(
+                "kafka", name, "source", "kafka",
+            )))
+            .with_partition_detail(true),
+        );
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
         // One version barrier and each record, so one poll finds them all.
@@ -379,15 +367,13 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let mut cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg).expect("the config validates");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(spate_core::metrics::Meter::with_namespace(
-                        "kafka", name, "source", "kafka",
-                    )))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
+        source.attach_metrics(
+            SourceMetricsCtx::new(Some(spate_core::metrics::Meter::with_namespace(
+                "kafka", name, "source", "kafka",
+            )))
+            .with_partition_detail(true),
+        );
+        source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
         // One version barrier, record 0, the error and the marker.
@@ -463,13 +449,8 @@ fn an_error_bars_the_marker_advance() {
                 KafkaSource::new(source_cfg(&brokers, "barred")).expect("the config validates");
             let meter =
                 spate_core::metrics::Meter::with_namespace("kafka", "barred", "source", "kafka");
-            source
-                .open(
-                    SourceCtx::new(cp.handle())
-                        .with_meter(Some(meter))
-                        .with_partition_detail(true),
-                )
-                .expect("open");
+            source.attach_metrics(SourceMetricsCtx::new(Some(meter)).with_partition_detail(true));
+            source.open(SourceCtx::new(cp.handle())).expect("open");
             let mut lanes = await_assignment(&mut source, HANG);
             cp.begin_epoch(&[lanes[0].partition()], 1);
             let partition = lanes[0].partition();

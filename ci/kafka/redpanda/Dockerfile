@@ -4,4 +4,4 @@
 # No Dependabot `ignore` applies, so this lane follows every release.
 # ../README.md has the account.
 
-FROM redpandadata/redpanda:v26.2.7@sha256:43545ee03966431f5451e0b3c1e651b39fbe3eb383360220311021f50133b649
+FROM redpandadata/redpanda:v26.3.1@sha256:260532f70fd840bf2159106bd4ef900f199c1f5ca2a23cb362642320513b90f5

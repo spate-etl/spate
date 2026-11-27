@@ -30,7 +30,7 @@ use spate_core::error::SourceError;
 use spate_core::feed::{DEFAULT_ATTEMPT_CAP, DepthOf, Feed, FeedOrigin, memory};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
-use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
 use spate_core::task::{self, TaskHandle};
 use spate_core::tls::{CertificateDer, ClientRoots, SystemRoots, client_roots, is_https};
 use std::num::NonZeroUsize;
@@ -91,6 +91,9 @@ pub struct S3Source {
     /// The solo run's lister, while it runs. Dropping the source aborts it;
     /// its units live in this process's feed, so nothing durable is lost.
     lister_task: Option<TaskHandle<Result<(), SourceError>>>,
+    /// The source's own handles, resolved in `attach_metrics` and moved into
+    /// the lanes at `open`.
+    metrics: Option<S3SourceMetrics>,
     state: State,
 }
 
@@ -165,6 +168,7 @@ impl S3Source {
             solo_lister: false,
             ends: None,
             lister_task: None,
+            metrics: None,
             state: State::Created,
         })
     }
@@ -365,19 +369,19 @@ impl S3Source {
         section: &FeedSection,
         feed: Arc<dyn Feed>,
     ) -> Result<(), SourceError> {
-        let backend = section.backend().type_tag();
+        let backend = section.backend().component_type();
         let location = section
             .location
             .as_deref()
             .map(|location| self.parse_location(location))
             .transpose()
             .map_err(|e| SourceError::fatal(e.to_string()))?;
-        if location.is_some() && backend == memory::BACKEND {
+        if location.is_some() && backend == memory::COMPONENT_TYPE {
             return Err(SourceError::fatal(
                 "the in-process feed keeps no job location; remove `feed.location`",
             ));
         }
-        if backend == memory::BACKEND {
+        if backend == memory::COMPONENT_TYPE {
             return Err(SourceError::fatal(
                 "a lister run publishes to a durable feed; the in-process feed lives in one \
                  process, whose own source lists for it",
@@ -389,11 +393,11 @@ impl S3Source {
                  fingerprint at a job location; set `feed.location`"
             )));
         }
-        if feed.backend() != backend {
+        if feed.component_type() != backend {
             return Err(SourceError::fatal(format!(
                 "the `feed:` section names the `{backend}` feed, and the lister run was given \
                  the `{}` feed; build the feed the section names",
-                feed.backend()
+                feed.component_type()
             )));
         }
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -547,12 +551,16 @@ impl Source for S3Source {
     type Lane = S3Lane;
 
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn framing_contract(&self) -> FramingContract {
         // A framed source always emits one record per payload.
         FramingContract::PerRecord
+    }
+
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        self.metrics = cx.meter.as_ref().map(S3SourceMetrics::new);
     }
 
     fn configure_feed(
@@ -574,7 +582,7 @@ impl Source for S3Source {
             .as_deref()
             .map(|location| self.parse_location(location))
             .transpose()?;
-        let memory = section.backend().type_tag() == memory::BACKEND;
+        let memory = section.backend().component_type() == memory::COMPONENT_TYPE;
         if section.settling_window.is_some() && self.location.is_none() && !memory {
             return Err(ConfigError::Component {
                 context: "feed".into(),
@@ -590,7 +598,7 @@ impl Source for S3Source {
                 message: format!(
                     "the S3 source ends a seeded run on exact counts, which only the \
                      in-process `memory` feed gives; pass the `{}` feed with `Pipeline::feed`",
-                    feed.backend()
+                    feed.component_type()
                 ),
             });
         }
@@ -632,7 +640,7 @@ impl Source for S3Source {
             "the S3 source holds up to {units} units at once"
         );
 
-        let metrics = ctx.meter.as_ref().map(S3SourceMetrics::new);
+        let metrics = self.metrics.take();
         let delimiter = make_framer().resync_delimiter();
         if delimiter.is_none() {
             tracing::info!(
@@ -738,7 +746,7 @@ impl Source for S3Source {
             );
         } else {
             tracing::warn!(
-                feed = feed.backend(),
+                feed = feed.component_type(),
                 "the S3 source lists nothing on this feed: it reads the units and storage \
                      notifications published to it, and publishes only a notification unit it \
                      re-enqueues after an overwrite"

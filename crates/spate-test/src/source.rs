@@ -11,9 +11,11 @@ use crate::run::{deadline, left};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::error::SourceError;
 use spate_core::hash::FastMap;
+use spate_core::metrics::Counter;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
+    SourceMetricsCtx,
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -82,6 +84,7 @@ pub fn memory_source() -> (MemorySource, SourceHandle) {
         MemorySource {
             shared: Arc::clone(&shared),
             issuer: None,
+            opens: None,
         },
         SourceHandle { shared },
     )
@@ -297,21 +300,30 @@ impl DrainBarrierProbe {
 pub struct MemorySource {
     shared: Arc<SharedSync>,
     issuer: Option<AckIssuer>,
+    /// `spate_memory_source_opens_total`, resolved in `attach_metrics`.
+    opens: Option<Counter>,
 }
+
+/// The key [`MemorySource`] reports. It scopes the source's own metric
+/// families under `spate_memory_source_*`.
+const COMPONENT_TYPE: &str = "memory";
 
 impl Source for MemorySource {
     type Lane = MemoryLane;
 
-    /// Scopes the source's own metric families under `spate_memory_source_*`.
     fn component_type(&self) -> &str {
-        "memory"
+        COMPONENT_TYPE
+    }
+
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        // Exercise the connector-metrics seam with a family under the
+        // source's `spate_memory_source_*` namespace.
+        self.opens = cx.meter.map(|meter| meter.counter("opens_total", &[]));
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-        // Exercise the connector-metrics seam with a family under the
-        // source's `spate_memory_source_*` namespace, resolved once at open.
-        if let Some(meter) = &ctx.meter {
-            meter.counter("opens_total", &[]).increment(1);
+        if let Some(opens) = &self.opens {
+            opens.increment(1);
         }
         self.issuer = Some(ctx.issuer);
         self.shared.lock().open = true;

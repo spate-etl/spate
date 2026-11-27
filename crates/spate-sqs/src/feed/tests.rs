@@ -2143,6 +2143,14 @@ fn extended(calls: &[Vec<VisibilityEntry>]) -> Vec<String> {
         .collect()
 }
 
+/// Pins that the SQS feed reports the key its `feed:` section names, which
+/// the runtime checks at startup.
+#[tokio::test(start_paused = true)]
+async fn an_sqs_feed_reports_the_sqs_key() {
+    let (feed, _queue) = start(MINUTE);
+    assert_eq!(feed.component_type(), "sqs");
+}
+
 /// Pins that the feed reports it hands back, which turns on the reserve
 /// check at startup and the read to the reserve at a stop.
 #[tokio::test(start_paused = true)]

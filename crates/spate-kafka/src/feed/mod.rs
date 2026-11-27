@@ -59,11 +59,12 @@ mod write;
 pub(crate) use config::{FeedRole, KafkaFeedConfig};
 pub use publisher::KafkaFeedPublisher;
 
+use crate::client::COMPONENT_TYPE;
 use crate::context::SourceHooks;
 use crate::metrics::KafkaConsumerStatsMetrics;
 use crate::sink::metrics::KafkaProducerStatsMetrics;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
-use config::{BACKEND, COMPONENT};
+use config::COMPONENT;
 use consumer::Driver;
 use events::KafkaFeedMetrics;
 use inflight::{Tp, Tracker};
@@ -468,7 +469,7 @@ impl Core {
 
     fn failed(&self, mut write: Write, failure: Failure) {
         if let Write::Publish { confirmer, .. } = write {
-            let error = match write::classify(failure.code) {
+            let error = match write::classify_write(failure.code) {
                 WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
                 WriteClass::Fatal => self.latch(&failure.reason),
                 // A fatal producer error latches before librdkafka purges
@@ -484,7 +485,7 @@ impl Core {
             return;
         }
         let topic = Arc::clone(&write.message().topic);
-        match write::classify(failure.code) {
+        match write::classify_write(failure.code) {
             WriteClass::Refused | WriteClass::Fatal => {
                 self.latch(&format!(
                     "writing {} to `{topic}` failed: {}",
@@ -721,7 +722,7 @@ impl KafkaFeed {
         let config = KafkaFeedConfig::connecting(section)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
-            &spate_core::config::SectionPath::feed(BACKEND),
+            &spate_core::config::SectionPath::feed(COMPONENT_TYPE),
         );
         let checked = check_topics(&config, io, scope, bound, clock.clone())?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
@@ -947,8 +948,8 @@ fn topic_partitions(owned: &[Tp]) -> Vec<(&str, i32)> {
 }
 
 impl Feed for KafkaFeed {
-    fn backend(&self) -> &str {
-        BACKEND
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
     }
 
     /// Resolve the feed's metric handles from `cx`. A later call replaces

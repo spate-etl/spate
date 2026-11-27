@@ -13,7 +13,7 @@
 
 use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock as StopClock;
-use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
 use spate_core::error::ConnectError;
 use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedMetricsCtx, FeedWaker,
@@ -152,8 +152,8 @@ impl<F> Recording<F> {
 }
 
 impl<F: Feed> Feed for Recording<F> {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
 
     fn set_waker(&self, waker: FeedWaker) {
@@ -162,6 +162,10 @@ impl<F: Feed> Feed for Recording<F> {
 
     fn attach_metrics(&self, cx: FeedMetricsCtx) {
         self.inner.attach_metrics(cx);
+    }
+
+    fn check_section(&self, section: &FeedSection) -> Result<(), ConfigError> {
+        self.inner.check_section(section)
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {

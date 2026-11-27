@@ -69,6 +69,7 @@
 //! A backend that does not hand back skips the reading, and its held units
 //! return through redelivery.
 
+use crate::config::{ConfigError, FeedSection};
 use crate::error::ErrorClass;
 use crate::metrics::Meter;
 use std::fmt;
@@ -171,11 +172,11 @@ impl Delivery {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FeedMetricsCtx {
-    /// Scoped `spate_<backend>_feed_*` and pre-labeled with the pipeline,
-    /// `component="feed"` and the [`backend`](Feed::backend) key as
-    /// `component_type`. `None` when the backend key cannot scope a family: a
-    /// reserved root or `custom` opts out silently, and a malformed key is
-    /// logged and also yields `None`.
+    /// Scoped `spate_<component_type>_feed_*` and pre-labeled with the
+    /// pipeline, `component="feed"` and the backend's
+    /// [`component_type`](Feed::component_type). `None` when that type cannot
+    /// scope a family: a reserved root or `custom` opts out silently, and a
+    /// malformed type is logged and also yields `None`.
     pub meter: Option<Meter>,
     /// The calling pipeline's `metrics.per_partition_detail`. Gates the
     /// backend's own per-partition families: when `false`, register and emit
@@ -340,8 +341,8 @@ impl Eq for FeedError {}
 pub trait Feed: Send + Sync {
     /// The key that names this backend in a `feed:` section, such as
     /// `"memory"`. The runtime refuses a feed whose key differs from the
-    /// one the pipeline's [`FeedSection`](crate::config::FeedSection) names.
-    fn backend(&self) -> &str;
+    /// one the pipeline's [`FeedSection`] names.
+    fn component_type(&self) -> &str;
 
     /// Hand the backend the waker it signals when a unit becomes ready to
     /// receive, including one that arrived before this call, and after a
@@ -360,6 +361,22 @@ pub trait Feed: Send + Sync {
     /// a feed the runtime is not given all go without a `Meter`, so treat the
     /// handles as optional wherever they are used. The default ignores it.
     fn attach_metrics(&self, _cx: FeedMetricsCtx) {}
+
+    /// Refuse a key of the pipeline's `feed:` section that this backend
+    /// cannot honor, such as an `attempt_cap` on a backend whose queue counts
+    /// deliveries itself.
+    ///
+    /// The runtime calls it before the source is handed the feed, whether
+    /// the runtime built the feed or code passed it in. A backend that also
+    /// builds from the section refuses the same keys there. The default
+    /// accepts every section.
+    ///
+    /// # Errors
+    ///
+    /// A [`ConfigError`] naming the key and why the backend refuses it.
+    fn check_section(&self, _section: &FeedSection) -> Result<(), ConfigError> {
+        Ok(())
+    }
 
     /// Up to `max` deliveries the backend has buffered, oldest first. Never
     /// waits; returns an empty list when nothing is ready.
@@ -821,7 +838,7 @@ mod tests {
     struct EmptyFeed;
 
     impl Feed for EmptyFeed {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             "empty"
         }
 

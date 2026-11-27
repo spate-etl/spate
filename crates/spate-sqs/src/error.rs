@@ -16,6 +16,7 @@ use aws_sdk_sqs::operation::receive_message::ReceiveMessageError;
 use aws_sdk_sqs::operation::send_message_batch::SendMessageBatchError;
 use spate_core::error::{ErrorClass, chain};
 use std::error::Error;
+use std::fmt;
 use std::fmt::Write as _;
 
 /// The prefix SQS puts on its own error codes in the query protocol, which
@@ -102,6 +103,14 @@ pub(crate) struct CallError {
     pub(crate) message: String,
 }
 
+impl fmt::Display for CallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for CallError {}
+
 impl CallError {
     #[cfg(test)]
     pub(crate) fn retryable(message: &str) -> CallError {
@@ -132,7 +141,7 @@ impl CallError {
 }
 
 /// The typed variants an operation's error has for the Fatal codes. The SDK
-/// maps only some spellings of a code to a typed variant, so [`classify`]
+/// maps only some spellings of a code to a typed variant, so [`call_error`]
 /// also matches the code itself.
 pub(crate) trait TypedFatal {
     fn typed_fatal(&self) -> bool;
@@ -226,7 +235,7 @@ impl TypedFatal for DeleteMessageBatchError {
 /// everything else. The message carries the error's source chain, and for a
 /// certificate from an unknown issuer how to trust it, naming `root_ca` when
 /// given.
-pub(crate) fn classify<E>(
+pub(crate) fn call_error<E>(
     op: &str,
     e: &SdkError<E, HttpResponse>,
     root_ca: Option<&str>,
@@ -303,6 +312,13 @@ mod tests {
         service(SendMessageBatchError::generic(meta), 400)
     }
 
+    /// A call error renders as its message.
+    #[test]
+    fn a_call_error_renders_its_message() {
+        let e = CallError::fatal("SQS ReceiveMessage: access denied");
+        assert_eq!(e.to_string(), "SQS ReceiveMessage: access denied");
+    }
+
     /// Pins that a missing queue and a batch-shape code are Fatal as a
     /// generic error, bare and with the `AWS.SimpleQueueService.` prefix,
     /// since the SDK maps only one spelling of each to its typed variant.
@@ -312,7 +328,7 @@ mod tests {
             "QueueDoesNotExist",
             "AWS.SimpleQueueService.NonExistentQueue",
         ] {
-            let e = classify("ReceiveMessage", &receive_error(code), None);
+            let e = call_error("ReceiveMessage", &receive_error(code), None);
             assert_eq!(e.class, ErrorClass::Fatal, "{code}");
             assert!(!e.batch_shape, "{code}");
         }
@@ -320,7 +336,7 @@ mod tests {
             "TooManyEntriesInBatchRequest",
             "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
         ] {
-            let e = classify("SendMessageBatch", &batch_error(code), None);
+            let e = call_error("SendMessageBatch", &batch_error(code), None);
             assert_eq!(e.class, ErrorClass::Fatal, "{code}");
             assert!(e.batch_shape, "{code}");
         }
@@ -370,14 +386,14 @@ mod tests {
         ];
         for (name, e) in cases {
             assert_eq!(
-                classify("GetQueueAttributes", &service(e, 400), None).class,
+                call_error("GetQueueAttributes", &service(e, 400), None).class,
                 ErrorClass::Fatal,
                 "{name}"
             );
         }
         let untyped = GetQueueAttributesError::generic(meta());
         assert_eq!(
-            classify("GetQueueAttributes", &service(untyped, 500), None).class,
+            call_error("GetQueueAttributes", &service(untyped, 500), None).class,
             ErrorClass::Retryable
         );
     }
@@ -387,7 +403,7 @@ mod tests {
     #[test]
     fn rejections_are_fatal_and_throttling_is_retryable() {
         assert_eq!(
-            classify(
+            call_error(
                 "ReceiveMessage",
                 &receive_error("InvalidClientTokenId"),
                 None
@@ -398,11 +414,11 @@ mod tests {
         let meta = ErrorMetadata::builder().code("SomethingElse").build();
         let forbidden = service(ReceiveMessageError::generic(meta), 403);
         assert_eq!(
-            classify("ReceiveMessage", &forbidden, None).class,
+            call_error("ReceiveMessage", &forbidden, None).class,
             ErrorClass::Fatal
         );
         assert_eq!(
-            classify(
+            call_error(
                 "ReceiveMessage",
                 &receive_error("AWS.SimpleQueueService.RequestThrottled"),
                 None
@@ -413,7 +429,7 @@ mod tests {
         let meta = ErrorMetadata::builder().code("InternalError").build();
         let failed = service(ReceiveMessageError::generic(meta), 500);
         assert_eq!(
-            classify("ReceiveMessage", &failed, None).class,
+            call_error("ReceiveMessage", &failed, None).class,
             ErrorClass::Retryable
         );
     }
@@ -447,37 +463,37 @@ mod tests {
         ];
         for (code, (receive, send)) in cases {
             assert_eq!(
-                classify("ReceiveMessage", &service(receive, 400), None).class,
+                call_error("ReceiveMessage", &service(receive, 400), None).class,
                 ErrorClass::Fatal,
                 "typed {code}"
             );
             assert_eq!(
-                classify("SendMessageBatch", &service(send, 400), None).class,
+                call_error("SendMessageBatch", &service(send, 400), None).class,
                 ErrorClass::Fatal,
                 "typed {code}"
             );
             assert_eq!(
-                classify("ReceiveMessage", &receive_error(code), None).class,
+                call_error("ReceiveMessage", &receive_error(code), None).class,
                 ErrorClass::Fatal,
                 "{code}"
             );
             assert_eq!(
-                classify("SendMessageBatch", &batch_error(code), None).class,
+                call_error("SendMessageBatch", &batch_error(code), None).class,
                 ErrorClass::Fatal,
                 "{code}"
             );
         }
         let (receive, send) = typed!(KmsThrottled);
         assert_eq!(
-            classify("ReceiveMessage", &service(receive, 400), None).class,
+            call_error("ReceiveMessage", &service(receive, 400), None).class,
             ErrorClass::Retryable
         );
         assert_eq!(
-            classify("SendMessageBatch", &service(send, 400), None).class,
+            call_error("SendMessageBatch", &service(send, 400), None).class,
             ErrorClass::Retryable
         );
         assert_eq!(
-            classify(
+            call_error(
                 "SendMessageBatch",
                 &batch_error("KMS.ThrottlingException"),
                 None
@@ -506,7 +522,7 @@ mod tests {
             "RequestExpired",
             "SomeNewSenderError",
         ] {
-            let e = classify("ReceiveMessage", &receive_error(code), None);
+            let e = call_error("ReceiveMessage", &receive_error(code), None);
             assert_eq!(e.class, ErrorClass::Fatal, "{code}");
             assert!(e.message.contains(code), "{code}: {}", e.message);
         }
@@ -517,7 +533,7 @@ mod tests {
                 .build();
             let e = service(ReceiveMessageError::generic(meta), 400);
             assert_eq!(
-                classify("ReceiveMessage", &e, None).class,
+                call_error("ReceiveMessage", &e, None).class,
                 ErrorClass::Fatal,
                 "{fault}"
             );
@@ -530,27 +546,27 @@ mod tests {
     fn a_sender_error_on_any_call_is_fatal_and_not_batch_shape() {
         let meta = || ErrorMetadata::builder().code("InvalidAction").build();
         let cases = [
-            classify(
+            call_error(
                 "ReceiveMessage",
                 &service(ReceiveMessageError::generic(meta()), 400),
                 None,
             ),
-            classify(
+            call_error(
                 "GetQueueAttributes",
                 &service(GetQueueAttributesError::generic(meta()), 400),
                 None,
             ),
-            classify(
+            call_error(
                 "SendMessageBatch",
                 &service(SendMessageBatchError::generic(meta()), 400),
                 None,
             ),
-            classify(
+            call_error(
                 "ChangeMessageVisibilityBatch",
                 &service(ChangeMessageVisibilityBatchError::generic(meta()), 400),
                 None,
             ),
-            classify(
+            call_error(
                 "DeleteMessageBatch",
                 &service(DeleteMessageBatchError::generic(meta()), 400),
                 None,
@@ -586,13 +602,13 @@ mod tests {
                 };
                 let receive = service(ReceiveMessageError::generic(meta()), status);
                 assert_eq!(
-                    classify("ReceiveMessage", &receive, None).class,
+                    call_error("ReceiveMessage", &receive, None).class,
                     ErrorClass::Retryable,
                     "{code} at {status}"
                 );
                 let send = service(SendMessageBatchError::generic(meta()), status);
                 assert_eq!(
-                    classify("SendMessageBatch", &send, None).class,
+                    call_error("SendMessageBatch", &send, None).class,
                     ErrorClass::Retryable,
                     "{code} at {status}"
                 );
@@ -606,15 +622,15 @@ mod tests {
         );
         let over = ReceiveMessageError::OverLimit(OverLimit::builder().meta(meta()).build());
         assert_eq!(
-            classify("ReceiveMessage", &service(receive, 400), None).class,
+            call_error("ReceiveMessage", &service(receive, 400), None).class,
             ErrorClass::Retryable
         );
         assert_eq!(
-            classify("GetQueueAttributes", &service(attributes, 400), None).class,
+            call_error("GetQueueAttributes", &service(attributes, 400), None).class,
             ErrorClass::Retryable
         );
         assert_eq!(
-            classify("ReceiveMessage", &service(over, 400), None).class,
+            call_error("ReceiveMessage", &service(over, 400), None).class,
             ErrorClass::Retryable
         );
     }
@@ -647,7 +663,7 @@ mod tests {
                 let meta = ErrorMetadata::builder().code(code).build();
                 let e = service(ReceiveMessageError::generic(meta), status);
                 assert_eq!(
-                    classify("ReceiveMessage", &e, None).class,
+                    call_error("ReceiveMessage", &e, None).class,
                     ErrorClass::Retryable,
                     "{code} at {status}"
                 );
@@ -665,7 +681,7 @@ mod tests {
         ] {
             let e = service(ReceiveMessageError::generic(meta), 401);
             assert_eq!(
-                classify("ReceiveMessage", &e, None).class,
+                call_error("ReceiveMessage", &e, None).class,
                 ErrorClass::Fatal
             );
         }
@@ -677,21 +693,21 @@ mod tests {
     fn the_sender_rule_needs_a_400_with_a_code() {
         let codeless = ReceiveMessageError::generic(ErrorMetadata::builder().build());
         assert_eq!(
-            classify("ReceiveMessage", &service(codeless, 400), None).class,
+            call_error("ReceiveMessage", &service(codeless, 400), None).class,
             ErrorClass::Retryable
         );
         let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
         let unparsed: SdkError<ReceiveMessageError, HttpResponse> =
             SdkError::response_error("unparsed", raw);
         assert_eq!(
-            classify("ReceiveMessage", &unparsed, None).class,
+            call_error("ReceiveMessage", &unparsed, None).class,
             ErrorClass::Retryable
         );
         for status in [404, 408, 429] {
             let meta = ErrorMetadata::builder().code("InvalidAction").build();
             let e = service(ReceiveMessageError::generic(meta), status);
             assert_eq!(
-                classify("ReceiveMessage", &e, None).class,
+                call_error("ReceiveMessage", &e, None).class,
                 ErrorClass::Retryable,
                 "{status}"
             );
@@ -702,13 +718,13 @@ mod tests {
             .build();
         let failed = service(ReceiveMessageError::generic(meta), 500);
         assert_eq!(
-            classify("ReceiveMessage", &failed, None).class,
+            call_error("ReceiveMessage", &failed, None).class,
             ErrorClass::Retryable
         );
         let timed_out: SdkError<ReceiveMessageError, HttpResponse> =
             SdkError::timeout_error("timed out");
         assert_eq!(
-            classify("ReceiveMessage", &timed_out, None).class,
+            call_error("ReceiveMessage", &timed_out, None).class,
             ErrorClass::Retryable
         );
     }

@@ -190,7 +190,8 @@ Consequences worth stating outright:
 - **A close left running keeps the claims it holds.** When a source or feed
   has not closed by the time `run` gives up on it, the close goes on in the
   background. It keeps the feed's series claimed, and the source's when the
-  source kept the `SourceCtx::stage_metrics` handle, as the Kafka source does.
+  source kept the `SourceMetricsCtx::stage_metrics` handle, as the Kafka
+  source does.
   A pipeline rebuilt in the same process with the same name fails to build
   until that close ends.
 - **Ownership is process-local.** Horizontal replicas never collide: each pod is

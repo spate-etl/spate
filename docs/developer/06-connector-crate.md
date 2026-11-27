@@ -1,11 +1,11 @@
 ---
-description: "Conventions for a shipped connector's public surface, and what its crate carries: manifest, tests, container suites, benches, fuzz targets and docs page."
+description: "Conventions for a connector's public surface and errors, and what its crate carries: manifest, tests, container suites, benches, fuzz targets and docs page."
 ---
 
 # Adding a connector crate
 
 A connector crate ships a source, a sink, a format or a feed backend, or several of them, behind a feature of the `spate` crate.
-The first part of this page gives the conventions its public surface follows, so a user meets the same shapes in every connector.
+The first part of this page gives the conventions its public surface and its errors follow, so a user meets the same shapes in every connector.
 The second part covers what the crate carries beyond its `src/`.
 
 Each convention states what to do, then why, then code that follows it where some does, then what fails when a change breaks it.
@@ -140,6 +140,29 @@ Until one does, a connector keeps the client error's text in the reason.
 
 **Checked by:** review.
 
+### Name an error classifier for what it returns
+
+Name a function that decides the class of a client's error for what it returns.
+Start its name with `classify_` when it returns the class, such as an `ErrorClass` or a crate's own kind enum.
+End its name with `_error`, without the `classify_` prefix, when it returns the error it builds.
+The rest of the name says what failed, such as the client's call or one operation.
+
+Keep the classifier for the client's errors in the crate's `error.rs`.
+A classifier that adds one operation's context, such as whether an insert body is compressed, stays beside that operation.
+
+**Why:** a caller then knows from the name whether it gets a class or an error, and a reader finds the client's classifier in the same file in every connector.
+
+**Follow:** `classify_store_error` and `store_error` in [`crates/spate-s3/src/error.rs`](repo:crates/spate-s3/src/error.rs).
+
+**Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
+
+- spate-sqs: `classify`.
+- spate-avro: the registry's `failure`.
+- spate-kafka: the sink's `classify`, the feed's `classify`, `class`, `error` and `classified`, and `report_class`, kept outside `error.rs`.
+- spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
+
+**Checked by:** review.
+
 ### Refuse unknown YAML keys
 
 Put `#[serde(deny_unknown_fields)]` on every config struct and every nested section.
@@ -265,9 +288,15 @@ Declare in a connector's config only the keys its own code reads.
 Keys the framework reads for every backend of a role sit beside the backend's key in the role's section, as `units_held` does in a `feed:` section.
 A sink leaves out `batch`, `inflight`, `retry` and `breaker` and passes a default pool in its `SinkParts`, which the sink section's blocks overlay.
 
+A feed backend that cannot honor one of the framework's `feed:` keys refuses it in `Feed::check_section`.
+The runtime calls that method on every feed before the source opens, so the refusal also reaches a feed that code built from a config.
+
 **Why:** core then parses each framework key once, and every backend accepts the same ones.
 
 **Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
+`check_section` in [`crates/spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs) for a refused feed key.
+
+**Departs:** the SQS feed, which refuses `attempt_cap` and a `settling_window` below one minute only when it is built from the section ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 
@@ -330,9 +359,6 @@ Resolve a component's metric handles in its `attach_metrics` hook, from the cont
 **Why:** every role then receives its `Meter` the same way.
 
 **Follow:** [`crates/spate-json/src/deser.rs`](repo:crates/spate-json/src/deser.rs).
-
-**Departs:** a source reads its `Meter` from `SourceCtx` in `open`, because `Source` has no `attach_metrics` ([#2320](https://github.com/spate-etl/spate/issues/2320)).
-Until it does, a new source reads it from `SourceCtx`.
 
 **Checked by:** review.
 

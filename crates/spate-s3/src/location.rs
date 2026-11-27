@@ -273,7 +273,7 @@ pub(crate) fn compare(location: &Location, mine: &str, stored: &[u8]) -> Result<
 /// Fatal for an object above [`LOCATION_OBJECT_MAX_BYTES`]: refused from its
 /// stated size before its body is read, or once its body runs past the cap
 /// when the stated size understates it. Otherwise classed by
-/// [`classify`](crate::error::classify).
+/// [`classify_store_error`](crate::error::classify_store_error).
 pub(crate) async fn read_object(
     store: &dyn ObjectStore,
     location: &Location,
@@ -281,7 +281,7 @@ pub(crate) async fn read_object(
 ) -> Result<Option<Bytes>, SourceError> {
     let got = match store.get(object).await {
         Ok(got) => got,
-        // Checked before `classify`, which reads a missing object as fatal.
+        // Checked before `classify_store_error`, which reads a missing object as fatal.
         // A missing bucket answers 404 as well and never fills, so it stays
         // a failed read; `object_store` keeps the store's code only in text.
         Err(e @ object_store::Error::NotFound { .. })
@@ -362,7 +362,7 @@ pub(crate) async fn read_end(
 }
 
 /// An `object_store` failure on `object`, classed by
-/// [`classify`](crate::error::classify).
+/// [`classify_store_error`](crate::error::classify_store_error).
 pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Error) -> SourceError {
     error_with(location, object, e, "")
 }

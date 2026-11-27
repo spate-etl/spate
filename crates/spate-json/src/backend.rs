@@ -49,7 +49,8 @@ pub const BACKEND_ID: &str = "serde_json";
 /// swapping the decode backend does not ripple into `deser.rs`. Each backend maps its
 /// native error into this on the way out of [`decode_one`] /
 /// [`check_no_duplicate_keys`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{msg}")]
 pub(crate) struct DecodeError {
     /// True when the input was well-formed JSON but semantically rejected,
     /// making it a *data* error (a type mismatch, or the injected
@@ -57,12 +58,6 @@ pub(crate) struct DecodeError {
     /// `duplicate_key` vs `malformed` metric label.
     pub(crate) is_data: bool,
     msg: String,
-}
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.msg)
-    }
 }
 
 /// What a data error says in place of serde's message, which quotes the

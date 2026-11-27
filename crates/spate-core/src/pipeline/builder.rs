@@ -820,7 +820,9 @@ impl Pipeline {
     ///
     /// The feed's [`component_type`](Feed::component_type) must equal the key
     /// the section names, and the config must have a `feed:` section; `run`
-    /// fails at startup otherwise. The section's backend keys, and
+    /// fails at startup otherwise. `run` also hands the section to
+    /// [`Feed::check_section`] before the source opens, and fails with the
+    /// feed's refusal of a key it cannot honor. The section's backend keys, and
     /// `attempt_cap` as the feed's delivery cap, apply only when a feed is
     /// built from the section, so a feed passed here keeps the settings it
     /// was built with.
@@ -2128,7 +2130,7 @@ mod tests {
     }
 
     /// Regression: the runtime must hand the source the framework's
-    /// source-stage handles at `open`.
+    /// source-stage handles, through `attach_metrics` before `open`.
     ///
     /// `SourceMetrics::set_partition_lag` has exactly one possible caller, the
     /// source, because only the client can see the log end. When those handles
@@ -2140,7 +2142,7 @@ mod tests {
     /// `a_backlogged_consumer_publishes_its_lag` covers the value arriving,
     /// which this test does not.
     #[test]
-    fn source_open_receives_the_stage_metrics() {
+    fn source_receives_the_stage_metrics_before_open() {
         let (source, shared, script) = FakeSource::new();
         script
             .lock()
@@ -2170,11 +2172,17 @@ mod tests {
         shutdown.trigger();
         join.join().unwrap().unwrap();
 
-        assert!(
-            shared.lock().unwrap().stage_metrics_attached,
-            "the runtime must share SourceMetrics with the source at open, \
+        let log = shared.lock().unwrap();
+        assert_eq!(
+            log.metrics_attached
+                .iter()
+                .map(|m| m.stage_metrics)
+                .collect::<Vec<_>>(),
+            [true],
+            "the runtime must share SourceMetrics with the source once, \
              or consumer lag can never be published"
         );
+        assert_eq!(log.hooks, ["attach_metrics", "open"]);
     }
 
     /// The whole-builder happy path through `run()` (not `into_runtime`),

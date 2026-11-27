@@ -2536,7 +2536,11 @@ mod tests {
         let e = runtime()
             .block_on(store.delete(&Path::from(CHECKPOINT)))
             .unwrap_err();
-        assert_eq!(crate::error::classify(&e), ErrorClass::Fatal, "{e}");
+        assert_eq!(
+            crate::error::classify_store_error(&e),
+            ErrorClass::Fatal,
+            "{e}"
+        );
     }
 
     /// Pins that a lister that cannot resume warns that it keeps no

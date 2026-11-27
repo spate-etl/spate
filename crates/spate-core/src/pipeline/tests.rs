@@ -3391,22 +3391,40 @@ fn the_feed_section_defaults() {
 }
 
 /// Pins that `run` refuses a `location` on an in-process feed passed in
-/// through `Pipeline::feed`, which skips building the feed from the section.
+/// through `Pipeline::feed` or `Pipeline::seeded_feed`, which skip building
+/// the feed from the section, before the source is handed the feed. The
+/// source refuses any feed it is handed, so a check made after that fails on
+/// the text.
 #[test]
 fn a_memory_feed_passed_in_with_a_location_is_refused() {
-    let mut cfg = test_config(1);
-    cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
-    let h = start_with(
-        cfg,
-        test_options(),
-        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
-        ok_chain,
-    );
-    let err = config_error_before_open(h);
-    assert!(
-        err.contains("`feed.location`") && err.contains("`memory`"),
-        "{err}"
-    );
+    for seeded in [false, true] {
+        let mut cfg = test_config(1);
+        cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
+        let h = start_with(
+            cfg,
+            test_options(),
+            move |runtime| {
+                let feed = Arc::new(MemoryFeed::new());
+                if seeded {
+                    runtime.with_seeded_feed(feed)
+                } else {
+                    runtime.with_feed(feed)
+                }
+            },
+            ok_chain,
+        );
+        let shared = Arc::clone(&h.shared);
+        let err = config_error_before_open(h);
+        assert!(
+            err.contains("`feed.location`") && err.contains("`memory`"),
+            "seeded {seeded}: {err}"
+        );
+        assert_eq!(
+            shared.lock().unwrap().feed_origin,
+            None,
+            "seeded {seeded}: the source must not be handed the feed"
+        );
+    }
 }
 
 /// Pins that `run` refuses a `settling_window` on an in-process feed passed

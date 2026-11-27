@@ -430,7 +430,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             )
             .into());
         }
-        self.config.reject_keys_on_memory()?;
         self.config.reject_bad_settling_window()?;
         self.config.reject_checkpoint_above_a_day()?;
         if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
@@ -462,6 +461,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         .into());
                     }
                 };
+                feed.check_section(section)?;
                 if feed.hands_back() {
                     check_duration(
                         self.config.checkpoint.drain_timeout,

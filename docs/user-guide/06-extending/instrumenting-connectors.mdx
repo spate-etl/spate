@@ -78,11 +78,11 @@ The rebalance counter counts one `assign` for each `LanesAssigned` and one
 Publish only measured values, and clean up what you lose. Every one of these is
 scar tissue.
 
-**Take the handle from `SourceMetricsCtx`.** A builder the runtime cannot reach is
-dead code, not an option: the runtime registers the series either way, so a
+**Take the handle from `SourceMetricsCtx`.** A builder the runtime cannot reach
+is dead code, not an option: the runtime registers the series either way, so a
 connector that never receives its handle leaves the gauge rendering a permanent
-`0`. That is worst for lag, where a maximally backlogged source
-reports nothing wrong and every alert keyed on it stays green.
+`0`. That is worst for lag, where a maximally backlogged source reports nothing
+wrong and every alert keyed on it stays green.
 
 **Publish a value only once you have measured it.** A
 registered-but-unwritten gauge renders `0`, and for lag a `0` is
@@ -332,11 +332,11 @@ or the prefix.
   the runtime calls once before `configure_feed` and `open`, with a
   `SourceMetricsCtx` holding the `Meter`. A sink's writer overrides
   `ShardWriter::attach_metrics`, which the builder calls once before the writer
-  is shared, with a `SinkMetricsCtx` holding the `Meter`. The runtime scopes it by **role**, `source` or `sink`
-  derived from the wiring position, so one crate's source families land under
-  `spate_<namespace>_source_*` and its sink families under
-  `spate_<namespace>_sink_*`, under distinct names. The connector's code is
-  identical at either end.
+  is shared, with a `SinkMetricsCtx` holding the `Meter`. The runtime scopes it
+  by **role**, `source` or `sink` derived from the wiring position, so one
+  crate's source families land under `spate_<namespace>_source_*` and its sink
+  families under `spate_<namespace>_sink_*`, under distinct names. The
+  connector's code is identical at either end.
 - **A feed backend** overrides
   [`Feed::attach_metrics`](../07-reference/README.mdx), which the runtime calls
   before it hands the feed to the source, with a `FeedMetricsCtx` holding the
@@ -369,11 +369,11 @@ fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
 }
 ```
 
-`SourceMetricsCtx` carries `per_partition_detail` (the `metrics` config flag), and so
-does the `FeedMetricsCtx` a feed backend receives; the sink's `SinkMetricsCtx`
-carries none. The flag lets a connector's own per-partition families honor the
-operator's cardinality choice. It gates your
-families and the framework's `spate_checkpoint_*` detail; it does **not** gate
+`SourceMetricsCtx` carries `per_partition_detail` (the `metrics` config flag),
+and so does the `FeedMetricsCtx` a feed backend receives; the sink's
+`SinkMetricsCtx` carries none. The flag lets a connector's own per-partition
+families honor the operator's cardinality choice. It gates your families and the
+framework's `spate_checkpoint_*` detail; it does **not** gate
 `spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved

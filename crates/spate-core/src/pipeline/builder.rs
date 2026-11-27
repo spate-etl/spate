@@ -820,7 +820,9 @@ impl Pipeline {
     ///
     /// The feed's [`backend`](Feed::backend) must equal the key the section
     /// names, and the config must have a `feed:` section; `run` fails at
-    /// startup otherwise. The section's backend keys, and `attempt_cap` as
+    /// startup otherwise. `run` also hands the section to
+    /// [`Feed::check_section`] before the source opens, and fails with the
+    /// feed's refusal of a key it cannot honor. The section's backend keys, and `attempt_cap` as
     /// the feed's delivery cap, apply only when a feed is built from the
     /// section, so a feed passed here keeps the settings it was built with.
     /// The source still reads `units_held`, `location`, `settling_window`

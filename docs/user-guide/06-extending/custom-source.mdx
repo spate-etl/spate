@@ -422,8 +422,11 @@ A backend also answers to its name in the `feed:` section:
   `attach_metrics` hands you
   ([Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)).
 - Build the backend from a `FeedSection`, and refuse a section whose key is
-  not yours. Decode your own keys from the section's backend body, and refuse
-  a common key your backend cannot honor.
+  not yours. Decode your own keys from the section's backend body.
+- Refuse a common key your backend cannot honor in `check_section`. The
+  runtime calls it before the source opens, on a feed built from the section
+  and on one that code passed in. Refuse the same keys when you build from the
+  section, since code can build the backend without a pipeline.
 
 The in-process feed,
 [`spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs),

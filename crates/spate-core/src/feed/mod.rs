@@ -69,6 +69,7 @@
 //! A backend that does not hand back skips the reading, and its held units
 //! return through redelivery.
 
+use crate::config::{ConfigError, FeedSection};
 use crate::error::ErrorClass;
 use crate::metrics::Meter;
 use std::fmt;
@@ -360,6 +361,22 @@ pub trait Feed: Send + Sync {
     /// a feed the runtime is not given all go without a `Meter`, so treat the
     /// handles as optional wherever they are used. The default ignores it.
     fn attach_metrics(&self, _cx: FeedMetricsCtx) {}
+
+    /// Refuse a key of the pipeline's `feed:` section that this backend
+    /// cannot honor, such as an `attempt_cap` on a backend whose queue counts
+    /// deliveries itself.
+    ///
+    /// The runtime calls it before the source is handed the feed, whether
+    /// the runtime built the feed or code passed it in, and so does a lister
+    /// run. A backend that also builds from the section refuses the same keys
+    /// there. The default accepts every section.
+    ///
+    /// # Errors
+    ///
+    /// A [`ConfigError`] naming the key and why the backend refuses it.
+    fn check_section(&self, _section: &FeedSection) -> Result<(), ConfigError> {
+        Ok(())
+    }
 
     /// Up to `max` deliveries the backend has buffered, oldest first. Never
     /// waits; returns an empty list when nothing is ready.

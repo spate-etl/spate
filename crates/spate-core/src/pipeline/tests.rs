@@ -3409,6 +3409,39 @@ fn a_memory_feed_passed_in_with_a_location_is_refused() {
     );
 }
 
+/// Pins that `run` asks a feed passed in code to check the section, for a
+/// feed given to `with_feed` and one given to `with_seeded_feed`, and that a
+/// refusal stops the run before the source is handed the feed.
+#[test]
+fn a_passed_feed_that_refuses_the_section_stops_the_run() {
+    for seeded in [false, true] {
+        let mut cfg = test_config(1);
+        cfg.feed = feed_section("queue: {}\nattempt_cap: 3");
+        let feed: Arc<dyn crate::feed::Feed> = Arc::new(RefusingFeed(MemoryFeed::new()));
+        let h = start_prepared(
+            cfg,
+            test_options(),
+            |log| log.accept_feed = true,
+            move |runtime, _| {
+                if seeded {
+                    runtime.with_seeded_feed(feed)
+                } else {
+                    runtime.with_feed(feed)
+                }
+            },
+            ok_chain,
+        );
+        let shared = Arc::clone(&h.shared);
+        let err = config_error_before_open(h);
+        assert!(err.contains(RefusingFeed::REFUSAL), "seeded {seeded}: {err}");
+        assert_eq!(
+            shared.lock().unwrap().feed_origin,
+            None,
+            "seeded {seeded}: the source must not be handed the feed"
+        );
+    }
+}
+
 /// Pins that `run` refuses a `settling_window` on an in-process feed passed
 /// in through `Pipeline::feed`, which skips building the feed from the
 /// section.
@@ -7507,6 +7540,47 @@ impl Drop for HookedSource {
         if let Some(hook) = self.on_drop.take() {
             hook();
         }
+    }
+}
+
+/// A [`MemoryFeed`] under the `queue` key that refuses every section.
+struct RefusingFeed(MemoryFeed);
+
+impl RefusingFeed {
+    const REFUSAL: &str = "feed.queue: `attempt_cap` does not apply to `queue`";
+}
+
+impl crate::feed::Feed for RefusingFeed {
+    fn backend(&self) -> &str {
+        "queue"
+    }
+    fn check_section(
+        &self,
+        _section: &crate::config::FeedSection,
+    ) -> Result<(), crate::config::ConfigError> {
+        Err(crate::config::ConfigError::Validation(Self::REFUSAL.into()))
+    }
+    fn set_waker(&self, waker: crate::feed::FeedWaker) {
+        self.0.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<crate::feed::Delivery>, crate::feed::FeedError> {
+        self.0.receive(max)
+    }
+    fn renew(&self, receipt: crate::feed::Receipt) -> Result<(), crate::feed::FeedError> {
+        self.0.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: crate::feed::Receipt) -> Result<(), crate::feed::FeedError> {
+        self.0.acknowledge(receipt)
+    }
+    fn fail(
+        &self,
+        receipt: crate::feed::Receipt,
+        reason: &str,
+    ) -> Result<(), crate::feed::FeedError> {
+        self.0.fail(receipt, reason)
+    }
+    fn publish(&self, unit: crate::feed::Unit) -> crate::feed::Confirmation {
+        self.0.publish(unit)
     }
 }
 

@@ -208,6 +208,10 @@ impl Feed for MemoryFeed {
         state.signal.set_waker(waker, ready);
     }
 
+    fn check_section(&self, section: &FeedSection) -> Result<(), ConfigError> {
+        refuse_section_keys(section)
+    }
+
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
         let mut state = self.lock();
         let take = max.min(state.visible.len());

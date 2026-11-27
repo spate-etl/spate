@@ -11,6 +11,7 @@ use super::{
     FeedWaker, Receipt, Unit,
 };
 use crate::clock::{SharedClock, Stopwatch};
+use crate::config::{ConfigError, FeedSection};
 use crate::metrics::{FeedMetrics, FeedOp};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,6 +92,10 @@ impl Feed for MeteredFeed {
 
     fn attach_metrics(&self, cx: FeedMetricsCtx) {
         self.inner.attach_metrics(cx);
+    }
+
+    fn check_section(&self, section: &FeedSection) -> Result<(), ConfigError> {
+        self.inner.check_section(section)
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -289,6 +294,11 @@ mod tests {
             ));
         }
 
+        fn check_section(&self, section: &FeedSection) -> Result<(), ConfigError> {
+            self.log(format!("check_section {}", section.backend().type_tag()));
+            Err(ConfigError::Validation("refused by the fake".into()))
+        }
+
         fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
             self.log(format!("receive {max}"));
             self.answer()?;
@@ -432,6 +442,12 @@ mod tests {
             FeedMetricsCtx::new(Some(Meter::new("p", "feed", "fake"))).with_partition_detail(true),
         );
         rig.feed.set_waker(waker);
+        let section = FeedSection::new(crate::config::ComponentConfig::new(
+            "fake",
+            crate::config::YamlValue::Mapping(Default::default()),
+        ));
+        let refusal = rig.feed.check_section(&section).unwrap_err();
+        assert_eq!(refusal.to_string(), "invalid configuration: refused by the fake");
         let delivered = rig.feed.receive(4).unwrap();
         assert_eq!(delivered[0].receipt, Receipt(7));
         rig.fake.refuse(FeedErrorKind::Retryable);
@@ -454,6 +470,7 @@ mod tests {
             [
                 "attach_metrics true true",
                 "set_waker",
+                "check_section fake",
                 "receive 4",
                 "renew 7",
                 "acknowledge 7",

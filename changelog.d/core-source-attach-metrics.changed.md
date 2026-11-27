@@ -1,0 +1,5 @@
+**Breaking:** **A source receives its metrics through `attach_metrics`** (`spate-core`)
+
+`Source` has a new method with a default, `attach_metrics`, which receives a `SourceMetricsCtx`. It carries the source's own `Meter`, the framework's `SourceMetrics` stage handles and the pipeline's `per_partition_detail`, the three things `SourceCtx` used to carry. The runtime calls it once, before `configure_feed` and `open`. `SourceCtx` loses its `meter`, `stage_metrics` and `per_partition_detail` fields and its `with_meter`, `with_stage_metrics` and `with_partition_detail` methods. A source that read them in `open` resolves its handles in `attach_metrics` instead. A test that drives a source directly calls `attach_metrics` before `open` to give it a `Meter` or stage handles. A source that wraps another should forward the call to the inner one.
+
+A type that implements `Source` beside `ShardWriter` or `Deserializer` and calls `attach_metrics()` with method syntax must name the trait, as in `Source::attach_metrics(&mut x, cx)`.

@@ -14,7 +14,7 @@ use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::metrics::names;
 use spate_core::record::PartitionId;
-use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane, SourceMetricsCtx};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
 use spate_test_support::{Broker, CLUSTER_NODES, KafkaCluster, SingleBroker};
@@ -214,9 +214,8 @@ fn real_broker_backlog_reports_summable_lag() {
         let mut cp = Checkpointer::new();
         let mut source =
             KafkaSource::new(config(&brokers, "backlog")).expect("the config validates");
-        source
-            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(None).with_stage_metrics(metrics));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
 
         let mut lanes = await_assignment(&mut source, HANG);
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
@@ -301,9 +300,8 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     let statistics = recorder.handle();
     let meter = spate_core::metrics::Meter::with_namespace("kafka", "rev-each", "source", "kafka");
     metrics::with_local_recorder(&recorder, || {
-        source
-            .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
-            .expect("open");
+        source.attach_metrics(SourceMetricsCtx::new(Some(meter)));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
     });
 
     // Settle with both partitions held and each consumer in a stable group,

@@ -30,7 +30,7 @@ use spate_core::error::SourceError;
 use spate_core::feed::{DEFAULT_ATTEMPT_CAP, DepthOf, Feed, FeedOrigin, memory};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
-use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
 use spate_core::task::{self, TaskHandle};
 use spate_core::tls::{CertificateDer, ClientRoots, SystemRoots, client_roots, is_https};
 use std::num::NonZeroUsize;
@@ -91,6 +91,9 @@ pub struct S3Source {
     /// The solo run's lister, while it runs. Dropping the source aborts it;
     /// its units live in this process's feed, so nothing durable is lost.
     lister_task: Option<TaskHandle<Result<(), SourceError>>>,
+    /// The source's own handles, resolved in `attach_metrics` and moved into
+    /// the lanes at `open`.
+    metrics: Option<S3SourceMetrics>,
     state: State,
 }
 
@@ -165,6 +168,7 @@ impl S3Source {
             solo_lister: false,
             ends: None,
             lister_task: None,
+            metrics: None,
             state: State::Created,
         })
     }
@@ -555,6 +559,10 @@ impl Source for S3Source {
         FramingContract::PerRecord
     }
 
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        self.metrics = cx.meter.as_ref().map(S3SourceMetrics::new);
+    }
+
     fn configure_feed(
         &mut self,
         section: &FeedSection,
@@ -632,7 +640,7 @@ impl Source for S3Source {
             "the S3 source holds up to {units} units at once"
         );
 
-        let metrics = ctx.meter.as_ref().map(S3SourceMetrics::new);
+        let metrics = self.metrics.take();
         let delimiter = make_framer().resync_delimiter();
         if delimiter.is_none() {
             tracing::info!(

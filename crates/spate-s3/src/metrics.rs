@@ -1,8 +1,8 @@
 //! Connector-owned metric families, registered through the source's
 //! [`Meter`] (namespace `s3`, role `source` → `spate_s3_source_*`).
 //!
-//! All handles are resolved once at `open` and cloned into the lanes and
-//! fetchers; nothing resolves names on the record path. Counters are
+//! All handles are resolved once in `attach_metrics` and cloned into the
+//! lanes and fetchers; nothing resolves names on the record path. Counters are
 //! incremented at batch/object/chunk boundaries per the taxonomy's
 //! hot-path discipline.
 

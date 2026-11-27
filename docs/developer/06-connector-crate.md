@@ -1,11 +1,11 @@
 ---
-description: "Conventions for a shipped connector's public surface, and what its crate carries: manifest, tests, container suites, benches, fuzz targets and docs page."
+description: "Conventions for a connector's public surface and errors, and what its crate carries: manifest, tests, container suites, benches, fuzz targets and docs page."
 ---
 
 # Adding a connector crate
 
 A connector crate ships a source, a sink, a format or a feed backend, or several of them, behind a feature of the `spate` crate.
-The first part of this page gives the conventions its public surface follows, so a user meets the same shapes in every connector.
+The first part of this page gives the conventions its public surface and its errors follow, so a user meets the same shapes in every connector.
 The second part covers what the crate carries beyond its `src/`.
 
 Each convention states what to do, then why, then code that follows it where some does, then what fails when a change breaks it.
@@ -137,6 +137,29 @@ A meaning that belongs to one role, such as `NotReady` on a deserializer, stays 
 
 **Departs:** no connector attaches its client's error as `source()` yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
 Until one does, a connector keeps the client error's text in the reason.
+
+**Checked by:** review.
+
+### Name an error classifier for what it returns
+
+Name a function that decides the class of a client's error for what it returns.
+Start its name with `classify_` when it returns the class, such as an `ErrorClass` or a crate's own kind enum.
+End its name with `_error`, without the `classify_` prefix, when it returns the error it builds.
+The rest of the name says what failed, such as the client's call or one operation.
+
+Keep the classifier for the client's errors in the crate's `error.rs`.
+A classifier that adds one operation's context, such as whether an insert body is compressed, stays beside that operation.
+
+**Why:** a caller then knows from the name whether it gets a class or an error, and a reader finds the client's classifier in the same file in every connector.
+
+**Follow:** `classify_store_error` and `store_error` in [`crates/spate-s3/src/error.rs`](repo:crates/spate-s3/src/error.rs).
+
+**Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
+
+- spate-sqs: `classify`.
+- spate-avro: the registry's `failure`.
+- spate-kafka: the sink's `classify`, the feed's `classify`, `class`, `error` and `classified`, and `report_class`, kept outside `error.rs`.
+- spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
 
 **Checked by:** review.
 

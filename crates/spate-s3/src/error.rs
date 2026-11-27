@@ -26,7 +26,7 @@ use std::fmt;
 /// - A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) by the
 ///   store or the credential endpoint is non-retryable and pipeline-fatal.
 /// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
-pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
+pub(crate) fn classify_store_error(e: &object_store::Error) -> ErrorClass {
     use object_store::Error as E;
     match e {
         _ if list_rejected(e)
@@ -116,9 +116,12 @@ fn delete_rejected(e: &object_store::Error) -> bool {
 }
 
 /// An error for a failed store request made while `doing`, classed by
-/// [`classify`], with the store's text bound by [`bounded_reason`].
+/// [`classify_store_error`], with the store's text bound by [`bounded_reason`].
 pub(crate) fn store_error(doing: impl fmt::Display, e: &object_store::Error) -> SourceError {
-    SourceError::from_class(classify(e), format!("{doing}: {}", bounded_reason(e)))
+    SourceError::from_class(
+        classify_store_error(e),
+        format!("{doing}: {}", bounded_reason(e)),
+    )
 }
 
 /// The most of a store's response body an S3 source error carries. A store
@@ -187,7 +190,7 @@ fn tls_reason(tls: &rustls::Error, hint: Option<TrustHint>) -> String {
 /// RustFS answers a ranged GET that starts past the end of a smaller new
 /// object with 416 before it checks `If-Match`. The read then re-enqueues
 /// the key at its current ETag. A version-named read and a lister's unit keep
-/// [`classify`]'s and [`poison_kind`]'s classification.
+/// [`classify_store_error`]'s and [`classify_poison`]'s classification.
 pub(crate) fn is_overwrite(e: &object_store::Error, origin: &Origin) -> bool {
     (matches!(e, object_store::Error::Precondition { .. }) || range_not_satisfiable(e))
         && matches!(origin, Origin::Notification { version: None, .. })
@@ -228,7 +231,7 @@ fn status_at(text: &str) -> Option<usize> {
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
 /// into the bounded poison taxonomy.
-pub(crate) fn poison_kind(e: &object_store::Error) -> crate::lane_ctx::PoisonKind {
+pub(crate) fn classify_poison(e: &object_store::Error) -> crate::lane_ctx::PoisonKind {
     use crate::lane_ctx::PoisonKind;
     use object_store::Error as E;
     match e {
@@ -313,7 +316,7 @@ mod tests {
             ),
         ];
         for (text, want) in cases {
-            assert_eq!(classify(&generic(text)), want, "{text}");
+            assert_eq!(classify_store_error(&generic(text)), want, "{text}");
         }
     }
 
@@ -379,9 +382,9 @@ mod tests {
         ];
         for (e, non_retryable, fatal) in &table {
             assert_eq!(
-                classify(e) != crate::error::ErrorClass::Retryable,
+                classify_store_error(e) != crate::error::ErrorClass::Retryable,
                 *non_retryable,
-                "classify({e})"
+                "classify_store_error({e})"
             );
             assert_eq!(is_pipeline_fatal(e), *fatal, "is_pipeline_fatal({e})");
         }
@@ -413,7 +416,7 @@ mod tests {
                      `list_rejected` is dead and can be deleted: {e:?}"
                 );
             }
-            assert_eq!(classify(&e), expected, "{e}");
+            assert_eq!(classify_store_error(&e), expected, "{e}");
         }
     }
 
@@ -440,7 +443,7 @@ mod tests {
                 "{e:?}"
             );
             assert!(e.to_string().contains(status), "{e}");
-            assert_eq!(classify(&e), ErrorClass::Fatal, "{e}");
+            assert_eq!(classify_store_error(&e), ErrorClass::Fatal, "{e}");
             assert!(is_pipeline_fatal(&e), "{e}");
         }
     }
@@ -458,7 +461,7 @@ mod tests {
                 store: "S3",
                 source: text.into(),
             };
-            assert_eq!(classify(&e), ErrorClass::Retryable, "{e}");
+            assert_eq!(classify_store_error(&e), ErrorClass::Retryable, "{e}");
             assert!(!is_pipeline_fatal(&e), "{e}");
         }
     }
@@ -501,7 +504,7 @@ mod tests {
             ),
         ] {
             let e = chain(top);
-            assert_eq!(classify(&e), expected, "{e}");
+            assert_eq!(classify_store_error(&e), expected, "{e}");
         }
     }
 
@@ -566,7 +569,7 @@ mod tests {
             let store = crate::test_servers::tls_store_at(&format!("https://{addr}"), &ca);
             for e in [list_error(&store).await, get_error(&store).await] {
                 assert!(format!("{e:?}").contains(&name), "{e:?}");
-                assert_eq!(classify(&e), expected, "{e:?}");
+                assert_eq!(classify_store_error(&e), expected, "{e:?}");
                 assert_eq!(is_pipeline_fatal(&e), expected == ErrorClass::Fatal, "{e}");
                 if expected == ErrorClass::Fatal {
                     assert!(bounded_reason(&e).contains(&name), "{}", bounded_reason(&e));
@@ -585,7 +588,7 @@ mod tests {
         let store =
             crate::test_servers::tls_store_at(&url, &crate::test_servers::TestCa::new("other"));
         for e in [list_error(&store).await, get_error(&store).await] {
-            assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
+            assert_eq!(classify_store_error(&e), ErrorClass::Fatal, "{e:?}");
             assert!(is_pipeline_fatal(&e), "{e}");
             assert!(
                 matches!(
@@ -610,7 +613,7 @@ mod tests {
         let clients = crate::test_servers::TestCa::new("clients");
         let url = crate::test_servers::serve(&server, Some(&clients)).await;
         let e = list_error(&crate::test_servers::tls_store_at(&url, &server)).await;
-        assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
+        assert_eq!(classify_store_error(&e), ErrorClass::Fatal, "{e:?}");
         assert!(
             bounded_reason(&e).contains("CertificateRequired"),
             "{}",
@@ -685,10 +688,10 @@ mod tests {
     #[test]
     fn a_404_on_a_notification_unit_poisons_it() {
         let e = not_found();
-        assert_eq!(classify(&e), ErrorClass::Fatal);
+        assert_eq!(classify_store_error(&e), ErrorClass::Fatal);
         assert!(!is_pipeline_fatal(&e));
         assert!(!is_overwrite(&e, &notification(None)));
-        assert_eq!(poison_kind(&e), crate::lane_ctx::PoisonKind::NotFound);
+        assert_eq!(classify_poison(&e), crate::lane_ctx::PoisonKind::NotFound);
     }
 
     /// Pins that a 403 on a notification unit's read fails the pipeline, as
@@ -696,7 +699,7 @@ mod tests {
     #[test]
     fn a_403_on_a_notification_unit_fails_the_pipeline() {
         let e = denied();
-        assert_eq!(classify(&e), ErrorClass::Fatal);
+        assert_eq!(classify_store_error(&e), ErrorClass::Fatal);
         assert!(is_pipeline_fatal(&e));
         assert!(!is_overwrite(&e, &notification(None)));
     }
@@ -738,7 +741,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, object_store::Error::Generic { .. }), "{e:?}");
-        assert_eq!(classify(&e), ErrorClass::Retryable, "{e}");
+        assert_eq!(classify_store_error(&e), ErrorClass::Retryable, "{e}");
         assert!(is_overwrite(&e, &notification(None)), "{e}");
         assert!(!is_overwrite(&e, &notification(Some("v1"))), "{e}");
         assert!(!is_overwrite(&e, &Origin::Lister), "{e}");

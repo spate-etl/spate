@@ -469,7 +469,7 @@ impl Core {
 
     fn failed(&self, mut write: Write, failure: Failure) {
         if let Write::Publish { confirmer, .. } = write {
-            let error = match write::classify(failure.code) {
+            let error = match write::classify_write(failure.code) {
                 WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
                 WriteClass::Fatal => self.latch(&failure.reason),
                 // A fatal producer error latches before librdkafka purges
@@ -485,7 +485,7 @@ impl Core {
             return;
         }
         let topic = Arc::clone(&write.message().topic);
-        match write::classify(failure.code) {
+        match write::classify_write(failure.code) {
             WriteClass::Refused | WriteClass::Fatal => {
                 self.latch(&format!(
                     "writing {} to `{topic}` failed: {}",

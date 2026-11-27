@@ -377,7 +377,7 @@ enum Asked {
 }
 
 /// The class of a failed read, from the crate's table of consumer codes.
-fn class(e: &KafkaError, asked: Asked) -> FeedErrorKind {
+fn classify_read(e: &KafkaError, asked: Asked) -> FeedErrorKind {
     match crate::error::classify_kafka_error(e, matches!(asked, Asked::Topic)) {
         ErrorClass::Fatal => FeedErrorKind::Fatal,
         _ => FeedErrorKind::Retryable,
@@ -385,14 +385,14 @@ fn class(e: &KafkaError, asked: Asked) -> FeedErrorKind {
 }
 
 /// A failed read of partitions' offsets.
-fn error(doing: &str, e: &KafkaError) -> FeedError {
-    FeedError::new(class(e, Asked::Partitions), format!("{doing}: {e}"))
+fn partitions_error(doing: &str, e: &KafkaError) -> FeedError {
+    FeedError::new(classify_read(e, Asked::Partitions), format!("{doing}: {e}"))
 }
 
 /// A failed read of `topic`'s metadata.
 fn topic_error(topic: &str, e: &KafkaError) -> FeedError {
     FeedError::new(
-        class(e, Asked::Topic),
+        classify_read(e, Asked::Topic),
         format!("reading the partitions of `{topic}`: {e}"),
     )
 }
@@ -408,7 +408,7 @@ impl Brokers {
         let mut tpl = TopicPartitionList::new();
         for (topic, p) in partitions {
             tpl.add_partition_offset(topic, *p, at)
-                .map_err(|e| error("building an offset request", &e))?;
+                .map_err(|e| partitions_error("building an offset request", &e))?;
         }
         Ok(tpl)
     }
@@ -445,9 +445,9 @@ fn elements(
                     format!("{doing}: no answer for `{topic}` partition {p}"),
                 )
             })?;
-            element
-                .error()
-                .map_err(|e| error(&format!("{doing} on `{topic}` partition {p}"), &e))?;
+            element.error().map_err(|e| {
+                partitions_error(&format!("{doing} on `{topic}` partition {p}"), &e)
+            })?;
             Ok(element.offset())
         })
         .collect()
@@ -528,7 +528,7 @@ impl Offsets for Brokers {
             .consumer
             .committed_offsets(tpl, REQUEST_BOUND)
             .map_err(|e| {
-                error(
+                partitions_error(
                     &format!(
                         "reading the group's committed offsets on {}",
                         named(partitions)
@@ -546,7 +546,7 @@ impl Offsets for Brokers {
             _ => "reading end offsets",
         };
         list_offsets(self.consumer.client(), &mut read, REQUEST_BOUND)
-            .map_err(|e| error(&format!("{doing} of {}", named(partitions)), &e))?;
+            .map_err(|e| partitions_error(&format!("{doing} of {}", named(partitions)), &e))?;
         elements(&read, partitions, doing)?
             .into_iter()
             .zip(partitions)
@@ -1694,14 +1694,14 @@ mod tests {
         ] {
             for asked in [Asked::Topic, Asked::Partitions] {
                 assert_eq!(
-                    class(&KafkaError::MetadataFetch(code), asked),
+                    classify_read(&KafkaError::MetadataFetch(code), asked),
                     FeedErrorKind::Fatal,
                     "{code:?} {asked:?}"
                 );
             }
         }
         assert_eq!(
-            class(
+            classify_read(
                 &KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut),
                 Asked::Topic
             ),
@@ -1755,11 +1755,15 @@ mod tests {
             (RDKafkaErrorCode::LeaderNotAvailable, Retryable, Retryable),
         ] {
             let e = KafkaError::MetadataFetch(code);
-            assert_eq!(class(&e, Asked::Topic), of_topic, "{code:?}");
-            assert_eq!(class(&e, Asked::Partitions), of_partitions, "{code:?}");
+            assert_eq!(classify_read(&e, Asked::Topic), of_topic, "{code:?}");
+            assert_eq!(
+                classify_read(&e, Asked::Partitions),
+                of_partitions,
+                "{code:?}"
+            );
         }
         let no_code = KafkaError::Subscription("no code".into());
-        assert_eq!(class(&no_code, Asked::Topic), Retryable);
+        assert_eq!(classify_read(&no_code, Asked::Topic), Retryable);
     }
 
     /// Pins that an offset read a broker answers `UnknownTopicOrPartition`

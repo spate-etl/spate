@@ -71,6 +71,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn single_object_with_only_its_header_has_an_empty_datum() {
+        let mut payload = vec![0xC3, 0x01];
+        payload.extend_from_slice(&7u64.to_le_bytes());
+        let (fingerprint, datum) = parse_single_object(&payload).unwrap();
+        assert_eq!(fingerprint, 7);
+        assert!(datum.is_empty());
+    }
+
+    #[test]
     fn confluent_parses_id_and_datum() {
         let payload = [0x00, 0x00, 0x00, 0x01, 0x2A, 0xDE, 0xAD];
         let (id, datum) = parse_confluent(&payload).unwrap();

@@ -1710,6 +1710,34 @@ mod tests {
         assert_eq!(lanes_revoked(poll(&mut reader)), vec![LaneId(p.0)]);
     }
 
+    /// A retryable answer to a renewal from a revocation's wait is retried
+    /// at the next renewal and fails nothing.
+    #[test]
+    fn a_retryable_renew_error_during_a_drain_fails_nothing() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let (_, receipt, _) = hold_one(&mut reader, &script);
+        script.refuse_next_renew(FeedErrorKind::Retryable);
+
+        reader.renew_held();
+        reader.renew_held();
+        assert_eq!(script.renewed(), vec![receipt]);
+        poll(&mut reader);
+    }
+
+    /// `Gone` settles a delivery, `Retryable` asks for the request again,
+    /// and any other kind fails with the feed's class.
+    #[test]
+    fn settled_reads_each_feed_answer() {
+        let answer = |kind| settled(Err(FeedError::new(kind, "no")));
+        assert_eq!(settled(Ok(())).unwrap(), Settled::Yes);
+        assert_eq!(answer(FeedErrorKind::Gone).unwrap(), Settled::Yes);
+        assert_eq!(answer(FeedErrorKind::Retryable).unwrap(), Settled::Later);
+        let e = answer(FeedErrorKind::Fatal).unwrap_err();
+        assert_eq!(e.class(), spate_core::error::ErrorClass::Fatal);
+        assert_eq!(e.reason(), "settling a unit: feed error (Fatal): no");
+    }
+
     /// Pins that a fatal answer to a renewal from a revocation's wait fails
     /// the next poll before it settles anything, and that a later renewal
     /// does not clear it. Regression for #1278.

@@ -43,7 +43,7 @@ pub fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
     }
 }
 
-/// A component config tagged `type_tag`, with `yaml` as its body.
+/// A component config of type `component_type`, with `yaml` as its body.
 ///
 /// `yaml` is the section's body without the tag line, and may be indented.
 ///
@@ -51,10 +51,10 @@ pub fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
 ///
 /// Panics if `yaml` does not parse.
 #[must_use]
-pub fn component_config(type_tag: &str, yaml: &str) -> ComponentConfig {
+pub fn component_config(component_type: &str, yaml: &str) -> ComponentConfig {
     let raw = serde_yaml::from_str(yaml)
-        .unwrap_or_else(|e| panic!("component config for {type_tag:?} does not parse: {e}"));
-    ComponentConfig::new(type_tag, raw)
+        .unwrap_or_else(|e| panic!("component config for {component_type:?} does not parse: {e}"));
+    ComponentConfig::new(component_type, raw)
 }
 
 /// `body` in the Confluent wire format: the magic byte `0x00`, `schema_id`
@@ -109,6 +109,6 @@ mod tests {
             component_config("t", "  brokers: a\n  topic: b\n"),
             component_config("t", "brokers: a\ntopic: b\n"),
         );
-        assert_eq!(component_config("t", "  {}\n").type_tag(), "t");
+        assert_eq!(component_config("t", "  {}\n").component_type(), "t");
     }
 }

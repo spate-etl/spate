@@ -66,6 +66,10 @@ impl RecFamily for OrderHeaderF {
 struct OrderHeaderDeser;
 
 impl Deserializer<OrderHeaderF> for OrderHeaderDeser {
+    fn component_type(&self) -> &str {
+        "order_header"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

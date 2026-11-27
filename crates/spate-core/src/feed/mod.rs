@@ -172,11 +172,11 @@ impl Delivery {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct FeedMetricsCtx {
-    /// Scoped `spate_<backend>_feed_*` and pre-labeled with the pipeline,
-    /// `component="feed"` and the [`backend`](Feed::backend) key as
-    /// `component_type`. `None` when the backend key cannot scope a family: a
-    /// reserved root or `custom` opts out silently, and a malformed key is
-    /// logged and also yields `None`.
+    /// Scoped `spate_<component_type>_feed_*` and pre-labeled with the
+    /// pipeline, `component="feed"` and the backend's
+    /// [`component_type`](Feed::component_type). `None` when that type cannot
+    /// scope a family: a reserved root or `custom` opts out silently, and a
+    /// malformed type is logged and also yields `None`.
     pub meter: Option<Meter>,
     /// The calling pipeline's `metrics.per_partition_detail`. Gates the
     /// backend's own per-partition families: when `false`, register and emit
@@ -342,7 +342,7 @@ pub trait Feed: Send + Sync {
     /// The key that names this backend in a `feed:` section, such as
     /// `"memory"`. The runtime refuses a feed whose key differs from the
     /// one the pipeline's [`FeedSection`] names.
-    fn backend(&self) -> &str;
+    fn component_type(&self) -> &str;
 
     /// Hand the backend the waker it signals when a unit becomes ready to
     /// receive, including one that arrived before this call, and after a
@@ -840,7 +840,7 @@ mod tests {
     struct EmptyFeed;
 
     impl Feed for EmptyFeed {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             "empty"
         }
 

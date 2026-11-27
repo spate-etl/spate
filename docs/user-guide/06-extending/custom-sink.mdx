@@ -168,7 +168,9 @@ pool's linger so a demo does not wait a second for its first batch:
 Hand the result to `pipeline.sink(sink)?` and the builder derives the shard
 workers, their queues and their metric labels from the topology it carries.
 
-- `SinkParts::new(writer, shard_endpoints, pool)` — the endpoints are
+- `SinkParts::new(component_type, writer, shard_endpoints, pool)` —
+  `component_type` is the `component_type` metric label on every sink series
+  ([Monitoring](../05-deployment/monitoring.mdx)). The endpoints are
   indexed `[shard][replica]` and must be non-empty with at least one
   replica per shard; the builder rejects ragged or empty topologies before
   anything spawns. `SinkPoolConfig` carries the batching, in-flight, retry,
@@ -179,9 +181,6 @@ workers, their queues and their metric labels from the topology it carries.
   replaces it. The builder runs `SinkPoolConfig::validate` on the result
   before anything spawns and rejects a pool that fails, naming the key
   ([Sink pool](../07-reference/configuration.mdx#sink-pool)).
-- `.with_component_type("...")` — sets the `component_type` metric label
-  (default `"custom"`) on every sink series
-  ([Monitoring](../05-deployment/monitoring.mdx)).
 - `.with_replica_labels(...)` — display labels for per-replica metrics,
   same `[shard][replica]` shape; defaults to
   `"{component_type}-{shard}-{replica}"`.
@@ -216,8 +215,8 @@ A reusable connector exposes a config-built sink type and implements
 that (worked reference:
 [`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs),
 rendered below): `into_parts` moves the writer and the topology its config
-produced into `SinkParts::new`, then chains its refinements: the metric
-`component_type`, per-replica labels derived from the endpoints themselves,
+produced into `SinkParts::new` with its `component_type`, then chains its
+refinements: per-replica labels derived from the endpoints themselves,
 the connectivity probe a hand-rolled sink most often leaves unset, and a frame
 codec when its configuration compresses:
 

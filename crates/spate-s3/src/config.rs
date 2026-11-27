@@ -19,8 +19,8 @@ use url::Url;
 
 use crate::location::{BAD_PREFIX, STORE_URL, offline_store};
 
-/// The source's component type, and the tag its section sits under.
-pub(crate) const TAG: &str = "s3";
+/// The source's component type, and the key its section sits under.
+pub(crate) const COMPONENT_TYPE: &str = "s3";
 
 /// `object_store` option keys the framework owns, refused in the `store`
 /// passthrough at load. The store is built from the `url` field, so a
@@ -193,7 +193,7 @@ impl S3SourceConfig {
     /// [`ConfigError::Component`] naming the refused key under `source.s3`,
     /// such as `source.s3.chunk_bytes: must be greater than zero`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let at = SectionPath::source(TAG);
+        let at = SectionPath::source(COMPONENT_TYPE);
         let url = parse_url(&at, "url", &self.url)?;
         if self.chunk_bytes.as_u64() == 0 {
             return Err(at.invalid("chunk_bytes", "must be greater than zero"));

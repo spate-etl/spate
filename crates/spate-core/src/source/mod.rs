@@ -279,10 +279,10 @@ impl SourceCtx {
 pub struct SourceMetricsCtx {
     /// Scoped `spate_<component_type>_source_*` for the source's own metric
     /// families (e.g. consumer lag, broker statistics), and pre-labeled with
-    /// the standard `pipeline`/`component`/`component_type`. `None` unless the
-    /// source declared a [`Source::component_type`] that is a usable,
-    /// non-reserved namespace. A reserved default (`"source"`) opts out
-    /// silently, and a malformed value is logged and also yields `None`.
+    /// the standard `pipeline`/`component`/`component_type`. `None` when
+    /// [`Source::component_type`] cannot scope a family: `"custom"` or a
+    /// reserved root such as `"source"` opts out silently, and a malformed
+    /// value is logged and also yields `None`.
     pub meter: Option<Meter>,
     /// The framework's own source-stage handles (`spate_source_*`), shared with
     /// the controller. A source that can observe its own consumer lag
@@ -361,16 +361,13 @@ pub trait Source: Send {
     /// The lane type this source produces.
     type Lane: SourceLane;
 
-    /// The `component_type` metric label for this source (e.g. `"kafka"`),
-    /// mirroring [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
-    /// on the sink side. It is also the namespace of the source's custom-metrics
+    /// The key this source registers under (e.g. `"kafka"`), as
+    /// [`SinkParts::component_type`](crate::sink::SinkParts::component_type)
+    /// is on the sink side. It is the `component_type` label on the source's
+    /// stage series and the namespace of its custom-metrics
     /// [`Meter`](SourceMetricsCtx::meter): declaring `"kafka"` scopes the source's own
-    /// families under `spate_kafka_source_*`. The default `"source"` is a reserved
-    /// root, so a source that does not override this gets no custom `Meter`
-    /// (its framework stage metrics are unaffected).
-    fn component_type(&self) -> &str {
-        "source"
-    }
+    /// families under `spate_kafka_source_*`.
+    fn component_type(&self) -> &str;
 
     /// How the payloads this source emits are framed, so the framework can
     /// pair it with a deserializer without the two being coordinated by hand

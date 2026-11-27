@@ -14,7 +14,6 @@ use crate::error::DeserError;
 #[cfg(not(loom))]
 use crate::framing::FramingContract;
 use crate::metrics::Meter;
-use crate::metrics::names::DESERIALIZER_DEFAULT;
 use crate::record::{Flow, RawPayload, Record};
 
 /// Maps a payload-buffer lifetime to the deserialized record type.
@@ -62,16 +61,13 @@ pub trait Deserializer<F: RecFamily>: Send {
         out: &mut dyn EmitRecord<'buf, F::Rec<'buf>>,
     ) -> Result<(), DeserError>;
 
-    /// The implementation label (`"json"`, `"avro"`) on this deserializer's
-    /// stage series and on the `Meter` it receives, which is scoped
-    /// `spate_<component_type>_deser_*`. The default,
-    /// [`DESERIALIZER_DEFAULT`],
-    /// receives no `Meter`.
+    /// The key this deserializer registers under (`"json"`, `"avro"`). It is
+    /// the `component_type` label on the chain's `spate_deser_*` series and
+    /// the namespace of the `Meter` the deserializer receives, scoped
+    /// `spate_<component_type>_deser_*`.
     ///
     /// A deserializer that wraps another returns the inner one's type.
-    fn component_type(&self) -> &str {
-        DESERIALIZER_DEFAULT
-    }
+    fn component_type(&self) -> &str;
 
     /// Receive the [`DeserMetricsCtx`] for this deserializer's own metric
     /// families. A chain's
@@ -112,9 +108,8 @@ pub struct DeserMetricsCtx {
     /// Scoped `spate_<component_type>_deser_*` and pre-labeled with the
     /// pipeline, the chain's `<component>.deserializer` and the deserializer's
     /// [`component_type`](Deserializer::component_type). `None` when that type
-    /// cannot scope a family: the default `"deserializer"`, `"custom"` or a
-    /// reserved root opts out silently, and a malformed value is logged and
-    /// also yields `None`.
+    /// cannot scope a family: `"custom"` or a reserved root opts out
+    /// silently, and a malformed value is logged and also yields `None`.
     pub meter: Option<Meter>,
 }
 
@@ -143,11 +138,19 @@ impl DeserMetricsCtx {
 }
 
 /// Passthrough deserializer: yields the raw bytes as owned `Vec<u8>`
-/// records. Useful for byte-oriented pipelines and tests.
+/// records. Useful for byte-oriented pipelines and tests. Its
+/// `component_type` is `passthrough`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BytesPassthrough;
 
+/// The key [`BytesPassthrough`] reports.
+const COMPONENT_TYPE: &str = "passthrough";
+
 impl Deserializer<Owned<Vec<u8>>> for BytesPassthrough {
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

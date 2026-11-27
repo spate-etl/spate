@@ -286,13 +286,13 @@ impl Rig {
         let mut pool = SinkPoolConfig::default();
         pool.batch.linger = LINGER;
         let sink = SinkParts::new(
+            "discard",
             NullWriter {
                 written: Arc::clone(&written),
             },
             vec![vec![()]],
             pool,
-        )
-        .with_component_type("discard");
+        );
         let runtime = pipeline
             .sink(sink)
             .expect("the sink installs")

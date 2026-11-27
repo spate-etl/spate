@@ -728,8 +728,8 @@ struct Observing {
 }
 
 impl Feed for Observing {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
     fn set_waker(&self, waker: FeedWaker) {
         self.inner.set_waker(waker);
@@ -1207,6 +1207,30 @@ fn a_lister_on_the_memory_feed_with_a_location_refuses() {
     assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
     assert!(err.reason().contains("`feed.location`"), "{err}");
     assert!(script.published().is_empty());
+    assert_eq!(hooks.requests(), 0);
+}
+
+/// Pins that a lister run given a feed other than the one its section names
+/// refuses, naming both, before it sends any request.
+#[test]
+fn a_lister_given_a_feed_the_section_does_not_name_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (data_store, spy) = spying_local_store(SpyOptions::default());
+    let (store, hooks) = location_store();
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_store(data_store)
+        .with_location_store(store)
+        .list_once(&section("sqs", Some(LOCATION)), Arc::new(feed))
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("names the `sqs` feed"), "{err}");
+    assert!(err.reason().contains("given the `scripted` feed"), "{err}");
+    assert!(script.published().is_empty());
+    assert_eq!(spy.lists(), 0);
     assert_eq!(hooks.requests(), 0);
 }
 
@@ -1959,7 +1983,7 @@ fn a_solo_run_reads_small_objects_as_one_unit() {
 struct AsMemory(ScriptedFeed);
 
 impl Feed for AsMemory {
-    fn backend(&self) -> &str {
+    fn component_type(&self) -> &str {
         "memory"
     }
     fn set_waker(&self, waker: FeedWaker) {
@@ -2108,8 +2132,8 @@ fn a_failed_solo_listing_fails_the_run() {
 struct PanickingPublish(MemoryFeed);
 
 impl Feed for PanickingPublish {
-    fn backend(&self) -> &str {
-        self.0.backend()
+    fn component_type(&self) -> &str {
+        self.0.component_type()
     }
     fn set_waker(&self, waker: FeedWaker) {
         self.0.set_waker(waker);

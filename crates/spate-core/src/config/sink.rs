@@ -87,7 +87,7 @@ impl SinkSection {
     ///     "memory",
     ///     YamlValue::Mapping(Default::default()),
     /// ));
-    /// assert_eq!(sink.backend().type_tag(), "memory");
+    /// assert_eq!(sink.backend().component_type(), "memory");
     /// ```
     #[must_use]
     pub fn new(backend: ComponentConfig) -> SinkSection {

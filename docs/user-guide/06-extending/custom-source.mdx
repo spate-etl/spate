@@ -105,6 +105,9 @@ and idles forever after; a real source services its client here on every call:
 The example records its watermarks in a map its own assertions read back. Store
 them wherever your source resumes from instead.
 
+- **`component_type`** returns the key your source is configured under. It
+  is the `component_type` label on the source's series and the namespace of
+  its own metrics ([Instrumenting connectors](instrumenting-connectors.mdx)).
 - **`attach_metrics`** (default no-op) runs once, before `open`, and hands
   you a `SourceMetricsCtx` with your `Meter` and the framework's stage
   handles. Resolve your metric handles here
@@ -422,9 +425,9 @@ To implement a feed backend, keep every method free of waits:
 
 A backend also answers to its name in the `feed:` section:
 
-- Return your `feed:` key from `backend`. The runtime refuses a feed whose
-  key differs from the one the section names. The scripted test feed returns
-  `"scripted"`.
+- Return your `feed:` key from `component_type`. The runtime refuses a feed
+  whose key differs from the one the section names. The scripted test feed
+  returns `"scripted"`.
 - The key is also the namespace of your own metric families,
   `spate_<key>_feed_*`, which you register through the `Meter` in the context
   `attach_metrics` hands you

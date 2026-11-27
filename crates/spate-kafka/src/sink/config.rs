@@ -28,7 +28,9 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, Role, TAG, canonical, check_message_timeout, check_topic_name};
+use crate::client::{
+    Base, COMPONENT_TYPE, Keys, Role, canonical, check_message_timeout, check_topic_name,
+};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -313,7 +315,7 @@ impl KafkaSinkConfig {
     /// [`ConfigError::Component`] for the first setting it refuses, starting
     /// at `sink.kafka`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.validate_at(&SectionPath::sink(TAG))
+        self.validate_at(&SectionPath::sink(COMPONENT_TYPE))
     }
 
     /// [`validate`](Self::validate), with each error starting at `at`.
@@ -488,10 +490,14 @@ impl SinkBundle for KafkaSink {
             .iter()
             .map(|shard| shard.iter().map(|e| e.label().to_string()).collect())
             .collect();
-        SinkParts::new(self.writer, self.endpoints, SinkPoolConfig::default())
-            .with_component_type("kafka")
-            .with_replica_labels(replica_labels)
-            .with_probe(probe)
+        SinkParts::new(
+            COMPONENT_TYPE,
+            self.writer,
+            self.endpoints,
+            SinkPoolConfig::default(),
+        )
+        .with_replica_labels(replica_labels)
+        .with_probe(probe)
     }
 }
 
@@ -525,7 +531,7 @@ impl KafkaSink {
     pub fn new(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         build_on(
             cfg,
-            &SectionPath::sink(TAG),
+            &SectionPath::sink(COMPONENT_TYPE),
             SyncClock::system(),
             Arc::new(IoSystemClock),
         )
@@ -574,7 +580,7 @@ impl KafkaSink {
     ) -> Result<KafkaSink, ConfigError> {
         build_on(
             cfg,
-            &SectionPath::sink(TAG),
+            &SectionPath::sink(COMPONENT_TYPE),
             SyncClock::new(clock),
             io_clock,
         )

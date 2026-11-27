@@ -447,7 +447,10 @@ mod tests {
             crate::config::YamlValue::Mapping(Default::default()),
         ));
         let refusal = rig.feed.check_section(&section).unwrap_err();
-        assert_eq!(refusal.to_string(), "invalid configuration: refused by the fake");
+        assert_eq!(
+            refusal.to_string(),
+            "invalid configuration: refused by the fake"
+        );
         let delivered = rig.feed.receive(4).unwrap();
         assert_eq!(delivered[0].receipt, Receipt(7));
         rig.fake.refuse(FeedErrorKind::Retryable);

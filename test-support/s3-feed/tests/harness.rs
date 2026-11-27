@@ -87,8 +87,8 @@ fn the_recording_passes_each_call_on_and_records_it() {
 #[test]
 fn the_recording_passes_the_section_check_on() {
     let recording = Recording::new(Arc::new(MemoryFeed::new()));
-    let section: FeedSection = serde_yaml::from_str("memory: {}\nlocation: s3://ops/jobs/1/")
-        .expect("section");
+    let section: FeedSection =
+        serde_yaml::from_str("memory: {}\nlocation: s3://ops/jobs/1/").expect("section");
     let err = recording.check_section(&section).unwrap_err().to_string();
     assert!(err.contains("`feed.location`"), "{err}");
 }

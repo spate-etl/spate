@@ -1019,6 +1019,65 @@ fn a_lister_on_a_durable_feed_without_a_location_refuses() {
     assert_eq!(hooks.requests(), 0);
 }
 
+/// A scripted feed that refuses every `feed:` section in `check_section`.
+struct RefusingSection(ScriptedFeed);
+
+const SECTION_REFUSAL: &str = "feed.scripted: `attempt_cap` does not apply to `scripted`";
+
+impl Feed for RefusingSection {
+    fn backend(&self) -> &str {
+        self.0.backend()
+    }
+    fn check_section(&self, _section: &FeedSection) -> Result<(), ConfigError> {
+        Err(ConfigError::Validation(SECTION_REFUSAL.into()))
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.0.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.0.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.0.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.0.publish(unit)
+    }
+}
+
+/// Pins that a lister run hands the section to the feed's `check_section`
+/// and fails with its refusal before it sends any request.
+#[test]
+fn a_lister_whose_feed_refuses_the_section_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (data_store, spy) = spying_local_store(SpyOptions::default());
+    let (store, hooks) = location_store();
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_store(data_store)
+        .with_location_store(store)
+        .list_once(
+            &section("scripted", Some(LOCATION)),
+            Arc::new(RefusingSection(feed)),
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains(SECTION_REFUSAL), "{err}");
+    assert!(script.published().is_empty());
+    assert_eq!(spy.lists(), 0);
+    assert!(spy.gets().is_empty());
+    assert_eq!(hooks.requests(), 0);
+}
+
 /// A lister source over `s3://data-bucket/data/`, reading `data` and keeping
 /// its job location in `location`.
 fn resuming_source(

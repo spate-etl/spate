@@ -400,6 +400,8 @@ impl S3Source {
                 feed.backend()
             )));
         }
+        feed.check_section(section)
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(SourceError::fatal(
                 "a lister run blocks its thread until it ends, so it is called from a plain \

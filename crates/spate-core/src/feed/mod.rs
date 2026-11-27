@@ -341,7 +341,7 @@ impl Eq for FeedError {}
 pub trait Feed: Send + Sync {
     /// The key that names this backend in a `feed:` section, such as
     /// `"memory"`. The runtime refuses a feed whose key differs from the
-    /// one the pipeline's [`FeedSection`](crate::config::FeedSection) names.
+    /// one the pipeline's [`FeedSection`] names.
     fn backend(&self) -> &str;
 
     /// Hand the backend the waker it signals when a unit becomes ready to

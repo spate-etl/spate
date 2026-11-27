@@ -55,7 +55,7 @@ fan-out, and when to drop down to the `Collector`/`StageLifecycle` traits.
 Every stage is pre-instrumented by the engine; this page covers where a
 connector *adds* to that: feeding a framework handle with signals only it can
 see (a source driving `SourceMetrics` for consumer lag), carrying the
-standard labels via `with_component_type` / `with_replica_labels`, and
+standard labels via `component_type` / `with_replica_labels`, and
 registering your own metric on the same `metrics` facade when the taxonomy
 doesn't cover it.
 

@@ -82,8 +82,7 @@ in your hands. See [Manual assembly](../03-guides/manual-assembly.mdx).
   - `component` — the framework component identifier (source metrics use
     `component="source"`; a deserializer stage may use `main.deserializer`);
   - `component_type` — the implementation, such as a connector type or an
-    operator kind (`map`, `filter`); custom sinks set it via
-    `SinkParts::with_component_type`.
+    operator kind (`map`, `filter`). Every component declares its own.
 - **Cardinality is mostly opt-in**: `partition`-labeled series appear only
   with `metrics.per_partition_detail: true` (default `false`), because their
   cardinality grows with the assignment. The one exception is

@@ -21,14 +21,15 @@ never be one of the framework's reserved stage roots (`source`, `deser`,
 `feed`, `e2e`, `pipeline`), so custom families cannot collide with a framework
 metric. A built-in source or sink receives its `Meter` from the runtime, scoped
 by its declared `component_type` and its role (`spate_<component_type>_source_*`
-/ `_sink_*`). A feed backend receives one scoped by its backend key
-(`spate_<backend>_feed_*`), so a connector that plays more than one role keeps
-its families apart. A deserializer receives one from the chain's `with_metrics`,
-scoped `spate_<component_type>_deser_*` and labeled like its `spate_deser_*`
-stage, so the two join on `pipeline` and `component`. A deserializer that
-declares no `component_type` receives none. A `Meter` local name may not begin
-with a role segment (`source_`, `sink_`, `feed_`, `deser_`), because the
-framework reserves those to scope a component by role. Dropping to the raw
+/ `_sink_*`). A feed backend receives one scoped by its `component_type`
+(`spate_<component_type>_feed_*`), so a connector that plays more than one role
+keeps its families apart. A deserializer receives one from the chain's
+`with_metrics`, scoped `spate_<component_type>_deser_*` and labeled like its
+`spate_deser_*` stage, so the two join on `pipeline` and `component`. A
+component whose `component_type` is a reserved root or `custom` receives none.
+A `Meter` local name may not begin with a role segment (`source_`, `sink_`,
+`feed_`, `deser_`), because the framework reserves those to scope a component
+by role. Dropping to the raw
 `metrics` macros is the escape hatch for
 a metric you deliberately want *outside* the `spate_` namespace. See
 [Instrumenting connectors](user-guide/06-extending/instrumenting-connectors.mdx).
@@ -203,7 +204,7 @@ Consequences worth stating outright:
 
 A chain built with `with_metrics(pipeline, component)` labels its deserializer
 stage `component="<component>.deserializer"`. The `component_type` label is the
-type the deserializer declares, or `deserializer` when it declares none.
+type the deserializer declares.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|

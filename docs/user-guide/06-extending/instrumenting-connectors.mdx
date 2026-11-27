@@ -121,14 +121,13 @@ metrics handle. See [Custom sinks](custom-sink.mdx).
 Every framework series carries three standard labels (`pipeline`, `component`,
 `component_type`), plus stage-specific ones (`shard`, `replica`, `partition`).
 `component` and `pipeline` come from `with_metrics(pipeline, component)` at
-assembly. A source or a deserializer sets `component_type` by overriding its
-trait's `component_type` method. The ones you set as a sink author are on the
-sink builder:
+assembly. Every component declares its `component_type`: a source, a
+deserializer or a feed backend through its trait's required `component_type`
+method, and a sink as the first argument of `SinkParts::new`. Every shipped
+connector declares the key its YAML section sits under, and yours should name
+your implementation. The other labels you set as a sink author are on the sink
+builder:
 
-- `SinkParts::with_component_type("...")` sets `component_type`
-  (default `"custom"`) on every sink series. Every shipped sink sets it to the
-  system it writes to, and yours should read as whatever names your
-  implementation.
 - `SinkParts::with_replica_labels(...)` supplies the display names bound to the
   `replica` label, so per-replica health and error series identify the right
   endpoint.
@@ -319,13 +318,12 @@ pipeline authors. A **`Source`, sink `ShardWriter`, `Feed` backend or
 pre-scoped `Meter`, so a connector never wires the pipeline name, the labels,
 or the prefix.
 
-- **Declare a `component_type`.** A source overrides
-  [`Source::component_type`](../07-reference/README.mdx) (default `"source"`); a
-  sink sets it via `SinkParts::with_component_type` (default `"custom"`). That
-  string is both the standard `component_type` label *and* the metric namespace,
-  so it must be a distinct, non-reserved segment: the defaults (`"source"`,
-  `"custom"`) opt out (see below), and `"custom"` in particular is reserved for
-  pipeline-author metrics.
+- **Declare a `component_type`.** A source implements
+  [`Source::component_type`](../07-reference/README.mdx); a sink passes it to
+  `SinkParts::new`. That string is both the standard `component_type` label
+  *and* the metric namespace, so it must be a distinct, non-reserved segment:
+  a reserved root such as `"source"` and the pipeline-author bucket `"custom"`
+  opt out (see below).
 - **Receive the `Meter`.** A source reads `Option<Meter>` from `SourceCtx` in
   `open`; a sink's writer overrides `ShardWriter::attach_metrics`, which the
   builder calls once before the writer is shared, with a `SinkMetricsCtx`
@@ -338,14 +336,15 @@ or the prefix.
   [`Feed::attach_metrics`](../07-reference/README.mdx), which the runtime calls
   before it hands the feed to the source, with a `FeedMetricsCtx` holding the
   `Meter` and the pipeline's `per_partition_detail`. Its namespace is its
-  `Feed::backend` key, and its families land under `spate_<backend>_feed_*`
+  `Feed::component_type`, the key its `feed:` section names, and its families
+  land under `spate_<component_type>_feed_*`
   with `component="feed"`, beside the framework's own `spate_feed_*` families
   for the same feed. The backend's own tasks and calls go without the `Meter`
   until it arrives, and a feed handed to a source directly never receives one,
   so treat the handles as optional.
-- **A deserializer** overrides
-  [`Deserializer::component_type`](../07-reference/README.mdx) (default
-  `"deserializer"`) and `Deserializer::attach_metrics`, which a chain's
+- **A deserializer** implements
+  [`Deserializer::component_type`](../07-reference/README.mdx) and overrides
+  `Deserializer::attach_metrics`, which a chain's
   `with_metrics` calls with a `DeserMetricsCtx` holding the `Meter`. Its
   families land under `spate_<component_type>_deser_*` with
   `component="<component>.deserializer"`, the labels of the chain's own
@@ -375,13 +374,9 @@ families and the framework's `spate_checkpoint_*` detail; it does **not** gate
 `spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
-root (an undeclared source keeps `"source"`), the author-reserved `"custom"`
-(a sink's default) or an undeclared deserializer's `"deserializer"` opts out
-silently, and a value that is a legal label but an
-illegal metric-name segment (a hyphen, say) is logged at `warn` and
-also yields `None`. A component gets a scope only once it declares a
-distinct, well-formed `component_type`. A feed backend's `Meter` follows the
-same rule over its `Feed::backend` key.
+root such as `"source"` or the author-reserved `"custom"` opts out silently, and
+a value that is a legal label but an illegal metric-name segment (a hyphen, say)
+is logged at `warn` and also yields `None`. The rule is the same for every role.
 
 A feed backend family counted per feed call takes its `op` label from
 [`FeedOp::label`](../07-reference/README.mdx), the values the framework's

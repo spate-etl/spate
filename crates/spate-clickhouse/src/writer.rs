@@ -512,6 +512,14 @@ mod tests {
         assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
     }
 
+    /// An insert retries a client error `class_of` does not name, such as the
+    /// `Custom` error the client returns for a cancelled request task.
+    #[test]
+    fn an_insert_retries_an_unnamed_client_error() {
+        let err = classify(clickhouse::error::Error::Custom("task cancelled".into()));
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    }
+
     /// `class_of` gives each variant it names the same class whatever the
     /// caller's `otherwise`, and every other variant `otherwise`. A server
     /// answer with no exception code, as a proxy's 503 page has, is

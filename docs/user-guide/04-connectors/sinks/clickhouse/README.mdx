@@ -122,9 +122,12 @@ server fails a request that carries another spelling, such as
 
 When the sink is built, it sends `settings` to every replica on a `SELECT 1`,
 together with `deduplicate_insert`. A setting a replica refuses fails startup
-with an error of kind `Refused`, that replica's URL and the server's message.
-That covers a name the server does not know and a value it cannot parse. A
-misspelled `insert_quorum` fails like this:
+with that replica's URL and the server's message. That covers a name the server
+does not know and a value it cannot parse. The error is of kind `Refused` when
+the server's code is one an insert also treats as fatal, such as an unknown
+name, a constraint that pins the setting, or a bool that does not parse. Any
+other code, such as the one for a value an enum setting does not accept, is of
+kind `Unavailable`. A misspelled `insert_quorum` fails like this:
 
 ```text
 the ClickHouse sink cannot start: sink.clickhouse: replica http://ch-1.internal:8123 failed the settings check: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …

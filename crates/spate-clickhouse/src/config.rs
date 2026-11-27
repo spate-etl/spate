@@ -700,13 +700,14 @@ impl ClickHouseSinkBuilder {
     ///   format does not support ([`SchemaError::Mismatch`]); or the cluster
     ///   or DDL disagrees with `distributed_check`.
     /// - `Refused` for a request that fails the same way on every attempt: a
-    ///   rejected TLS certificate, a server exception the sink classes as
-    ///   fatal at insert too, such as a refused setting or a denied grant, or
-    ///   a reply that does not decode.
+    ///   rejected TLS certificate, a server exception whose code the sink
+    ///   classes as fatal at insert too, such as an unknown setting name or a
+    ///   denied grant, or a reply that does not decode.
     /// - [`Unavailable`](spate_core::error::ConnectErrorKind::Unavailable)
-    ///   for a request that may pass: a connection that fails or times out,
-    ///   any other server answer, such as a proxy's 503, and a replica that
-    ///   gives no answer within `startup_timeout`.
+    ///   for any other failed request: a connection that fails or times out,
+    ///   a server answer with any other code or none, such as a proxy's 503
+    ///   or a value an enum setting does not accept, and a replica that gives
+    ///   no answer within `startup_timeout`.
     ///
     /// A failed request is a [`SchemaError::Fetch`] for the schema read,
     /// [`SchemaError::Settings`] for the settings check, and a

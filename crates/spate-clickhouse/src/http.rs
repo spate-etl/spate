@@ -97,17 +97,17 @@ impl StartupBound {
         &self,
         request: impl Future<Output = Result<T, clickhouse::error::Error>>,
     ) -> Result<T, Classed<String>> {
-        let refused = |e: clickhouse::error::Error| Classed {
+        let classed = |e: clickhouse::error::Error| Classed {
             class: class_of(&e, ErrorClass::Fatal),
             error: error_reason(&e),
         };
         let Some(limit) = self.limit else {
-            return request.await.map_err(refused);
+            return request.await.map_err(classed);
         };
         let bound = ThreadBound::new("spate-clickhouse-startup-bound", limit)
             .with_clock(self.clock.clone());
         match bound.run(request).await {
-            Ok(answer) => answer.map_err(refused),
+            Ok(answer) => answer.map_err(classed),
             Err(stopped) => Err(Classed {
                 class: ErrorClass::Retryable,
                 error: match stopped {

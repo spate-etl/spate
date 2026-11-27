@@ -373,7 +373,7 @@ impl Harness {
         )
     }
 
-    /// [`Self::end_offsets`] as one call per partition, for a caller whose own
+    /// [`Self::end_offsets`] as one read per partition, for a caller whose own
     /// wait reads again.
     pub fn end_offsets_once(&self, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
         ends_once(
@@ -1197,7 +1197,7 @@ fn read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<i64> {
     .expect("the wait ends on a read")
 }
 
-/// [`read_ends`] as one call per partition, for a caller whose own wait reads
+/// [`read_ends`] as one read per partition, for a caller whose own wait reads
 /// again.
 pub fn ends_once(probe: &BaseConsumer, topic: &str, partitions: i32) -> Result<Vec<i64>, String> {
     ends_by(partitions, |p| high_watermark_once(probe, topic, p))

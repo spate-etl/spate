@@ -430,7 +430,7 @@ fn topic_count(brokers: &str, topic: &str) -> usize {
     .expect("the wait ends on a read")
 }
 
-/// [`topic_count`] as one metadata read and one call per partition, for a
+/// [`topic_count`] as one metadata read and one read per partition, for a
 /// caller whose own wait reads again. A topic no listing names holds 0.
 fn topic_count_once(brokers: &str, topic: &str) -> Result<usize, String> {
     let probe = support::probe_consumer(brokers, &format!("probe-{}", std::process::id()));

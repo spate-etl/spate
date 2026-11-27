@@ -327,8 +327,8 @@ pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i6
         .sum()
 }
 
-/// How many messages `partition` of `topic` holds, as one client call, for a
-/// caller whose own wait reads again.
+/// How many messages `partition` of `topic` holds, as one read, for a caller
+/// whose own wait reads again.
 pub(crate) fn high_watermark_once(
     brokers: &str,
     topic: &str,

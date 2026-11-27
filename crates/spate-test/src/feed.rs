@@ -1104,6 +1104,12 @@ mod tests {
         );
     }
 
+    /// Pins the key a `feed:` section names the scripted feed by.
+    #[test]
+    fn the_scripted_feed_reports_the_scripted_key() {
+        assert_eq!(scripted_feed().0.component_type(), "scripted");
+    }
+
     /// Pins that `refusals_left` counts the publish refusals not yet served.
     #[test]
     fn refusals_left_counts_unserved_publish_refusals() {

@@ -311,6 +311,12 @@ mod tests {
         }
     }
 
+    /// Pins the type that labels a chain's stage over the test deserializer.
+    #[test]
+    fn the_test_deserializer_reports_the_test_type() {
+        assert_eq!(TestDeserializer::passthrough().component_type(), "test");
+    }
+
     /// Each `NotReady` is followed by one `between` and one replay, and the
     /// first answer that is not `NotReady` is returned.
     #[test]

@@ -38,7 +38,7 @@
 //! HEADs the key and reports its current content as
 //! [`SplitFailure::Overwritten`], so the reader can re-enqueue the key.
 
-use crate::error::classify;
+use crate::error::classify_store_error;
 use crate::lane_ctx::{LaneLabel, PoisonKind};
 use crate::metrics::FetchCounters;
 use crate::split::SplitRange;
@@ -970,7 +970,7 @@ async fn retry_or_fail(
     budget: &mut ReadBudget,
     counters: Option<&FetchCounters>,
 ) -> Result<(), SplitFailure> {
-    if classify(e) != ErrorClass::Retryable {
+    if classify_store_error(e) != ErrorClass::Retryable {
         let reason = format!(
             "split {split}: reading \"{}\" failed at byte {delivered}: {}",
             entry.key,
@@ -979,7 +979,7 @@ async fn retry_or_fail(
         return Err(fatal_or_poison(
             e,
             reason.clone(),
-            crate::error::poison_kind(e),
+            crate::error::classify_poison(e),
             reason,
         ));
     }

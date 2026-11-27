@@ -807,6 +807,18 @@ mod tests {
         assert_ne!(sourced, plain().with_source(ClientError));
     }
 
+    /// An attached source is what `source()` returns, and `find_source`
+    /// reaches it.
+    #[test]
+    fn with_source_is_the_source_of_a_feed_error() {
+        let err = FeedError::new(FeedErrorKind::Fatal, "a").with_source(ClientError);
+        let source = std::error::Error::source(&err).expect("the attached source");
+        assert_eq!(source.to_string(), "client error");
+        assert!(crate::error::find_source::<ClientError>(&err).is_some());
+        let plain = FeedError::new(FeedErrorKind::Fatal, "a");
+        assert!(std::error::Error::source(&plain).is_none());
+    }
+
     /// A feed with nothing in it, which only has to compile behind `dyn`.
     struct EmptyFeed;
 

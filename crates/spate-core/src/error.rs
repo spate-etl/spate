@@ -784,15 +784,14 @@ mod tests {
     }
 
     /// An attached source is what `source()` returns, and `find_source`
-    /// reaches it through every role error. Without one, `source()` is none.
+    /// reaches it through every role error defined here. Without one,
+    /// `source()` is none. The feed module tests `FeedError`.
     #[test]
     fn with_source_is_the_source_of_every_role_error() {
-        use crate::feed::{FeedError, FeedErrorKind};
-        let errors: [Box<dyn std::error::Error>; 4] = [
+        let errors: [Box<dyn std::error::Error>; 3] = [
             Box::new(SourceError::fatal("a").with_source(Target(1))),
             Box::new(SinkError::fatal("a").with_source(Target(2))),
             Box::new(DeserError::fatal("a").with_source(Target(3))),
-            Box::new(FeedError::new(FeedErrorKind::Fatal, "a").with_source(Target(4))),
         ];
         for (want, err) in (1..).zip(&errors) {
             let source = err.source().expect("the attached source");

@@ -157,7 +157,6 @@ A classifier that adds one operation's context, such as whether an insert body i
 **Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
 
 - spate-sqs: `classify`.
-- spate-avro: the registry's `failure`.
 - spate-kafka: the sink's `classify`, the feed's `classify`, `class`, `error` and `classified`, and `report_class`, kept outside `error.rs`.
 - spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
 

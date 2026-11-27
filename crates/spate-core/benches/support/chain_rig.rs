@@ -43,6 +43,10 @@ impl RecFamily for SubF {
 #[derive(Clone)]
 struct BorrowDeser;
 impl Deserializer<LogF> for BorrowDeser {
+    fn component_type(&self) -> &str {
+        "bench"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -63,6 +67,10 @@ impl Deserializer<LogF> for BorrowDeser {
 #[derive(Clone)]
 struct OwnedDeser;
 impl Deserializer<Owned<Vec<u8>>> for OwnedDeser {
+    fn component_type(&self) -> &str {
+        "bench"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

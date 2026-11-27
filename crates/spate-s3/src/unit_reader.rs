@@ -1194,8 +1194,8 @@ mod tests {
     }
 
     impl Feed for Refusing {
-        fn backend(&self) -> &str {
-            self.inner.backend()
+        fn component_type(&self) -> &str {
+            self.inner.component_type()
         }
 
         fn set_waker(&self, waker: FeedWaker) {
@@ -3999,8 +3999,8 @@ mod tests {
     }
 
     impl Feed for FailHook {
-        fn backend(&self) -> &str {
-            self.inner.backend()
+        fn component_type(&self) -> &str {
+            self.inner.component_type()
         }
 
         fn set_waker(&self, waker: FeedWaker) {

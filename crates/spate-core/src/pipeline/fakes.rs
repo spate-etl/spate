@@ -627,7 +627,7 @@ impl HandingBack {
 }
 
 impl crate::feed::Feed for HandingBack {
-    fn backend(&self) -> &str {
+    fn component_type(&self) -> &str {
         self.backend
     }
 

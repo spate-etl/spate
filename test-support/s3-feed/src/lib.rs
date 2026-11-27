@@ -152,8 +152,8 @@ impl<F> Recording<F> {
 }
 
 impl<F: Feed> Feed for Recording<F> {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
 
     fn set_waker(&self, waker: FeedWaker) {

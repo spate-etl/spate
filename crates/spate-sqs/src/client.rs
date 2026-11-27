@@ -2,7 +2,7 @@
 //! credentials, timeouts and retries.
 
 use crate::config::SqsFeedConfig;
-use crate::config::{BACKEND, COMPONENT};
+use crate::config::{COMPONENT, COMPONENT_TYPE};
 use crate::credentials::SharedLoad;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -129,7 +129,7 @@ async fn chain_region(http: &SharedHttpClient) -> Result<Region, ConnectError> {
 /// The region `chain` names, or the error that lists where to set one.
 async fn first_region(chain: &impl ProvideRegion) -> Result<Region, ConnectError> {
     chain.region().await.ok_or_else(|| {
-        ConnectError::from(SectionPath::feed(BACKEND).invalid(
+        ConnectError::from(SectionPath::feed(COMPONENT_TYPE).invalid(
             "region",
             "no AWS region: set `region`, set AWS_REGION in the environment, or set `region` in \
              the shared config file's profile",
@@ -166,7 +166,7 @@ fn require_roots(roots: TrustRoots, https: bool) -> Result<(), ConnectError> {
 }
 
 fn root_ca_error(e: TrustError) -> ConnectError {
-    SectionPath::feed(BACKEND)
+    SectionPath::feed(COMPONENT_TYPE)
         .invalid("tls.root_ca", e.to_string())
         .into()
 }

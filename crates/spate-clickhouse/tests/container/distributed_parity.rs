@@ -144,6 +144,10 @@ fn parse_batch(text: &str) -> SkuBatch {
 struct BatchDeser;
 
 impl Deserializer<Owned<SkuBatch>> for BatchDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

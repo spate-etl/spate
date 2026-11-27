@@ -23,7 +23,7 @@
 //! because its receipt no longer holds the message, is dropped unseen too.
 
 use crate::client;
-use crate::config::{BACKEND, COMPONENT, SqsFeedConfig};
+use crate::config::{COMPONENT, COMPONENT_TYPE, SqsFeedConfig};
 use crate::error::CallError;
 use crate::metrics::{Refusal, SqsFeedMetrics};
 use crate::queue::{
@@ -691,8 +691,8 @@ fn gone(receipt: Receipt) -> FeedError {
 }
 
 impl Feed for SqsFeed {
-    fn backend(&self) -> &str {
-        BACKEND
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
     }
 
     fn set_waker(&self, waker: FeedWaker) {

@@ -407,7 +407,7 @@ impl AvroValueDeserializer {
 
 impl Deserializer<Owned<AvroValue>> for AvroValueDeserializer {
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn deserialize<'buf>(
@@ -489,7 +489,7 @@ where
     T: serde::de::DeserializeOwned + Send + 'static,
 {
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn deserialize<'buf>(

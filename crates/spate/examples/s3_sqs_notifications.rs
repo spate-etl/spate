@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .feed
         .clone()
         .ok_or("the file names no feed")?;
-    let feed = match section.backend().type_tag() {
+    let feed = match section.backend().component_type() {
         "sqs" => Arc::new(SqsFeed::connect(&section, &pipeline.io_handle())?),
         other => return Err(format!("this binary builds the `sqs` feed, not `{other}`").into()),
     };

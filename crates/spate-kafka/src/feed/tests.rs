@@ -788,7 +788,7 @@ fn a_publish_only_handle_reports_no_depth() {
 #[test]
 fn a_publisher_answers_the_receive_side() {
     let publisher = idle_publisher();
-    assert_eq!(publisher.backend(), "kafka");
+    assert_eq!(publisher.component_type(), "kafka");
     assert!(!publisher.hands_back());
     let err = publisher.receive(8).unwrap_err();
     assert_eq!(err.kind(), FeedErrorKind::Fatal);

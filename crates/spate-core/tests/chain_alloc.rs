@@ -44,6 +44,10 @@ impl RecFamily for SubF {
 #[derive(Clone)]
 struct LogDeser;
 impl Deserializer<LogF> for LogDeser {
+    fn component_type(&self) -> &str {
+        "test"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

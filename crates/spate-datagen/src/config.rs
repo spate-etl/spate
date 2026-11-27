@@ -25,14 +25,14 @@ pub(crate) const DEFAULT_EPOCH_MS: i64 = 1_767_225_600_000;
 /// to a typo in a `u32` field.
 const MAX_PARTITIONS: u32 = 1_024;
 
-/// The source's component type, and the tag its section sits under.
-pub(crate) const TAG: &str = "datagen";
+/// The source's component type, and the key its section sits under.
+pub(crate) const COMPONENT_TYPE: &str = "datagen";
 
 /// What `encoding: avro` reports when the feature that implements it is off.
 /// One error for both the load-time rejection below and the `open`-time one
 /// in [`crate::encode`], which answer for the same condition.
 pub(crate) fn avro_feature_off() -> ConfigError {
-    SectionPath::source(TAG).invalid(
+    SectionPath::source(COMPONENT_TYPE).invalid(
         "encoding",
         "avro needs spate-datagen's `avro` feature (the `datagen-avro` feature on the spate \
          facade); it is off in this build",
@@ -183,7 +183,7 @@ impl DatagenSourceConfig {
     /// [`ConfigError::Component`] naming the refused key under
     /// `source.datagen`, such as `source.datagen.partitions: must be at least 1`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let at = SectionPath::source(TAG);
+        let at = SectionPath::source(COMPONENT_TYPE);
         if self.partitions == 0 {
             return Err(at.invalid("partitions", "must be at least 1"));
         }

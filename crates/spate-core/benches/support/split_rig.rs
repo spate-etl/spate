@@ -66,6 +66,10 @@ impl<const TAG: u8> RecFamily for RowF<TAG> {
 struct BodyDeser;
 
 impl Deserializer<LogF> for BodyDeser {
+    fn component_type(&self) -> &str {
+        "bench"
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

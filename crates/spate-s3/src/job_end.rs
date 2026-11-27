@@ -313,7 +313,7 @@ pub(crate) fn no_depth(feed: &dyn Feed) -> SourceError {
     SourceError::fatal(format!(
         "the `{}` feed reports no depth, so a bounded job on it cannot tell when its work \
              is done; use a feed that counts its units, or run the job without `location`",
-        feed.backend()
+        feed.component_type()
     ))
 }
 

@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The sink's component type key, under `sink:` or a `sinks:` entry.
-pub(crate) const TAG: &str = "clickhouse";
+pub(crate) const COMPONENT_TYPE: &str = "clickhouse";
 
 /// The component a startup error names, as in "the ClickHouse sink cannot
 /// start".
@@ -320,7 +320,7 @@ impl ClickHouseSinkConfig {
     /// [`ConfigError::Component`] for the first setting it refuses, starting
     /// at `sink.clickhouse`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.validate_at(&SectionPath::sink(TAG))
+        self.validate_at(&SectionPath::sink(COMPONENT_TYPE))
     }
 
     /// [`validate`](Self::validate), with each error starting at `at`.
@@ -633,7 +633,7 @@ impl ClickHouseSinkBuilder {
     /// when a URL is `https://` and neither the system trust store nor
     /// `tls.root_ca` holds a usable certificate.
     pub fn new(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
-        build_with(cfg, &SectionPath::sink(TAG), SystemRoots::load)
+        build_with(cfg, &SectionPath::sink(COMPONENT_TYPE), SystemRoots::load)
     }
 
     /// A builder from the opaque `sink: { clickhouse: ... }` component section.
@@ -927,10 +927,14 @@ impl SinkBundle for ClickHouseSink {
             .iter()
             .map(|shard| shard.iter().map(|e| e.display_url().to_string()).collect())
             .collect();
-        let parts = SinkParts::new(self.writer, self.endpoints, SinkPoolConfig::default())
-            .with_component_type(TAG)
-            .with_replica_labels(replica_labels)
-            .with_probe(probe);
+        let parts = SinkParts::new(
+            COMPONENT_TYPE,
+            self.writer,
+            self.endpoints,
+            SinkPoolConfig::default(),
+        )
+        .with_replica_labels(replica_labels)
+        .with_probe(probe);
         match self.frame_codec {
             Some(codec) => parts.with_frame_codec(codec),
             None => parts,
@@ -1990,7 +1994,7 @@ settings: { insert_quorum: "auto" }
             "t",
             vec![ClickHouseShardSection::new(vec!["http://a".into()])],
         );
-        let _ = build_with(http.clone(), &SectionPath::sink(TAG), || {
+        let _ = build_with(http.clone(), &SectionPath::sink(COMPONENT_TYPE), || {
             panic!("the trust store was read")
         })
         .unwrap();
@@ -2006,7 +2010,7 @@ settings: { insert_quorum: "auto" }
         let system = crate::test_tls::TestCa::new("system");
         for cfg in [front, https] {
             let mut read = false;
-            let _ = build_with(cfg, &SectionPath::sink(TAG), || {
+            let _ = build_with(cfg, &SectionPath::sink(COMPONENT_TYPE), || {
                 read = true;
                 SystemRoots::from_certs(vec![system.der()])
             })
@@ -2023,9 +2027,11 @@ settings: { insert_quorum: "auto" }
             "t",
             vec![ClickHouseShardSection::new(vec!["https://a".into()])],
         );
-        let err = refusal(build_with(https, &SectionPath::sink(TAG), || {
-            SystemRoots::from_certs(Vec::new())
-        }));
+        let err = refusal(build_with(
+            https,
+            &SectionPath::sink(COMPONENT_TYPE),
+            || SystemRoots::from_certs(Vec::new()),
+        ));
         assert_eq!(
             err,
             "sink.clickhouse.tls.root_ca: the system trust store has no certificates; install \
@@ -2040,7 +2046,7 @@ settings: { insert_quorum: "auto" }
     fn cleartext_lines(cfg: ClickHouseSinkConfig) -> (Vec<String>, Vec<String>) {
         let system = crate::test_tls::TestCa::new("system");
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            let _ = build_with(cfg, &SectionPath::sink(TAG), || {
+            let _ = build_with(cfg, &SectionPath::sink(COMPONENT_TYPE), || {
                 SystemRoots::from_certs(vec![system.der()])
             })
             .unwrap();
@@ -2187,7 +2193,7 @@ settings: { insert_quorum: "auto" }
             cfg.password = Some("hunter2".into());
             cfg.tls.root_ca = Some("/nonexistent-spate-1647/ca.pem".into());
             let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-                let err = refusal(build_with(cfg, &SectionPath::sink(TAG), || {
+                let err = refusal(build_with(cfg, &SectionPath::sink(COMPONENT_TYPE), || {
                     SystemRoots::from_certs(vec![system.der()])
                 }));
                 assert!(err.contains("tls.root_ca"), "{err}");
@@ -2413,7 +2419,7 @@ settings: { insert_quorum: "auto" }
     /// at its tag alone.
     #[test]
     fn an_unplaced_section_reports_at_its_tag() {
-        let section = spate_test::component_config(TAG, "table: t\nshards: []\n");
+        let section = spate_test::component_config(COMPONENT_TYPE, "table: t\nshards: []\n");
         assert_eq!(
             refusal(ClickHouseSinkBuilder::from_component_config(&section)),
             "clickhouse.shards: must not be empty"
@@ -2424,7 +2430,7 @@ settings: { insert_quorum: "auto" }
     /// as the builder does.
     #[test]
     fn config_from_component_config_refuses_at_the_section_path() {
-        let unplaced = spate_test::component_config(TAG, "table: t\nshards: []\n");
+        let unplaced = spate_test::component_config(COMPONENT_TYPE, "table: t\nshards: []\n");
         assert_eq!(
             refusal(ClickHouseSinkConfig::from_component_config(&unplaced)),
             "clickhouse.shards: must not be empty"

@@ -12,7 +12,7 @@
 //! downstream is full.
 
 use crate::backend;
-use crate::config::{JsonFraming, JsonOnError, TAG};
+use crate::config::{COMPONENT_TYPE, JsonFraming, JsonOnError};
 use crate::metrics::JsonDeserMetrics;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -80,7 +80,7 @@ impl DecoderCore {
     fn check_source_framing(&self, source: FramingContract) -> Result<(), ConfigError> {
         match (source, self.framing) {
             (FramingContract::PerRecord, JsonFraming::Lines | JsonFraming::Array) => {
-                Err(SectionPath::deserializer(TAG).error(format!(
+                Err(SectionPath::deserializer(COMPONENT_TYPE).error(format!(
                     "splits each payload as `JsonFraming::{:?}`, but the source already frames \
                      one record per payload; build the deserializer with \
                      `JsonDeserializerBuilder::framing(JsonFraming::Single)`, or use a source \
@@ -334,7 +334,7 @@ where
     }
 
     fn component_type(&self) -> &str {
-        TAG
+        COMPONENT_TYPE
     }
 
     fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
@@ -370,7 +370,7 @@ impl Deserializer<Owned<Value>> for JsonValueDeserializer {
     }
 
     fn component_type(&self) -> &str {
-        TAG
+        COMPONENT_TYPE
     }
 
     fn attach_metrics(&mut self, cx: DeserMetricsCtx) {
@@ -400,7 +400,12 @@ mod tests {
 
     /// A `Meter` like the one a chain hands its deserializer, under [`TEST_NS`].
     fn test_metrics(pipeline: &str) -> DeserMetricsCtx {
-        let meter = Meter::with_namespace(TEST_NS, pipeline.to_owned(), "main.deserializer", TAG);
+        let meter = Meter::with_namespace(
+            TEST_NS,
+            pipeline.to_owned(),
+            "main.deserializer",
+            COMPONENT_TYPE,
+        );
         DeserMetricsCtx::new(Some(meter))
     }
 

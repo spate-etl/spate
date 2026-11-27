@@ -98,8 +98,8 @@ impl JsonDeserializerConfig {
     }
 }
 
-/// The deserializer's component type, and the tag its section sits under.
-pub(crate) const TAG: &str = "json";
+/// The deserializer's component type, and the key its section sits under.
+pub(crate) const COMPONENT_TYPE: &str = "json";
 
 /// Builder produced from the config section; hands out either the typed or
 /// the dynamically-typed deserializer.

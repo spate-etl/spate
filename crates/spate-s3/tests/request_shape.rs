@@ -329,7 +329,7 @@ struct Tagged {
 }
 
 impl Feed for Tagged {
-    fn backend(&self) -> &str {
+    fn component_type(&self) -> &str {
         self.tag
     }
     fn set_waker(&self, waker: FeedWaker) {

@@ -1,7 +1,7 @@
 //! Kafka source configuration: typed fields plus a validated raw
 //! librdkafka property passthrough.
 
-use crate::client::{Base, Keys, Role, TAG};
+use crate::client::{Base, COMPONENT_TYPE, Keys, Role};
 use serde::Deserialize;
 use spate_core::config::{
     ComponentConfig, ConfigError, DurationBounds, SectionPath, check_duration, redact,
@@ -329,7 +329,7 @@ impl KafkaSourceConfig {
     /// [`ConfigError::Component`] for the first setting it refuses, starting
     /// at `source.kafka`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let at = SectionPath::source(TAG);
+        let at = SectionPath::source(COMPONENT_TYPE);
         if self.brokers.trim().is_empty() {
             return Err(at.invalid("brokers", "must not be empty"));
         }

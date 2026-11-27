@@ -352,12 +352,10 @@ pub struct SealedBatch {
 pub struct SinkMetricsCtx {
     /// Scoped `spate_<component_type>_sink_*` and pre-labeled with the
     /// standard `pipeline`/`component`/`component_type`. `None` when the
-    /// sink's `component_type` cannot scope a family: the default `"custom"`
-    /// (reserved for pipeline-author metrics) or a reserved root opts out
-    /// silently, and a malformed value is logged and also yields `None`.
-    /// Declare a distinct `component_type` via
-    /// [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
-    /// to receive a scope.
+    /// sink's [`component_type`](crate::sink::SinkParts::component_type)
+    /// cannot scope a family: `"custom"` (reserved for pipeline-author
+    /// metrics) or a reserved root opts out silently, and a malformed value is
+    /// logged and also yields `None`.
     pub meter: Option<Meter>,
 }
 

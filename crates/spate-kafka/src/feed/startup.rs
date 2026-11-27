@@ -19,14 +19,14 @@
 //! checks' bound.
 
 use super::Topics;
-use super::config::NAME;
+use super::config::COMPONENT;
 use crate::client::{SpateContext, check_topic_name};
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::clock::SyncClock;
-use spate_core::feed::ConnectError;
+use spate_core::error::ConnectError;
 use spate_core::hash::FastMap;
 use spate_core::task::{BoundError, ThreadBound, ThreadHandle, spawn_thread};
 use std::future::Future;
@@ -314,7 +314,7 @@ pub(crate) struct Checked {
 /// The refusal for a rejection recorded while `step` was under way.
 fn rejected(step: &str, text: &str) -> ConnectError {
     ConnectError::refused(
-        NAME,
+        COMPONENT,
         format!("{step}: the client's credential or TLS handshake was rejected: {text}"),
     )
 }
@@ -322,7 +322,7 @@ fn rejected(step: &str, text: &str) -> ConnectError {
 /// The error past the checks' bound of `limit`, while on `step`.
 fn elapsed(limit: Duration, step: &str) -> ConnectError {
     ConnectError::unavailable(
-        NAME,
+        COMPONENT,
         format!("the startup checks took longer than {limit:?}, while {step}"),
     )
 }
@@ -345,7 +345,7 @@ fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> ConnectErr
         return elapsed(limit, doing);
     }
     let class = crate::error::classify_consumer_error(e.code, false);
-    ConnectError::from_class(NAME, class, format!("{doing}: {}", e.message))
+    ConnectError::from_class(COMPONENT, class, format!("{doing}: {}", e.message))
 }
 
 /// Run the startup checks on `topics`. `step` names the read under way, for
@@ -353,13 +353,13 @@ fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> ConnectErr
 ///
 /// # Errors
 ///
-/// [`ConnectError::Refused`] for a missing topic, a compacted work, retry
+/// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) for a missing topic, a compacted work, retry
 /// or dead-letter topic, an attempt topic whose `cleanup.policy` is anything
 /// but `compact` or that reports no partitions, a work topic whose
 /// `message.timestamp.type` is anything but `LogAppendTime`, a read that
 /// fails the same way when asked again, a failed read after the client
 /// recorded a rejected credential or TLS handshake, and a topic the cluster
-/// describes no configuration entry for; [`ConnectError::Unavailable`] for
+/// describes no configuration entry for; [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) for
 /// a read that fails otherwise.
 pub(crate) async fn check(
     admin: &dyn TopicAdmin,
@@ -386,7 +386,7 @@ pub(crate) async fn check(
             }
             Err(e) if e.code == RDKafkaErrorCode::UnknownTopicOrPartition => {
                 return Err(ConnectError::refused(
-                    NAME,
+                    COMPONENT,
                     format!(
                         "the {role} topic `{topic}` does not exist; the feed never creates a \
                      topic, so create it before the first worker starts"
@@ -402,7 +402,7 @@ pub(crate) async fn check(
         .and_then(NonZeroU32::new)
     else {
         return Err(ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!(
                 "the attempt topic `{}` reports no partitions",
                 topics.attempt
@@ -433,7 +433,7 @@ pub(crate) async fn check(
         // none is a read the cluster refused.
         if configs.is_empty() {
             return Err(ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "{doing}: the cluster described no configuration entry for the topic, as it \
                  does for a client without the `DescribeConfigs` operation on it"
@@ -468,7 +468,7 @@ pub(crate) async fn check(
         };
         if policy.split(',').any(|p| p.trim() == "compact") {
             return Err(ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "the {role} topic `{topic}` is compacted (`{CLEANUP_POLICY}` is `{policy}`). \
                  Compaction keeps only the latest message for each key, and a unit's id is \
@@ -487,7 +487,7 @@ pub(crate) async fn check(
         Some(policy) if policy.trim() == "compact" => {}
         Some(policy) => {
             return Err(ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "the attempt topic `{}` must be compacted only (`{CLEANUP_POLICY}` is \
                  `{policy}`). Time or size retention would delete the attempt counts of units \
@@ -505,7 +505,7 @@ pub(crate) async fn check(
         Some(kind) if kind == LOG_APPEND_TIME => {}
         Some(kind) => {
             return Err(ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "the work topic `{}` keeps each message's own timestamp (`{TIMESTAMP_TYPE}` is \
                  `{kind}`). A store can write storage notifications to it with timestamp 0, \
@@ -552,7 +552,7 @@ pub(crate) fn run_checks(
 }
 
 /// `checks` under a bound of `limit` on `clock`, ended early by a rejection
-/// `rejection` returns. Past the bound, an [`ConnectError::Unavailable`]
+/// `rejection` returns. Past the bound, a [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable)
 /// naming the step `step` holds.
 ///
 /// [`ThreadBound`] times the bound on a thread of its own, so it fires on any
@@ -561,8 +561,8 @@ pub(crate) fn run_checks(
 ///
 /// # Errors
 ///
-/// `checks`' own error; [`ConnectError::Refused`] naming the step and the
-/// rejection once `rejection` returns one; [`ConnectError::Unavailable`]
+/// `checks`' own error; [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) naming the step and the
+/// rejection once `rejection` returns one; [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable)
 /// past the bound, or when the system cannot start the thread.
 pub(crate) async fn bounded<T>(
     step: &Mutex<String>,
@@ -581,7 +581,7 @@ pub(crate) async fn bounded<T>(
             Err(match stopped {
                 BoundError::Rejected(text) => rejected(&current(), &text),
                 BoundError::Elapsed => elapsed(limit, &current()),
-                other => ConnectError::unavailable(NAME, other.to_string()),
+                other => ConnectError::unavailable(COMPONENT, other.to_string()),
             })
         })
 }
@@ -596,6 +596,7 @@ mod tests {
     use crate::feed::config::KafkaFeedConfig;
     use RDKafkaErrorCode as C;
     use spate_core::clock::TestClock;
+    use spate_core::error::ConnectErrorKind;
     use spate_test::{HANG, wait_until};
     use std::sync::mpsc;
 
@@ -746,9 +747,7 @@ mod tests {
 
     fn refusal(result: Result<Checked, ConnectError>) -> String {
         match result {
-            Err(ConnectError::Refused {
-                reason: message, ..
-            }) => message,
+            Err(e) if e.kind() == ConnectErrorKind::Refused => e.reason().to_owned(),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -1016,12 +1015,14 @@ mod tests {
                 .config_errors
                 .insert(WORK.to_owned(), AdminError::new(code, "slow"));
             match run(&admin) {
-                Err(ConnectError::Unavailable {
-                    reason: message, ..
-                }) => assert!(
-                    message.contains("reading the configuration of the work topic `units`: slow"),
-                    "{message}"
-                ),
+                Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                    let message = e.reason().to_owned();
+                    assert!(
+                        message
+                            .contains("reading the configuration of the work topic `units`: slow"),
+                        "{message}"
+                    )
+                }
                 other => panic!("{code:?}: expected unavailable, got {other:?}"),
             }
         }
@@ -1047,7 +1048,7 @@ mod tests {
             .insert(WORK.to_owned(), AdminError::new(C::RequestTimedOut, "slow"));
         assert_eq!(
             run(&admin).unwrap_err().to_string(),
-            "Kafka is unavailable: reading the configuration of the work topic `units`: slow"
+            "the Kafka feed is unavailable: reading the configuration of the work topic `units`: slow"
         );
     }
 
@@ -1135,9 +1136,8 @@ mod tests {
         ] {
             let reading = step.trim_start_matches("while ");
             match bounded_on(io.handle().clone(), hangs, reading) {
-                Some(Err(ConnectError::Unavailable {
-                    reason: message, ..
-                })) => {
+                Some(Err(e)) if e.kind() == ConnectErrorKind::Unavailable => {
+                    let message = e.reason().to_owned();
                     assert!(message.ends_with(step), "{message}");
                 }
                 other => panic!("expected unavailable, got {other:?}"),
@@ -1168,12 +1168,13 @@ mod tests {
                 (WORK, true),
                 "reading the metadata of the work topic `units`",
             ) {
-                Some(Err(ConnectError::Unavailable {
-                    reason: message, ..
-                })) => assert!(
-                    message.ends_with("while reading the metadata of the work topic `units`"),
-                    "{name}: {message}"
-                ),
+                Some(Err(e)) if e.kind() == ConnectErrorKind::Unavailable => {
+                    let message = e.reason().to_owned();
+                    assert!(
+                        message.ends_with("while reading the metadata of the work topic `units`"),
+                        "{name}: {message}"
+                    )
+                }
                 other => panic!("{name}: expected unavailable, got {other:?}"),
             }
         }
@@ -1218,9 +1219,8 @@ mod tests {
             .metadata_errors
             .insert(WORK.to_owned(), failure.clone());
         match run(&admin) {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => {
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
                 assert!(message.ends_with("`units`: transport"), "{message}");
             }
             other => panic!("expected unavailable, got {other:?}"),
@@ -1258,13 +1258,14 @@ mod tests {
         let mut admin = Scripted::all();
         admin.metadata_errors.insert(RETRY.to_owned(), expired);
         match run(&admin) {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert_eq!(
-                message,
-                "the startup checks took longer than 30s, while reading the metadata of the \
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert_eq!(
+                    message,
+                    "the startup checks took longer than 30s, while reading the metadata of the \
                  retry topic `units-retry`"
-            ),
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
         admin.rejection = Some(ALERT_40.to_owned());
@@ -1303,9 +1304,8 @@ mod tests {
             Some(ALERT_40.to_owned())
         });
         match run.done.recv_timeout(HANG).ok() {
-            Some(Err(ConnectError::Refused {
-                reason: message, ..
-            })) => {
+            Some(Err(e)) if e.kind() == ConnectErrorKind::Refused => {
+                let message = e.reason().to_owned();
                 assert!(
                     message.starts_with("reading the metadata of the retry topic `units-retry`: "),
                     "{message}"
@@ -1349,12 +1349,13 @@ mod tests {
         assert!(run.done.try_recv().is_err(), "fired before its limit");
         clock.advance(Duration::from_nanos(1));
         match run.done.recv_timeout(HANG) {
-            Ok(Err(ConnectError::Unavailable {
-                reason: message, ..
-            })) => assert!(
-                message.starts_with("the startup checks took longer than 600s"),
-                "{message}"
-            ),
+            Ok(Err(e)) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(
+                    message.starts_with("the startup checks took longer than 600s"),
+                    "{message}"
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -1395,12 +1396,13 @@ mod tests {
             fired.is_some()
         });
         match fired.flatten() {
-            Some(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(
-                message.starts_with("the startup checks took longer than 600s"),
-                "{message}"
-            ),
+            Some(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(
+                    message.starts_with("the startup checks took longer than 600s"),
+                    "{message}"
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -1471,12 +1473,13 @@ mod tests {
         let brokers = closed.local_addr().unwrap().to_string();
         drop(closed);
         match connect_to(&brokers, "", Duration::from_secs(2)) {
-            Some(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(
-                message.starts_with("the startup checks took longer than 2s"),
-                "{message}"
-            ),
+            Some(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(
+                    message.starts_with("the startup checks took longer than 2s"),
+                    "{message}"
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -1523,12 +1526,13 @@ mod tests {
         let got =
             checks_closing_their_clients(&[("bootstrap.servers", broker.as_str())], Duration::ZERO);
         match got {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(
-                message.starts_with("the startup checks took longer than"),
-                "{message}"
-            ),
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(
+                    message.starts_with("the startup checks took longer than"),
+                    "{message}"
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -1545,13 +1549,14 @@ mod tests {
             Duration::from_millis(1),
         );
         match got {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert_eq!(
-                message,
-                "the startup checks took longer than 1ms, while reading the metadata of the \
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert_eq!(
+                    message,
+                    "the startup checks took longer than 1ms, while reading the metadata of the \
                  work topic `units`"
-            ),
+                )
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -1712,9 +1717,8 @@ mod tests {
             Duration::from_secs(5),
         );
         match got {
-            Some(ConnectError::Unavailable {
-                reason: message, ..
-            }) => {
+            Some(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
                 assert!(
                     message.starts_with("the startup checks took longer than"),
                     "{message}"
@@ -1738,9 +1742,8 @@ mod tests {
 
         fn refused_within_deadline(brokers: &str, rdkafka: &str) -> String {
             match connect_to(brokers, rdkafka, LONG) {
-                Some(ConnectError::Refused {
-                    reason: message, ..
-                }) => {
+                Some(e) if e.kind() == ConnectErrorKind::Refused => {
+                    let message = e.reason().to_owned();
                     assert!(
                         message.starts_with("reading the metadata of the work topic `units`: "),
                         "{message}"
@@ -1753,9 +1756,8 @@ mod tests {
 
         fn refused_with_text(got: Option<ConnectError>) -> String {
             match got {
-                Some(ConnectError::Refused {
-                    reason: message, ..
-                }) => {
+                Some(e) if e.kind() == ConnectErrorKind::Refused => {
+                    let message = e.reason().to_owned();
                     assert!(
                         message.starts_with("reading the metadata of the work topic `units`: "),
                         "{message}"
@@ -1780,7 +1782,11 @@ mod tests {
             let io = multi_thread();
             spate_test::capture_logs(tracing::Level::INFO, || {
                 let got = connect(&section, io.handle());
-                assert!(matches!(got, Some(ConnectError::Refused { .. })), "{got:?}");
+                assert!(
+                    got.as_ref()
+                        .is_some_and(|e| e.kind() == ConnectErrorKind::Refused),
+                    "{got:?}"
+                );
             })
         }
 
@@ -1891,9 +1897,8 @@ mod tests {
                 LONG,
             );
             match got {
-                Err(ConnectError::Refused {
-                    reason: message, ..
-                }) => {
+                Err(e) if e.kind() == ConnectErrorKind::Refused => {
+                    let message = e.reason().to_owned();
                     assert!(message.contains("SSL alert number 40"), "{message}");
                 }
                 other => panic!("expected a refusal, got {other:?}"),

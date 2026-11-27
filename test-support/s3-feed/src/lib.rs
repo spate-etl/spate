@@ -14,9 +14,10 @@
 use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::error::ConnectError;
 use spate_core::feed::{
-    Confirmation, ConnectError, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedMetricsCtx,
-    FeedWaker, Receipt, Unit,
+    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedMetricsCtx, FeedWaker,
+    Receipt, Unit,
 };
 use spate_core::framing::RecordFramer;
 use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};

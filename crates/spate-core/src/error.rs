@@ -7,6 +7,11 @@
 //! stops). Record-level policies are limited to `Skip` and `Fail`; every
 //! skip is surfaced through metrics.
 
+#[cfg(not(loom))]
+mod connect;
+#[cfg(not(loom))]
+pub use connect::{ConnectError, ConnectErrorKind};
+
 /// What to do when a record fails in a stage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -72,22 +77,12 @@ impl FatalError {
 /// cheap to clone.
 pub(crate) type Source = std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// The methods every role error shares: `SourceError`, `SinkError`,
-/// `FeedError` and `DeserError`. Each type is a struct with private `kind`,
-/// `reason` and `source` fields, and its kind enum has a `class` method.
-macro_rules! role_error_methods {
+/// The accessors every role error shares: `kind`, `class`, `reason` and
+/// `with_source`. Each type is a struct with private `kind`, `reason` and
+/// `source` fields, and its kind enum has a `class` method.
+macro_rules! role_error_accessors {
     ($ty:ident, $kind:ident) => {
         impl $ty {
-            #[doc = concat!("An error of `kind` with a human-readable `reason`.")]
-            #[must_use]
-            pub fn new(kind: $kind, reason: impl Into<String>) -> Self {
-                Self {
-                    kind,
-                    reason: reason.into(),
-                    source: None,
-                }
-            }
-
             /// How the caller must react.
             #[must_use]
             pub fn kind(&self) -> $kind {
@@ -121,6 +116,28 @@ macro_rules! role_error_methods {
                 self
             }
         }
+    };
+}
+pub(crate) use role_error_accessors;
+
+/// The methods of a run-time role error: `SourceError`, `SinkError`,
+/// `FeedError` and `DeserError`. Beyond the accessors, each has
+/// `new(kind, reason)`, and `source()` returns the attached error.
+macro_rules! role_error_methods {
+    ($ty:ident, $kind:ident) => {
+        impl $ty {
+            #[doc = concat!("An error of `kind` with a human-readable `reason`.")]
+            #[must_use]
+            pub fn new(kind: $kind, reason: impl Into<String>) -> Self {
+                Self {
+                    kind,
+                    reason: reason.into(),
+                    source: None,
+                }
+            }
+        }
+
+        $crate::error::role_error_accessors!($ty, $kind);
 
         impl std::error::Error for $ty {
             fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

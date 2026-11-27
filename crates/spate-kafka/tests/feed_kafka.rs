@@ -23,7 +23,8 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::Producer as _;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{ConnectError, DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
+use spate_core::error::{ConnectError, ConnectErrorKind};
+use spate_core::feed::{DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_test::{HANG, WriteOutcome, wait_for_value, wait_until};
@@ -297,9 +298,7 @@ fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, ConnectError> {
 
 fn refusal(connected: Result<KafkaFeed, ConnectError>) -> String {
     match connected {
-        Err(ConnectError::Refused {
-            reason: message, ..
-        }) => message,
+        Err(e) if e.kind() == ConnectErrorKind::Refused => e.reason().to_owned(),
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -605,12 +604,13 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
 
     create_topics_of(&brokers, "pub-compacted", &[("cleanup.policy", "compact")]);
     match connect("pub-compacted") {
-        Err(ConnectError::Refused {
-            reason: message, ..
-        }) => assert!(
-            message.contains("the work topic `pub-compacted` is compacted"),
-            "{message}"
-        ),
+        Err(e) if e.kind() == ConnectErrorKind::Refused => {
+            let message = e.reason().to_owned();
+            assert!(
+                message.contains("the work topic `pub-compacted` is compacted"),
+                "{message}"
+            )
+        }
         other => panic!("expected a refusal, got {other:?}"),
     }
 

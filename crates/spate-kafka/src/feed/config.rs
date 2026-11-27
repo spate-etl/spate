@@ -3,7 +3,7 @@
 use crate::client::{Base, Keys, Role, TAG, check_message_timeout};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, SectionPath, redact};
-use spate_core::feed::ConnectError;
+use spate_core::error::ConnectError;
 use spate_core::tls::TlsSection;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -14,6 +14,9 @@ pub(crate) const BACKEND: &str = TAG;
 
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "Kafka";
+
+/// The component a startup error names, as in "the Kafka feed cannot start".
+pub(crate) const COMPONENT: &str = "Kafka feed";
 
 /// The role of a feed client, each of which owns its own properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,7 +345,7 @@ impl KafkaFeedConfig {
     /// # Errors
     ///
     /// As [`from_section`](Self::from_section), and
-    /// [`ConnectError::Config`] at `feed.kafka.tls.root_ca` when `root_ca`
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) at `feed.kafka.tls.root_ca` when `root_ca`
     /// cannot be read.
     pub(crate) fn connecting(section: &FeedSection) -> Result<KafkaFeedConfig, ConnectError> {
         Self::from_section(section)?.resolve(crate::security::ca_bundle)
@@ -442,6 +445,7 @@ impl KafkaFeedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spate_core::error::ConnectErrorKind;
 
     const MINIMAL: &str = "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
                            topic: units\n  retry_topic: units-retry\n  \
@@ -460,7 +464,7 @@ mod tests {
             .clone()
             .resolve(|_| Err("unreadable".to_owned()))
             .unwrap_err();
-        assert!(matches!(refused, ConnectError::Config(_)), "{refused}");
+        assert_eq!(refused.kind(), ConnectErrorKind::Config, "{refused}");
         assert_eq!(refused.to_string(), "feed.kafka.tls.root_ca: unreadable");
         let config = config
             .resolve(|tls| {

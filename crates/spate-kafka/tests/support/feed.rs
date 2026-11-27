@@ -11,9 +11,10 @@ use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::error::ConnectError;
 use spate_core::feed::{
-    ConnectError, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, Feed, FeedError,
-    FeedErrorKind, Unit, wake_channel,
+    DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, Feed, FeedError, FeedErrorKind, Unit,
+    wake_channel,
 };
 use spate_json::JsonLinesFramer;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};

@@ -23,7 +23,7 @@
 //! because its receipt no longer holds the message, is dropped unseen too.
 
 use crate::client;
-use crate::config::{BACKEND, NAME, SqsFeedConfig};
+use crate::config::{BACKEND, COMPONENT, SqsFeedConfig};
 use crate::error::CallError;
 use crate::metrics::{Refusal, SqsFeedMetrics};
 use crate::queue::{
@@ -35,8 +35,8 @@ use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::tokio::{Clock, SystemClock, before};
 use spate_core::clock::{SyncClock, deadline_after};
 use spate_core::config::{FeedSection, redact};
+use spate_core::error::ConnectError;
 use spate_core::error::ErrorClass;
-use spate_core::feed::ConnectError;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
     FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
@@ -97,7 +97,7 @@ const LATE_TICK: Duration = Duration::from_millis(5);
 const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
 /// `connect` under [`CONNECT_BOUND`] on `clock`. Past the bound, an
-/// [`ConnectError::Unavailable`] naming the step `step` holds, and an
+/// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) naming the step `step` holds, and an
 /// `Unavailable` also holds when the bound's thread cannot be started.
 ///
 /// The bound is timed by a [`ThreadBound`], so it fires on a runtime whose
@@ -114,7 +114,7 @@ async fn bounded<T>(
         .await
         .unwrap_or_else(|stopped| {
             Err(ConnectError::unavailable(
-                NAME,
+                COMPONENT,
                 match stopped {
                     BoundError::Elapsed => {
                         let step = *step.lock().unwrap_or_else(PoisonError::into_inner);
@@ -466,22 +466,22 @@ impl SqsFeed {
     /// most 30 seconds on any runtime. On a current-thread runtime, `io`
     /// moves its I/O only while another thread runs
     /// [`Runtime::block_on`](tokio::runtime::Runtime::block_on), so with no
-    /// such thread the call ends [`ConnectError::Unavailable`] at that bound.
+    /// such thread the call ends [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) at that bound.
     ///
     /// # Errors
     ///
-    /// [`ConnectError::Config`] for a section the feed cannot read, a
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed cannot read, a
     /// `queue_url` ending in `.fifo` and a `settling_window` below one
     /// minute among them, for a `tls.root_ca` that cannot be used, and for an
     /// `https://` endpoint when neither the system trust store nor
     /// `tls.root_ca` holds a usable certificate.
-    /// [`ConnectError::Refused`] when SQS refuses the credentials, the queue or a
+    /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when SQS refuses the credentials, the queue or a
     /// request no retry can fix, and for a queue the feed cannot dead-letter from: one whose ARN names
     /// a FIFO queue, one with no redrive policy or one the feed cannot read,
     /// or one whose dead-letter queue cannot be read or keeps messages no
     /// longer than the queue does. Also when the queue or its dead-letter
     /// queue does not report its message counts.
-    /// [`ConnectError::Unavailable`] when SQS does not answer in time or keeps
+    /// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) when SQS does not answer in time or keeps
     /// failing transiently, and when the thread that times the 30-second
     /// bound cannot be started.
     ///

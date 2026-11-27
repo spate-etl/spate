@@ -367,9 +367,9 @@ pub trait Feed: Send + Sync {
     /// deliveries itself.
     ///
     /// The runtime calls it before the source is handed the feed, whether
-    /// the runtime built the feed or code passed it in, and so does a lister
-    /// run. A backend that also builds from the section refuses the same keys
-    /// there. The default accepts every section.
+    /// the runtime built the feed or code passed it in. A backend that also
+    /// builds from the section refuses the same keys there. The default
+    /// accepts every section.
     ///
     /// # Errors
     ///

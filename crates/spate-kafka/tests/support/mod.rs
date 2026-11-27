@@ -18,6 +18,7 @@ use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
+    SourceMetricsCtx,
 };
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
@@ -712,16 +713,12 @@ impl Watched {
         let lanes = metrics::with_local_recorder(&recorder, || {
             let labels =
                 spate_core::metrics::ComponentLabels::new(pipeline.clone(), "source", "kafka");
-            source
-                .open(
-                    SourceCtx::new(cp.handle())
-                        .with_stage_metrics(Some(Arc::new(
-                            spate_core::metrics::SourceMetrics::new(&labels),
-                        )))
-                        .with_meter(Some(meter))
-                        .with_partition_detail(true),
-                )
-                .expect("open");
+            source.attach_metrics(
+                SourceMetricsCtx::new(Some(meter))
+                    .with_stage_metrics(Arc::new(spate_core::metrics::SourceMetrics::new(&labels)))
+                    .with_partition_detail(true),
+            );
+            source.open(SourceCtx::new(cp.handle())).expect("open");
             await_assignment(&mut source, HANG)
         });
         let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();

@@ -341,7 +341,9 @@ page says so. `location` names a job location for a source that reads one, and
 refuses both. Set on a source that reads no feed, the section fails startup. The
 common keys and the backend count are checked when the file loads, and so are a
 `location` or a `settling_window` beside `memory` and a `settling_window` out of
-range, which the runtime also refuses when code passes the feed. The `memory`
+range. When code passes the feed, the runtime refuses a `settling_window` out of
+range itself and asks the feed to check the section, so a passed `MemoryFeed`
+refuses a `location` or a `settling_window`. The `memory`
 body is checked when the pipeline starts, before the source opens, unless code
 passes a feed to `Pipeline::feed` or `Pipeline::seeded_feed`.
 
@@ -368,3 +370,6 @@ only when a feed is built from the section, so a feed passed to
 with. `units_held`, `location`
 and `settling_window` apply to every feed, since the source reads them, and so
 does `attempt_cap` as the re-enqueue cap of a source that re-enqueues units.
+Before the source opens, the runtime hands the section to every feed, built
+from the section or passed in code, so a backend can refuse a key it cannot
+honor there.

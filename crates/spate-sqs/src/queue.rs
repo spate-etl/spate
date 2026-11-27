@@ -5,7 +5,7 @@
 //! stands in for SQS.
 
 use crate::client;
-use crate::error::{CallError, classify};
+use crate::error::{CallError, call_error};
 use crate::startup::QueueAttributes;
 use aws_sdk_sqs::Client;
 use aws_sdk_sqs::config::retry::RetryConfig;
@@ -141,7 +141,7 @@ impl SdkQueue {
             ))
             .send()
             .await
-            .map_err(|e| classify("GetQueueAttributes", &e, self.root_ca_key))?;
+            .map_err(|e| call_error("GetQueueAttributes", &e, self.root_ca_key))?;
         Ok(out
             .attributes()
             .into_iter()
@@ -213,7 +213,7 @@ impl Queue for SdkQueue {
                 .config_override(self.receive_timeouts.clone())
                 .send()
                 .await
-                .map_err(|e| classify("ReceiveMessage", &e, self.root_ca_key))?;
+                .map_err(|e| call_error("ReceiveMessage", &e, self.root_ca_key))?;
             Ok(out
                 .messages()
                 .iter()
@@ -268,7 +268,7 @@ impl Queue for SdkQueue {
                 )
                 .send()
                 .await
-                .map_err(|e| classify("SendMessageBatch", &e, self.root_ca_key))?;
+                .map_err(|e| call_error("SendMessageBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),
@@ -303,7 +303,7 @@ impl Queue for SdkQueue {
             let out = call
                 .send()
                 .await
-                .map_err(|e| classify("ChangeMessageVisibilityBatch", &e, self.root_ca_key))?;
+                .map_err(|e| call_error("ChangeMessageVisibilityBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),
@@ -337,7 +337,7 @@ impl Queue for SdkQueue {
             let out = call
                 .send()
                 .await
-                .map_err(|e| classify("DeleteMessageBatch", &e, self.root_ca_key))?;
+                .map_err(|e| call_error("DeleteMessageBatch", &e, self.root_ca_key))?;
             Ok(BatchOutcome {
                 successful: out.successful().iter().map(|s| s.id().to_owned()).collect(),
                 failed: failures(out.failed()),

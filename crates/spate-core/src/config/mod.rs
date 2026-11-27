@@ -746,7 +746,12 @@ impl PipelineConfig {
             }
         }
         self.reject_body_chunk()?;
-        self.reject_keys_on_memory()?;
+        // The runtime asks the feed itself through `Feed::check_section`.
+        if let Some(feed) = &self.feed
+            && feed.backend().type_tag() == memory::BACKEND
+        {
+            memory::refuse_section_keys(feed)?;
+        }
         self.reject_bad_settling_window()?;
         // Resolve every declared sink's framework blocks now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
@@ -796,18 +801,6 @@ impl PipelineConfig {
         single.chain(named)
     }
 
-    /// Reject the `feed:` keys the in-process feed cannot honor. Split out of
-    /// [`validate`](Self::validate) so the runtime, which a programmatic
-    /// config reaches without validation, enforces it too.
-    pub(crate) fn reject_keys_on_memory(&self) -> Result<(), ConfigError> {
-        match &self.feed {
-            Some(feed) if feed.backend().type_tag() == memory::BACKEND => {
-                memory::refuse_section_keys(feed)
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Reject a `checkpoint.interval` or `checkpoint.drain_timeout` above a
     /// day, which is past what the controller can add to a clock reading.
     /// The runtime calls it, since a programmatic config reaches a run
@@ -838,7 +831,7 @@ impl PipelineConfig {
     /// a deadline. Split out of [`validate`](Self::validate) so the runtime,
     /// which a programmatic config reaches without validation, enforces it
     /// too. It passes an in-range window on the in-process feed, which
-    /// [`reject_keys_on_memory`](Self::reject_keys_on_memory) refuses.
+    /// refuses any window itself.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
         const SETTLING_WINDOW: DurationBounds =
             DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL).at_most(ONE_DAY);

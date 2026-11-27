@@ -24,7 +24,7 @@ use crate::metrics::{
 };
 use crate::ops::RunnableChain;
 use crate::sink::SinkProbeFn;
-use crate::source::{DrainBarrier, Source};
+use crate::source::{DrainBarrier, Source, SourceMetricsCtx};
 use crate::task;
 use crate::telemetry::cpu;
 use humantime_serde::re::humantime::format_duration;
@@ -430,7 +430,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             )
             .into());
         }
-        self.config.reject_keys_on_memory()?;
         self.config.reject_bad_settling_window()?;
         self.config.reject_checkpoint_above_a_day()?;
         if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
@@ -462,6 +461,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         .into());
                     }
                 };
+                feed.check_section(section)?;
                 if feed.hands_back() {
                     check_duration(
                         self.config.checkpoint.drain_timeout,
@@ -490,15 +490,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let pipeline_name = self.config.pipeline.name.clone();
 
         // The source's declared component_type feeds both its stage-metric
-        // labels and the namespace of the custom-metrics Meter it receives at
-        // `open`. Captured here, before `self.source` moves into the controller.
+        // labels and the namespace of the custom-metrics Meter it receives in
+        // `attach_metrics`.
         let source_ct = self.source.component_type().to_string();
-        let source_meter = Meter::for_component(
-            &source_ct,
-            MetricRole::Source,
-            pipeline_name.clone(),
-            "source",
-        );
 
         // Observability first: everything after this records metrics.
         let handle = install_or_reuse(&metrics_settings(&self.config))?;
@@ -533,6 +527,19 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             "source",
             source_ct.clone(),
         ))?);
+        // The source resolves its handles in `attach_metrics`, so the call
+        // follows the recorder install above. It precedes `configure_feed` and
+        // `open`.
+        self.source.attach_metrics(
+            SourceMetricsCtx::new(Meter::for_component(
+                &source_ct,
+                MetricRole::Source,
+                pipeline_name.clone(),
+                "source",
+            ))
+            .with_stage_metrics(Arc::clone(&controller_source_metrics))
+            .with_partition_detail(self.config.metrics.per_partition_detail),
+        );
 
         // The feed's handles, and those its backend resolves from its `Meter`,
         // bind to the recorder installed above, so the feed is wrapped and
@@ -806,8 +813,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             budget: Arc::clone(&self.budget),
             budget_metrics,
             source_metrics: controller_source_metrics,
-            source_meter,
-            per_partition_detail: self.config.metrics.per_partition_detail,
             pipeline_metrics,
         };
         #[expect(

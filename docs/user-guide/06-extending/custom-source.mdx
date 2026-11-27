@@ -105,8 +105,12 @@ and idles forever after; a real source services its client here on every call:
 The example records its watermarks in a map its own assertions read back. Store
 them wherever your source resumes from instead.
 
-- **`open`** runs once, before anything else, and hands you the
-  `AckIssuer`. Connect here.
+- **`attach_metrics`** (default no-op) runs once, before `open`, and hands
+  you a `SourceMetricsCtx` with your `Meter` and the framework's stage
+  handles. Resolve your metric handles here
+  ([Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)).
+- **`open`** runs once, before the runtime polls the source, and hands you
+  the `AckIssuer`. Connect here.
 - **`poll_events`** services control-plane work (rebalance callbacks,
   statistics) and returns the next `SourceEvent`: for a simple source
   `LanesAssigned(lanes)`, `LanesRevoked { lanes, barrier }`, or `Idle`
@@ -281,6 +285,10 @@ exactly this with the memory source, and
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
 
+To test the source's own metrics, call `attach_metrics` with a
+`SourceMetricsCtx` before `open`, as the runtime does. A source driven without
+that call receives no `Meter` and no stage handles.
+
 ## Feed-reading sources
 
 A source whose input is a queue of
@@ -422,8 +430,11 @@ A backend also answers to its name in the `feed:` section:
   `attach_metrics` hands you
   ([Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)).
 - Build the backend from a `FeedSection`, and refuse a section whose key is
-  not yours. Decode your own keys from the section's backend body, and refuse
-  a common key your backend cannot honor.
+  not yours. Decode your own keys from the section's backend body.
+- Refuse a common key your backend cannot honor in `check_section`. The
+  runtime calls it before the source opens, on a feed built from the section
+  and on one that code passed in. Refuse the same keys when you build from the
+  section, since code can build the backend without a pipeline.
 
 The in-process feed,
 [`spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs),

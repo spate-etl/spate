@@ -10,12 +10,12 @@
 //! counts. A bounded job's end check reads both, and the runtime reads the
 //! dead-letter queue's on every job. The checks run once, at connect.
 
-use crate::config::NAME;
+use crate::config::COMPONENT;
 use crate::error::CallError;
 use crate::queue::BoxFuture;
 use serde::Deserialize;
+use spate_core::error::ConnectError;
 use spate_core::error::ErrorClass;
-use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use url::Url;
 
@@ -134,13 +134,13 @@ enum Count {
 ///
 /// # Errors
 ///
-/// [`ConnectError::Refused`] for a read of the queue that SQS refuses, a FIFO
+/// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) for a read of the queue that SQS refuses, a FIFO
 /// queue, a missing or unreadable redrive
 /// policy, a dead-letter ARN that is not an SQS queue's, an unreadable
 /// dead-letter queue, one that keeps messages no longer than the queue, or a
 /// queue of the two that does not report its message counts;
-/// [`ConnectError::Config`] for a `queue_url` that is not a URL;
-/// [`ConnectError::Unavailable`] when a read keeps failing transiently.
+/// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a `queue_url` that is not a URL;
+/// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) when a read keeps failing transiently.
 pub(crate) async fn check(
     queue: &dyn QueueAttributes,
     queue_url: &str,
@@ -155,18 +155,18 @@ pub(crate) async fn check(
     let source = queue
         .attributes(queue_url, SOURCE_ATTRIBUTES)
         .await
-        .map_err(|e| ConnectError::from_class(NAME, e.class, e.message))?;
+        .map_err(|e| ConnectError::from_class(COMPONENT, e.class, e.message))?;
     let arn = source.get("QueueArn").cloned().unwrap_or_default();
     // SQS requires a FIFO queue's name to end in `.fifo`.
     if arn.ends_with(".fifo") {
         return Err(ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!("the queue {arn} is a FIFO queue; the SQS feed reads standard queues only"),
         ));
     }
     let Some(policy) = source.get("RedrivePolicy").filter(|p| !p.is_empty()) else {
         return Err(ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!(
                 "the queue {arn} has no redrive policy: give it a dead-letter queue, so a unit \
              that keeps failing moves there after `maxReceiveCount` receives"
@@ -175,7 +175,7 @@ pub(crate) async fn check(
     };
     let policy: RedrivePolicy = serde_json::from_str(policy).map_err(|e| {
         ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!("the queue {arn} has a redrive policy the feed cannot read: {e}: {policy}"),
         )
     })?;
@@ -185,15 +185,15 @@ pub(crate) async fn check(
     }
     .ok_or_else(|| {
         ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!("the queue {arn} has a redrive policy whose `maxReceiveCount` is not a count"),
         )
     })?;
     let dead_letter_arn = policy.dead_letter_target_arn;
-    let source_url = crate::config::queue_url(queue_url).map_err(ConnectError::Config)?;
+    let source_url = crate::config::queue_url(queue_url).map_err(ConnectError::from)?;
     let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
         ConnectError::refused(
-            NAME,
+            COMPONENT,
             format!(
                 "the queue {arn} has a redrive policy that names `{dead_letter_arn}`, which is \
              not an SQS queue ARN (arn:<partition>:sqs:<region>:<account>:<queue>)"
@@ -207,14 +207,14 @@ pub(crate) async fn check(
         .await
         .map_err(|e| match e.class {
             ErrorClass::Retryable => ConnectError::unavailable(
-                NAME,
+                COMPONENT,
                 format!(
                     "reading the dead-letter queue {dead_letter_arn}: {}",
                     e.message
                 ),
             ),
             _ => ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "cannot read the dead-letter queue {dead_letter_arn}: {}",
                     e.message
@@ -222,17 +222,20 @@ pub(crate) async fn check(
             ),
         })?;
 
-    let source_counts =
-        counts(&source).map_err(|e| ConnectError::refused(NAME, format!("{e}: queue {arn}")))?;
+    let source_counts = counts(&source)
+        .map_err(|e| ConnectError::refused(COMPONENT, format!("{e}: queue {arn}")))?;
     let dead_letter_counts = counts(&dead).map_err(|e| {
-        ConnectError::refused(NAME, format!("{e}: dead-letter queue {dead_letter_arn}"))
+        ConnectError::refused(
+            COMPONENT,
+            format!("{e}: dead-letter queue {dead_letter_arn}"),
+        )
     })?;
     let retention = seconds(&source);
     let dead_letter_retention = seconds(&dead);
     let unreported = match (retention, dead_letter_retention) {
         (Some(source), Some(dead)) if dead <= source => {
             return Err(ConnectError::refused(
-                NAME,
+                COMPONENT,
                 format!(
                     "the dead-letter queue {dead_letter_arn} keeps messages for {dead} s, no longer \
                  than the queue {arn} keeps them ({source} s). SQS counts retention from a \
@@ -308,6 +311,7 @@ pub(crate) fn dead_letter_url(source: &Url, arn: &str) -> Option<Url> {
 mod tests {
     use super::*;
     use spate_core::config::ConfigError;
+    use spate_core::error::ConnectErrorKind;
     use std::sync::Mutex;
 
     const SOURCE: &str = "http://127.0.0.1:9324/000000000000/jobs";
@@ -365,7 +369,9 @@ mod tests {
             .unwrap()
             .block_on(check(&NoDelayedCount, SOURCE, &step));
         assert!(
-            matches!(result, Err(ConnectError::Refused { .. })),
+            result
+                .as_ref()
+                .is_err_and(|e| e.kind() == ConnectErrorKind::Refused),
             "{result:?}"
         );
     }
@@ -521,9 +527,7 @@ mod tests {
 
     fn refusal(result: Result<Checked, ConnectError>) -> String {
         match result {
-            Err(ConnectError::Refused {
-                reason: message, ..
-            }) => message,
+            Err(e) if e.kind() == ConnectErrorKind::Refused => e.reason().to_owned(),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -546,8 +550,9 @@ mod tests {
             .build()
             .unwrap()
             .block_on(check(&queue, NOT_A_URL, &step));
-        let Err(ConnectError::Config(err)) = result else {
-            panic!("expected a config error, got {result:?}");
+        let connect_err = result.expect_err("expected a config error");
+        let Some(err) = connect_err.config_error() else {
+            panic!("expected a config error, got {connect_err:?}");
         };
         assert!(
             matches!(&err, ConfigError::Component { context, .. } if context == "feed.sqs.queue_url"),
@@ -836,9 +841,10 @@ mod tests {
 
         let slow_source = Scripted::default().failing(SOURCE, CallError::retryable("throttled"));
         match run(&slow_source) {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(message.contains("throttled")),
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(message.contains("throttled"))
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
 
@@ -852,9 +858,10 @@ mod tests {
 
         let slow = Scripted::pair(None, None).failing(DEAD_URL, CallError::retryable("throttled"));
         match run(&slow) {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(message.contains("throttled")),
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(message.contains("throttled"))
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -871,7 +878,7 @@ mod tests {
         let slow = Scripted::default().failing(SOURCE, CallError::retryable("throttled"));
         assert_eq!(
             run(&slow).unwrap_err().to_string(),
-            "SQS is unavailable: throttled"
+            "the SQS feed is unavailable: throttled"
         );
     }
 }

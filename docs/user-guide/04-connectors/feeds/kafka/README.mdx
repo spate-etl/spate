@@ -128,8 +128,8 @@ through, and set how long a member that dies keeps its partitions (see
 
 A SASL authentication failure or a rejected TLS handshake, as listed above,
 fails connecting. `KafkaFeed::connect` and `KafkaFeedPublisher::connect` return
-`ConnectError::Refused` as soon as the client reports the rejection, naming
-the read under way and librdkafka's text, such as these:
+a `ConnectError` of kind `Refused` as soon as the client reports the rejection,
+naming the read under way and librdkafka's text, such as these:
 
 ```text
 … SSL handshake failed: … certificate verify failed …
@@ -140,7 +140,7 @@ A read waiting on a request it sent to another broker finishes that wait first,
 within the checks' 30-second bound.
 
 A refused or reset connection stays retryable: the checks wait for a broker the
-client can use, and fail with `ConnectError::Unavailable` once their bound
+client can use, and fail with kind `Unavailable` once their bound
 passes.
 
 Once the feed has connected, its consumer, its attempt follower, its producer
@@ -322,15 +322,15 @@ passthrough, one for metadata and an admin client for configuration, with
 The client's identity needs the `Describe` and `DescribeConfigs` operations on
 the four topics, and `Read` and `Write` on the attempt topic once the feed runs.
 A read the cluster refuses as unauthorized, or for an invalid topic name, fails
-with `ConnectError::Refused`. So does a topic the cluster describes no
-configuration entry for, which is what a client without `DescribeConfigs` on it
-receives, and a rejected credential or TLS handshake (see
-[Security](#security-tls-mtls-sasl)). Any other failed read fails with
-`ConnectError::Unavailable`. The checks take at most 30 seconds, and an error
-past that bound names the read under way. Both clients are closed by the time
-the connect call returns, whatever its result. A publish-only handle's identity
-needs these operations on the four topics too, and `Write` on the work topic
-(see [A publish-only handle](#a-publish-only-handle)). A worker whose source
+with a `ConnectError` of kind `Refused`. So does a topic the cluster describes
+no configuration entry for, which is what a client without `DescribeConfigs` on
+it receives, and a rejected credential or TLS handshake (see
+[Security](#security-tls-mtls-sasl)). Any other failed read fails with kind
+`Unavailable`. The checks take at most 30 seconds, and an error past that bound
+names the read under way. Both clients are closed by the time the connect call
+returns, whatever its result. A publish-only handle's identity needs these
+operations on the four topics too, and `Write` on the work topic (see
+[A publish-only handle](#a-publish-only-handle)). A worker whose source
 publishes units, such as the
 [S3 source](../../sources/s3/README.mdx#reading-a-notifications-object)
 re-enqueueing an overwritten object, needs `Write` on the work topic as well.

@@ -16,6 +16,9 @@ pub(crate) const BACKEND: &str = "sqs";
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "SQS";
 
+/// The component a startup error names, as in "the SQS feed cannot start".
+pub(crate) const COMPONENT: &str = "SQS feed";
+
 /// The shortest visibility period: one second per renewal period, and a
 /// long-poll wait of at least one second.
 const MIN_VISIBILITY: Duration = Duration::from_secs(3);

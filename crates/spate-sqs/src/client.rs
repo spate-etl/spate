@@ -2,7 +2,7 @@
 //! credentials, timeouts and retries.
 
 use crate::config::SqsFeedConfig;
-use crate::config::{BACKEND, NAME};
+use crate::config::{BACKEND, COMPONENT};
 use crate::credentials::SharedLoad;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -20,7 +20,7 @@ use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use aws_types::service_config::ServiceConfigKey;
 use spate_core::config::SectionPath;
-use spate_core::feed::ConnectError;
+use spate_core::error::ConnectError;
 use spate_core::tls::{SystemRoots, TrustError, TrustRoots, is_https};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -129,7 +129,7 @@ async fn chain_region(http: &SharedHttpClient) -> Result<Region, ConnectError> {
 /// The region `chain` names, or the error that lists where to set one.
 async fn first_region(chain: &impl ProvideRegion) -> Result<Region, ConnectError> {
     chain.region().await.ok_or_else(|| {
-        ConnectError::Config(SectionPath::feed(BACKEND).invalid(
+        ConnectError::from(SectionPath::feed(BACKEND).invalid(
             "region",
             "no AWS region: set `region`, set AWS_REGION in the environment, or set `region` in \
              the shared config file's profile",
@@ -151,7 +151,7 @@ async fn trust_roots(
         tokio::task::spawn_blocking(move || TrustRoots::load(system(), root_ca.as_deref()))
             .await
             .map_err(|e| {
-                ConnectError::unavailable(NAME, format!("loading the trust roots: {e}"))
+                ConnectError::unavailable(COMPONENT, format!("loading the trust roots: {e}"))
             })?;
     loaded.map_err(root_ca_error)
 }
@@ -200,7 +200,9 @@ pub(crate) fn http_client(roots: &TrustRoots) -> Result<SharedHttpClient, Connec
     let tls = TlsContext::builder()
         .with_trust_store(TrustStore::empty().with_pem_certificate(roots.to_pem()))
         .build()
-        .map_err(|e| ConnectError::refused(NAME, format!("building the SQS TLS context: {e}")))?;
+        .map_err(|e| {
+            ConnectError::refused(COMPONENT, format!("building the SQS TLS context: {e}"))
+        })?;
     // The connector the SDK's default client builds, with this trust store.
     Ok(
         aws_smithy_http_client::Builder::new().build_with_connector_fn(
@@ -235,10 +237,12 @@ mod tests {
     ) -> (String, String) {
         let loaded = trust_roots(move || SystemRoots::from_certs(system), root_ca).await;
         match loaded.and_then(|roots| require_roots(roots, true)) {
-            Err(ConnectError::Config(ConfigError::Component { context, message })) => {
-                (context, message)
-            }
-            Err(other) => panic!("expected a config error, got {other}"),
+            Err(e) => match e.config_error() {
+                Some(ConfigError::Component { context, message }) => {
+                    (context.clone(), message.clone())
+                }
+                _ => panic!("expected a config error, got {e}"),
+            },
             Ok(()) => panic!("expected a config error, got roots"),
         }
     }
@@ -365,9 +369,9 @@ mod tests {
             }
         };
         assert_eq!(connect(Some("http://127.0.0.1:1")).await.unwrap(), None);
-        let Err(ConnectError::Config(ConfigError::Component { context, .. })) = connect(None).await
-        else {
-            panic!("expected a config error");
+        let err = connect(None).await.expect_err("expected a config error");
+        let Some(ConfigError::Component { context, .. }) = err.config_error() else {
+            panic!("expected a config error, got {err}");
         };
         assert_eq!(context, "feed.sqs.tls.root_ca");
     }
@@ -424,10 +428,11 @@ mod tests {
     /// three places an operator sets a region.
     #[tokio::test]
     async fn a_missing_region_names_each_way_to_give_one() {
-        let Err(ConnectError::Config(ConfigError::Component { context, message })) =
-            first_region(&None::<Region>).await
-        else {
-            panic!("expected a config error");
+        let err = first_region(&None::<Region>)
+            .await
+            .expect_err("expected a config error");
+        let Some(ConfigError::Component { context, message }) = err.config_error() else {
+            panic!("expected a config error, got {err}");
         };
         assert_eq!(context, "feed.sqs.region");
         assert_eq!(

@@ -29,9 +29,8 @@ use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
-use spate_core::feed::{
-    ConnectError, Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel,
-};
+use spate_core::error::ConnectErrorKind;
+use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
 use spate_test::HANG;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -992,8 +991,8 @@ fn a_publisher_refuses_the_section_a_worker_refuses() {
         .unwrap();
     let worker = KafkaFeed::connect(&section, io.handle()).unwrap_err();
     let publisher = KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err();
-    assert!(matches!(worker, ConnectError::Config(_)), "{worker}");
-    assert!(matches!(publisher, ConnectError::Config(_)), "{publisher}");
+    assert_eq!(worker.kind(), ConnectErrorKind::Config, "{worker}");
+    assert_eq!(publisher.kind(), ConnectErrorKind::Config, "{publisher}");
     assert_eq!(worker.to_string(), publisher.to_string());
 }
 
@@ -1025,7 +1024,7 @@ fn an_unreadable_root_ca_refuses_the_worker_and_the_publisher() {
             KafkaFeed::connect(&section, io.handle()).unwrap_err(),
             KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err(),
         ] {
-            assert!(matches!(err, ConnectError::Config(_)), "{err}");
+            assert_eq!(err.kind(), ConnectErrorKind::Config, "{err}");
             let msg = err.to_string();
             assert!(msg.contains("feed.kafka.tls.root_ca: "), "{msg}");
             assert!(msg.contains(name), "{msg}");

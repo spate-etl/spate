@@ -10,8 +10,9 @@ use super::write::Producer;
 use super::{Core, check_topics, gone, producer_parts, publish_unit, startup};
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
+use spate_core::error::ConnectError;
 use spate_core::feed::{
-    Confirmation, ConnectError, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,11 +65,11 @@ impl KafkaFeedPublisher {
     /// # Errors
     ///
     /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), less the
-    /// failure to start the feed's own threads: [`ConnectError::Config`] for a section the feed
-    /// cannot read or a `tls.root_ca` it cannot read, [`ConnectError::Refused`] for a client configuration
+    /// failure to start the feed's own threads: [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed
+    /// cannot read or a `tls.root_ca` it cannot read, [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) for a client configuration
     /// librdkafka refuses, a rejected credential or TLS handshake, a refused
     /// topic read and topics the feed cannot run on, and
-    /// [`ConnectError::Unavailable`] when a read of the topics fails
+    /// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds.
     ///
     /// # Panics

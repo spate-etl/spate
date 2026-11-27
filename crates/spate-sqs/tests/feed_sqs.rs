@@ -16,7 +16,7 @@
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
-use spate_core::feed::ConnectError;
+use spate_core::error::{ConnectError, ConnectErrorKind};
 use spate_core::feed::{Feed, STOP_RESERVE, Unit, wake_channel};
 use spate_core::pipeline::ExitState;
 use spate_json::JsonLinesFramer;
@@ -679,9 +679,8 @@ fn startup_refuses_a_queue_with_no_redrive_policy() {
     let queue = mq.create_queue("no-redrive").unwrap();
     let url = format!("{}{queue}", mq.endpoint());
     match connect(&mq, &url) {
-        Err(ConnectError::Refused {
-            reason: message, ..
-        }) => {
+        Err(e) if e.kind() == ConnectErrorKind::Refused => {
+            let message = e.reason().to_owned();
             assert!(message.contains("redrive"), "{message}");
         }
         other => panic!("expected a refusal, got {other:?}"),
@@ -705,9 +704,8 @@ fn startup_refuses_an_unreadable_dead_letter_queue() {
     mq.delete_queue(&dead).unwrap();
     let url = format!("{}{queue}", mq.endpoint());
     match connect(&mq, &url) {
-        Err(ConnectError::Refused {
-            reason: message, ..
-        }) => {
+        Err(e) if e.kind() == ConnectErrorKind::Refused => {
+            let message = e.reason().to_owned();
             assert!(
                 message.contains("cannot read the dead-letter queue"),
                 "{message}"

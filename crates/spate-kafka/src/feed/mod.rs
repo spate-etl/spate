@@ -63,7 +63,7 @@ use crate::context::SourceHooks;
 use crate::metrics::KafkaConsumerStatsMetrics;
 use crate::sink::metrics::KafkaProducerStatsMetrics;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
-use config::{BACKEND, NAME};
+use config::{BACKEND, COMPONENT};
 use consumer::Driver;
 use events::KafkaFeedMetrics;
 use inflight::{Tp, Tracker};
@@ -72,9 +72,10 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::statistics::Statistics;
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
+use spate_core::error::ConnectError;
 use spate_core::feed::{
-    Confirmation, Confirmer, ConnectError, Delivery, DepthOf, DepthReading, DepthReporter, Feed,
-    FeedError, FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
+    Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
     depth_reading,
 };
 use spate_core::hash::FastMap;
@@ -610,9 +611,9 @@ impl KafkaFeed {
     ///
     /// # Errors
     ///
-    /// [`ConnectError::Config`] for a section the feed cannot read, and for a
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed cannot read, and for a
     /// `tls.root_ca` that cannot be read or holds no certificate.
-    /// [`ConnectError::Refused`] when librdkafka refuses the client
+    /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when librdkafka refuses the client
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the
     /// TLS handshake, naming the rejection, as soon as the client reports
@@ -626,7 +627,7 @@ impl KafkaFeed {
     /// `cleanup.policy` is anything but `compact`, an attempt topic that
     /// reports no partitions, and a work topic whose `message.timestamp.type`
     /// is anything but `LogAppendTime`.
-    /// [`ConnectError::Unavailable`] when a read of the topics fails
+    /// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds, as they do when
     /// no broker accepts a connection, and when one of the feed's consumer,
     /// gate, follower and depth threads cannot be started. A failed gate,
@@ -729,7 +730,7 @@ impl KafkaFeed {
             .spawn()
             .map_err(|e| {
                 ConnectError::unavailable(
-                    NAME,
+                    COMPONENT,
                     format!("starting the attempt follower's thread: {e}"),
                 )
             })?;
@@ -750,11 +751,14 @@ impl KafkaFeed {
             config.delivery_timeout,
         );
         feed.gate = Some(gate.spawn().map_err(|e| {
-            ConnectError::unavailable(NAME, format!("starting the feed's gate thread: {e}"))
+            ConnectError::unavailable(COMPONENT, format!("starting the feed's gate thread: {e}"))
         })?);
         feed.thread = Some(
             spawn_thread("spate-kafka-feed", move || consumer::run(driver)).map_err(|e| {
-                ConnectError::unavailable(NAME, format!("starting the feed's consumer thread: {e}"))
+                ConnectError::unavailable(
+                    COMPONENT,
+                    format!("starting the feed's consumer thread: {e}"),
+                )
             })?,
         );
         feed.depth = Some(start_depth(&config, &feed.core)?);
@@ -776,7 +780,7 @@ fn start_depth(config: &KafkaFeedConfig, core: &Arc<Core>) -> Result<DepthThread
         .base(openssl_env)
         .create(&config.client(FeedRole::Depth), SourceHooks::default())
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the depth reader: {reason}"))
+            ConnectError::refused(COMPONENT, format!("creating the depth reader: {reason}"))
         })?;
     let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
@@ -785,7 +789,7 @@ fn start_depth(config: &KafkaFeedConfig, core: &Arc<Core>) -> Result<DepthThread
         depth::run(&core, &brokers, &rx);
     })
     .map_err(|e| {
-        ConnectError::unavailable(NAME, format!("starting the feed's depth thread: {e}"))
+        ConnectError::unavailable(COMPONENT, format!("starting the feed's depth thread: {e}"))
     })?;
     Ok(DepthThread {
         requests: Mutex::new(tx),
@@ -829,7 +833,7 @@ fn check_topics(
     let admin = base
         .create(&config.client(FeedRole::Admin), ())
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the admin client: {reason}"))
+            ConnectError::refused(COMPONENT, format!("creating the admin client: {reason}"))
         })?;
     let reader = base
         .create(
@@ -837,7 +841,7 @@ fn check_topics(
             crate::sink::SinkHooks::detached(clock.clone()),
         )
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the metadata client: {reason}"))
+            ConnectError::refused(COMPONENT, format!("creating the metadata client: {reason}"))
         })?;
     startup::run_checks(
         startup::Brokers::new(admin, reader, bound),
@@ -864,7 +868,7 @@ fn producer_parts(
             FeedProducerHooks::new(Arc::clone(&core)),
         )
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the producer: {reason}"))
+            ConnectError::refused(COMPONENT, format!("creating the producer: {reason}"))
         })?;
     Ok((core, producer))
 }
@@ -885,11 +889,11 @@ fn parts(
     let consumer: BaseConsumer<crate::context::SourceContext> = base
         .create(&role, SourceHooks::default())
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the consumer: {reason}"))
+            ConnectError::refused(COMPONENT, format!("creating the consumer: {reason}"))
         })?;
     consumer
         .subscribe(&[&config.topic, &config.retry_topic])
-        .map_err(|e| ConnectError::refused(NAME, format!("subscribing: {e}")))?;
+        .map_err(|e| ConnectError::refused(COMPONENT, format!("subscribing: {e}")))?;
     let driver = Driver::new(Arc::clone(&core), consumer, producer.clone(), call_bound);
     Ok((core, producer, driver))
 }

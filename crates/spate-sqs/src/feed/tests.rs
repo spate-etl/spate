@@ -10,6 +10,7 @@ use spate_core::backoff::DEFAULT_JITTER;
 use spate_core::clock::LONGEST_DEADLINE;
 use spate_core::clock::TestClock as SyncTestClock;
 use spate_core::clock::tokio::TestClock;
+use spate_core::error::ConnectErrorKind;
 use spate_core::feed::{FeedPark, wake_channel};
 use spate_core::metrics::{FeedOp, Meter};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -957,12 +958,13 @@ fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
         hangs_on(step, "reading the queue's ARN")
     });
     match run.fire_on("reading the queue's ARN") {
-        Err(ConnectError::Unavailable {
-            reason: message, ..
-        }) => assert_eq!(
-            message,
-            "connecting took longer than 30s, while reading the queue's ARN"
-        ),
+        Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+            let message = e.reason().to_owned();
+            assert_eq!(
+                message,
+                "connecting took longer than 30s, while reading the queue's ARN"
+            )
+        }
         other => panic!("expected unavailable, got {other:?}"),
     }
 }
@@ -987,12 +989,13 @@ fn the_connect_bound_fires_on_any_runtime() {
     ] {
         let run = BoundRun::start(io, |step| hangs_on(step, "reading the queue's ARN"));
         match run.fire_on("reading the queue's ARN") {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(
-                message.ends_with("while reading the queue's ARN"),
-                "{name}: {message}"
-            ),
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(
+                    message.ends_with("while reading the queue's ARN"),
+                    "{name}: {message}"
+                )
+            }
             other => panic!("{name}: expected unavailable, got {other:?}"),
         }
     }
@@ -1682,12 +1685,13 @@ fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
         got.is_some()
     });
     match got {
-        Some(Err(ConnectError::Unavailable {
-            reason: message, ..
-        })) => assert!(
-            message.starts_with("connecting took longer than 30s, while "),
-            "{message}"
-        ),
+        Some(Err(e)) if e.kind() == ConnectErrorKind::Unavailable => {
+            let message = e.reason().to_owned();
+            assert!(
+                message.starts_with("connecting took longer than 30s, while "),
+                "{message}"
+            )
+        }
         other => panic!("expected unavailable, got {other:?}"),
     }
 }
@@ -1714,9 +1718,10 @@ fn the_connect_bound_names_the_read_it_was_on() {
                 .map(drop)
         });
         match run.fire_on(step.trim_start_matches("while ")) {
-            Err(ConnectError::Unavailable {
-                reason: message, ..
-            }) => assert!(message.ends_with(step), "{message}"),
+            Err(e) if e.kind() == ConnectErrorKind::Unavailable => {
+                let message = e.reason().to_owned();
+                assert!(message.ends_with(step), "{message}")
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -3454,7 +3459,8 @@ fn an_unlisted_sender_error_refuses_connect() {
         ))
         .unwrap();
         match SqsFeed::connect_with_static_credentials(&section, io.handle(), "x", "x") {
-            Err(ConnectError::Refused { reason: m, .. }) => {
+            Err(e) if e.kind() == ConnectErrorKind::Refused => {
+                let m = e.reason().to_owned();
                 assert!(m.contains("InvalidAction"), "{header}: {m}")
             }
             Err(e) => panic!("{header}: {e}"),

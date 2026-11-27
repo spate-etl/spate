@@ -422,7 +422,10 @@ pub trait Source: Send {
         })
     }
 
-    /// Connect and prepare. Called once before any other method.
+    /// Connect and prepare. Called once, after
+    /// [`attach_metrics`](Self::attach_metrics) and
+    /// [`configure_feed`](Self::configure_feed), before the runtime polls the
+    /// source.
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError>;
 
     /// Service control-plane work (rebalance callbacks, statistics) and

@@ -105,8 +105,12 @@ and idles forever after; a real source services its client here on every call:
 The example records its watermarks in a map its own assertions read back. Store
 them wherever your source resumes from instead.
 
-- **`open`** runs once, before anything else, and hands you the
-  `AckIssuer`. Connect here.
+- **`attach_metrics`** (default no-op) runs once, before `open`, and hands
+  you a `SourceMetricsCtx` with your `Meter` and the framework's stage
+  handles. Resolve your metric handles here
+  ([Instrumenting connectors](instrumenting-connectors.mdx#receive-a-meter-in-a-source-sink-feed-backend-or-deserializer)).
+- **`open`** runs once, before the runtime polls the source, and hands you
+  the `AckIssuer`. Connect here.
 - **`poll_events`** services control-plane work (rebalance callbacks,
   statistics) and returns the next `SourceEvent`: for a simple source
   `LanesAssigned(lanes)`, `LanesRevoked { lanes, barrier }`, or `Idle`

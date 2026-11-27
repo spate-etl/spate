@@ -4007,10 +4007,10 @@ fn a_seeded_feed_without_a_feed_section_names_its_setter() {
     );
 }
 
-/// Pins that a feed passed in whose backend differs from the section's key
-/// fails startup, naming both.
+/// Pins that a feed passed in whose component type differs from the section's
+/// key fails startup, naming both.
 #[test]
-fn a_feed_whose_backend_differs_from_the_section_fails_startup() {
+fn a_feed_whose_component_type_differs_from_the_section_fails_startup() {
     let mut cfg = test_config(1);
     cfg.feed = feed_section("sqs: {}");
     let h = start_with(

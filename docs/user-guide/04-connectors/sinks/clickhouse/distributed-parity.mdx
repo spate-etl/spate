@@ -133,6 +133,13 @@ sink account needs `SELECT ON system.clusters` there, plus a grant on the
 `Distributed` table so its `system.tables` row is visible; see
 [Permissions](./permissions.mdx#grants-by-feature).
 
+`ClickHouseSinkBuilder::connect` runs the guard after the schema read and the
+settings check whenever the block is present, so a sink that disagrees with
+the cluster is never built. A disagreement fails `connect` with an error of
+kind `Refused`. A query that fails is `Refused` when it would fail the same
+way again, such as a denied grant, and `Unavailable` when it may pass, such as
+a node that does not answer.
+
 ### 4. The router
 
 The key extractor returns a `ShardKey` and is passed as a fn pointer: a named

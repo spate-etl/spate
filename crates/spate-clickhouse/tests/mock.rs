@@ -18,11 +18,12 @@ use clickhouse::test::{Mock, handlers};
 use serde::{Deserialize, Serialize};
 use spate_clickhouse::ClickHouseRow;
 use spate_clickhouse::ClickHouseSinkBuilder;
+use spate_clickhouse::SchemaError;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::testing::serialize_row;
 use spate_clickhouse::testing::{ColumnRow, system_columns};
 use spate_core::deser::Owned;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::{ConnectError, ConnectErrorKind, ErrorClass, SinkError, find_source};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use spate_test::record;
 use support::sealed;
@@ -178,11 +179,16 @@ async fn capacity_class_exceptions_stay_retryable() {
 // ---- startup schema validation ----------------------------------------------
 
 /// The error from building a sink whose schema fetch cannot succeed.
-async fn failed_sink(url: &str) -> spate_clickhouse::SchemaError {
+async fn failed_sink(url: &str) -> ConnectError {
     failed_sink_as(url, "rowbinary").await
 }
 
-async fn failed_sink_as(url: &str, format: &str) -> spate_clickhouse::SchemaError {
+/// The schema check's error under a startup error.
+fn schema(err: &ConnectError) -> &SchemaError {
+    find_source(err).unwrap_or_else(|| panic!("no schema error under {err:?}"))
+}
+
+async fn failed_sink_as(url: &str, format: &str) -> ConnectError {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
@@ -457,7 +463,8 @@ async fn missing_and_materialized_columns_fail_startup() {
     ])));
     let err = failed_sink(mock.url()).await;
     let msg = err.to_string();
-    assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+    assert!(matches!(schema(&err), SchemaError::Mismatch(_)));
     assert!(
         msg.contains("declared column `name` does not exist in the table"),
         "{msg}"
@@ -494,7 +501,8 @@ async fn a_column_type_past_what_clickhouse_accepts_fails_startup() {
                 ("score", "Nullable(Float64)", ""),
             ])));
             let err = failed_sink_as(mock.url(), format).await;
-            assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+            assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+            assert!(matches!(schema(&err), SchemaError::Mismatch(_)));
             let msg = err.to_string();
             assert!(msg.contains(says), "{format}: {msg}");
             assert!(
@@ -521,9 +529,10 @@ async fn native_refuses_a_column_it_cannot_write_at_connect() {
     let mock = Mock::new();
     mock.add(handlers::provide(columns()));
     let err = failed_sink_as(mock.url(), "native").await;
-    assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+    assert!(matches!(schema(&err), SchemaError::Mismatch(_)));
     assert_eq!(
-        err.to_string(),
+        err.reason(),
         format!(
             "sink.clickhouse: schema validation failed for `orders` (replica {}):\n  \
              - declared column `name` has type `Time64(3)`, which the Native format does not support\n  \
@@ -678,6 +687,7 @@ async fn empty_result_means_table_not_found() {
     let mock = Mock::new();
     mock.add(handlers::provide(Vec::<ColumnRow>::new()));
     let err = failed_sink(mock.url()).await;
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     assert!(err.to_string().contains("not found"), "{err}");
 }
 
@@ -686,8 +696,9 @@ async fn fetch_failures_fail_startup_distinguishably() {
     let mock = Mock::new();
     mock.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
     let err = failed_sink(mock.url()).await;
-    match err {
-        spate_clickhouse::SchemaError::Fetch { table, .. } => {
+    assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
+    match schema(&err) {
+        SchemaError::Fetch { table, .. } => {
             assert_eq!(table, "`orders`");
         }
         other => panic!("expected Fetch, got {other:?}"),
@@ -722,8 +733,9 @@ settings: {{ insert_qourum: "2" }}
         .connect::<Owned<TestRow>>()
         .await
         .expect_err("a refused setting must fail startup");
-    match err {
-        spate_clickhouse::SchemaError::Settings { url, reason } => {
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+    match schema(&err) {
+        SchemaError::Settings { url, reason } => {
             assert_eq!(url, refuses.url());
             assert!(reason.contains("115"), "{reason}");
         }
@@ -757,6 +769,7 @@ shards:
         .connect::<Owned<TestRow>>()
         .await
         .expect_err("drift must fail");
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     let msg = err.to_string();
     assert!(msg.contains("replicas disagree"), "{msg}");
     assert!(msg.contains("Nullable(Float64)"), "{msg}");
@@ -986,7 +999,9 @@ fn engine_row(engine: &str, engine_full: &str) -> EngineRow {
 ///
 /// Built first in each test, so the schema answer it queues is consumed
 /// before the guard's own handlers go on the queue behind it.
-async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::ClickHouseSink {
+/// A builder with `check` whose build requests `mock` answers. Queue the
+/// check's answers after this, then [`connect`].
+fn checked_builder(mock: &Mock, weights: &[u32], check: &str) -> ClickHouseSinkBuilder {
     let url = mock.url();
     // One replica per shard. The fetch reads every one of them, then the
     // settings check asks each of them.
@@ -1004,11 +1019,16 @@ async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::Clic
         "table: orders\ncompression: none\nshards:\n{shards}{check}\n"
     ))
     .expect("config yaml");
-    ClickHouseSinkBuilder::new(cfg)
-        .expect("valid sink config")
-        .connect::<Owned<TestRow>>()
-        .await
-        .expect("schema fetch")
+    ClickHouseSinkBuilder::new(cfg).expect("valid sink config")
+}
+
+async fn connect(builder: ClickHouseSinkBuilder) -> Result<config::ClickHouseSink, ConnectError> {
+    builder.connect::<Owned<TestRow>>().await
+}
+
+/// The distributed check's error under a startup error.
+fn check_error(err: &ConnectError) -> &spate_clickhouse::DistributedCheckError {
+    find_source(err).unwrap_or_else(|| panic!("no distributed check error under {err:?}"))
 }
 
 const CHECK_ON_ID: &str =
@@ -1017,7 +1037,7 @@ const CHECK_ON_ID: &str =
 #[tokio::test]
 async fn distributed_check_passes_when_cluster_and_ddl_match() {
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1, 1], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[1, 1], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 1, "ch-0"),
         cluster_row(2, 1, "ch-1"),
@@ -1026,7 +1046,7 @@ async fn distributed_check_passes_when_cluster_and_ddl_match() {
         "Distributed",
         "Distributed('prod', 'db', 'orders', xxHash64(id))",
     )]));
-    sink.validate_distributed().await.expect("parity holds");
+    connect(builder).await.expect("parity holds");
 }
 
 #[tokio::test]
@@ -1037,22 +1057,20 @@ async fn distributed_check_off_issues_no_queries() {
     // `distributed_check` block.
     let mock = Mock::new();
     answer_build(&mock, matching_columns());
-    let sink = sink_for(mock.url()).await;
-    sink.validate_distributed()
-        .await
-        .expect("absent block must be a no-op");
+    sink_for(mock.url()).await;
 }
 
 #[tokio::test]
 async fn shard_count_mismatch_fails_the_distributed_check() {
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1, 1], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[1, 1], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 1, "ch-0"),
         cluster_row(2, 1, "ch-1"),
         cluster_row(3, 1, "ch-2"),
     ]));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     let msg = err.to_string();
     assert!(
         msg.contains("2 shard(s)") && msg.contains("has 3"),
@@ -1063,12 +1081,13 @@ async fn shard_count_mismatch_fails_the_distributed_check() {
 #[tokio::test]
 async fn weight_mismatch_names_the_offending_shard() {
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[9, 10], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[9, 10], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 9, "ch-0"),
         cluster_row(2, 1, "ch-1"),
     ]));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     let msg = err.to_string();
     assert!(
         msg.contains("config shard 1 has weight 10") && msg.contains("shard_num 2"),
@@ -1079,7 +1098,7 @@ async fn weight_mismatch_names_the_offending_shard() {
 #[tokio::test]
 async fn sharding_expression_mismatch_prints_both_sides() {
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[1], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
         1, 1, "ch-0",
     )]));
@@ -1087,7 +1106,8 @@ async fn sharding_expression_mismatch_prints_both_sides() {
         "Distributed",
         "Distributed('prod', 'db', 'orders', cityHash64(id))",
     )]));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     let msg = err.to_string();
     assert!(
         msg.contains("cityHash64(id)") && msg.contains("xxHash64(id)"),
@@ -1102,7 +1122,7 @@ async fn sharding_expression_mismatch_prints_both_sides() {
 #[tokio::test]
 async fn non_distributed_engine_fails_with_the_engine_name() {
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[1], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
         1, 1, "ch-0",
     )]));
@@ -1110,7 +1130,7 @@ async fn non_distributed_engine_fails_with_the_engine_name() {
         "ReplacingMergeTree",
         "ReplacingMergeTree(v) ORDER BY id",
     )]));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
     assert!(
         err.to_string().contains("ReplacingMergeTree"),
         "names the actual engine: {err}"
@@ -1129,9 +1149,9 @@ async fn distributed_check_errors_never_print_endpoint_credentials() {
     };
 
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1], &check(mock.url())).await;
+    let builder = checked_builder(&mock, &[1], &check(mock.url()));
     mock.add(handlers::provide::<ClusterRow>(Vec::new()));
-    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    let err = connect(builder).await.unwrap_err().to_string();
     assert!(!err.contains("hunter2"), "{err}");
     assert!(
         err.contains(&format!("{}/?<redacted>", mock.url())),
@@ -1139,9 +1159,9 @@ async fn distributed_check_errors_never_print_endpoint_credentials() {
     );
 
     let failing = Mock::new();
-    let sink = checked_sink(&failing, &[1], &check(failing.url())).await;
+    let builder = checked_builder(&failing, &[1], &check(failing.url()));
     failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    let err = connect(builder).await.unwrap_err().to_string();
     assert!(!err.contains("hunter2"), "{err}");
     assert!(
         err.contains(&format!("{}/?<redacted>", failing.url())),
@@ -1155,21 +1175,84 @@ async fn unknown_cluster_fails_distinguishably() {
 
     // An empty system.clusters result is a Mismatch (wrong cluster name)…
     let mock = Mock::new();
-    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
+    let builder = checked_builder(&mock, &[1], CHECK_ON_ID);
     mock.add(handlers::provide::<ClusterRow>(Vec::new()));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     assert!(
-        matches!(&err, DistributedCheckError::Mismatch(m) if m.contains("not found")),
+        matches!(check_error(&err), DistributedCheckError::Mismatch(m) if m.contains("not found")),
         "empty topology is a Mismatch: {err}"
     );
 
     // …while a failing query is a Fetch: connectivity, not configuration.
     let failing = Mock::new();
-    let sink = checked_sink(&failing, &[1], CHECK_ON_ID).await;
+    let builder = checked_builder(&failing, &[1], CHECK_ON_ID);
     failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let err = sink.validate_distributed().await.unwrap_err();
+    let err = connect(builder).await.unwrap_err();
+    assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
     assert!(
-        matches!(&err, DistributedCheckError::Fetch { what, .. } if *what == "cluster topology"),
+        matches!(check_error(&err), DistributedCheckError::Fetch { what, .. } if *what == "cluster topology"),
         "transport failure is a Fetch: {err}"
     );
+}
+
+/// Each startup request classes its failure the same way: a 503 with no
+/// exception code is unavailable, an unknown-user exception is refused,
+/// and the check's own error is the startup error's source. The four
+/// requests are the schema read, the settings check and the two
+/// `distributed_check` queries.
+#[tokio::test]
+async fn each_startup_request_classes_its_failure() {
+    type Answered = fn(&Mock);
+    let sites: [(&str, Answered); 4] = [
+        ("schema read", |_| {}),
+        ("settings check", |mock| {
+            mock.add(handlers::provide(matching_columns()));
+        }),
+        ("cluster topology", |mock| {
+            answer_build(mock, matching_columns());
+        }),
+        ("table engine", |mock| {
+            answer_build(mock, matching_columns());
+            mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
+                1, 1, "ch-0",
+            )]));
+        }),
+    ];
+    for (site, answered) in sites {
+        for (failure, kind) in [
+            ("503", ConnectErrorKind::Unavailable),
+            ("192", ConnectErrorKind::Refused),
+        ] {
+            let mock = Mock::new();
+            answered(&mock);
+            if failure == "503" {
+                mock.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+            } else {
+                mock.add(handlers::exception(192));
+            }
+            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+                "table: orders\ncompression: none\nshards:\n  - replicas: [\"{}\"]\n{CHECK_ON_ID}\n",
+                mock.url()
+            ))
+            .expect("config yaml");
+            let builder = ClickHouseSinkBuilder::new(cfg).expect("valid sink config");
+            let err = connect(builder).await.unwrap_err();
+            assert_eq!(err.kind(), kind, "{site}, {failure}: {err}");
+            let failed = match site {
+                "schema read" => matches!(schema(&err), SchemaError::Fetch { .. }),
+                "settings check" => matches!(schema(&err), SchemaError::Settings { .. }),
+                what => matches!(
+                    check_error(&err),
+                    spate_clickhouse::DistributedCheckError::Fetch { what: named, .. } if *named == what
+                ),
+            };
+            assert!(failed, "{site}, {failure}: {err:?}");
+            assert_eq!(
+                err.reason(),
+                std::error::Error::source(&err).unwrap().to_string(),
+                "{site}, {failure}"
+            );
+        }
+    }
 }

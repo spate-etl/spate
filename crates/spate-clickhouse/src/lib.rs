@@ -62,9 +62,9 @@
 //! operator's: `shards[i]` in the sink config must be the cluster's
 //! `shard_num = i + 1` (the `remote_servers` order), with matching
 //! `weight`s. The opt-in `distributed_check` config block verifies shard
-//! count, weights, and the DDL's sharding expression at startup
-//! ([`ClickHouseSink::validate_distributed`]); the ordering itself it can
-//! only warn about. See [`router`] for the algorithm.
+//! count, weights, and the DDL's sharding expression in
+//! [`ClickHouseSinkBuilder::connect`]; the ordering itself it can only warn
+//! about. See [`router`] for the algorithm.
 //!
 //! # Column order is the wire contract
 //!

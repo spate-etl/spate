@@ -135,7 +135,7 @@ One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
 **Why:** a caller then asks "retry or stop?" the same way of every role, and the client's error survives for logging.
 A meaning that belongs to one role, such as `NotReady` on a deserializer, stays on that role.
 
-**Departs:** the ClickHouse sink's `connect` returns its own `SchemaError` and its `validate_distributed` its own `DistributedCheckError` ([#2318](https://github.com/spate-etl/spate/issues/2318)), and no connector attaches its client's error as `source()` yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
+**Departs:** no connector attaches its client's error as `source()` yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
 Until one does, a connector keeps the client error's text in the reason.
 
 **Checked by:** review.

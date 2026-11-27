@@ -29,7 +29,7 @@
 pub(crate) mod probe;
 pub(crate) mod typeparse;
 
-use crate::http::StartupBound;
+use crate::http::{Classed, StartupBound};
 use crate::native::leaf::{put_leb128, put_string};
 use crate::writer::ClickHouseEndpoint;
 use bytes::{Bytes, BytesMut};
@@ -40,7 +40,11 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use typeparse::ChType;
 
-/// A check against the replicas failed at sink startup.
+/// A check against the replicas failed at sink startup. It is the source of
+/// the [`ConnectError`](spate_core::error::ConnectError) that
+/// [`connect`](crate::ClickHouseSinkBuilder::connect) returns: a `Fetch` or
+/// `Settings` failure is refused or unavailable by the failure behind it, and
+/// a `Mismatch` or `Columns` is refused.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SchemaError {
@@ -168,7 +172,7 @@ async fn fetch_columns(
     endpoint: &ClickHouseEndpoint,
     check: &SchemaCheck,
     startup: &StartupBound,
-) -> Result<Vec<ColumnRow>, SchemaError> {
+) -> Result<Vec<ColumnRow>, Classed<SchemaError>> {
     let (db, table) = check.target();
     let query = match db {
         Some(db) => endpoint
@@ -190,10 +194,12 @@ async fn fetch_columns(
     startup
         .request(query.fetch_all::<ColumnRow>())
         .await
-        .map_err(|reason| SchemaError::Fetch {
-            table: check.display_table(),
-            url: endpoint.display_url().to_string(),
-            reason,
+        .map_err(|failed| {
+            failed.map(|reason| SchemaError::Fetch {
+                table: check.display_table(),
+                url: endpoint.display_url().to_string(),
+                reason,
+            })
         })
 }
 
@@ -256,7 +262,7 @@ pub(crate) async fn validate(
     check: &SchemaCheck,
     endpoints: &[Vec<ClickHouseEndpoint>],
     startup: &StartupBound,
-) -> Result<Arc<RowSchema>, SchemaError> {
+) -> Result<Arc<RowSchema>, Classed<SchemaError>> {
     // Every replica must agree: shard-local tables drift independently,
     // and a broken replica should surface now, not at its first rotated
     // write.
@@ -270,7 +276,8 @@ pub(crate) async fn validate(
                      on replica {}",
                     check.display_table(),
                     endpoint.display_url()
-                )));
+                ))
+                .into());
             }
             match &reference {
                 None => reference = Some((endpoint.display_url().to_string(), cols)),
@@ -283,7 +290,8 @@ pub(crate) async fn validate(
                             table_column_list(ref_cols),
                             endpoint.display_url(),
                             table_column_list(&cols),
-                        )));
+                        ))
+                        .into());
                     }
                 }
             }
@@ -349,7 +357,7 @@ pub(crate) async fn validate(
             table_column_list(&table_cols)
         );
         let _ = write!(msg, "  declared columns:   {}", check.columns.join(", "));
-        return Err(SchemaError::Mismatch(msg));
+        return Err(SchemaError::Mismatch(msg).into());
     }
 
     let columns = check
@@ -602,13 +610,14 @@ mod tests {
             table: "t".into(),
             columns: &["id"],
         };
-        let err = validate(
+        let Classed { class, error: err } = validate(
             &check,
             &[vec![endpoint_trusting(&other, &url)]],
             &StartupBound::new(None),
         )
         .await
         .unwrap_err();
+        assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err:?}");
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err:?}");
         assert!(err.to_string().contains("UnknownIssuer"), "{err}");
     }

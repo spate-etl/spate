@@ -429,6 +429,18 @@ async fn parity_sink(
     pw: &str,
     check: Option<&str>,
 ) -> config::ClickHouseSink {
+    try_parity_sink(table, shards, pw, check)
+        .await
+        .expect("schema fetch and distributed check")
+}
+
+/// [`parity_sink`] without the unwrap.
+async fn try_parity_sink(
+    table: &str,
+    shards: &[(&str, u32)],
+    pw: &str,
+    check: Option<&str>,
+) -> Result<config::ClickHouseSink, ConnectError> {
     let shard_lines: String = shards
         .iter()
         .map(|(url, weight)| format!("  - replicas: [\"{url}\"]\n    weight: {weight}\n"))
@@ -446,7 +458,6 @@ async fn parity_sink(
         .expect("valid sink config")
         .connect::<Owned<LineRow>>()
         .await
-        .expect("schema fetch")
 }
 
 /// Drive one full pipeline: memory source -> `BatchDeser` -> `flat_map`
@@ -842,20 +853,15 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
         Some(WEIGHTED_CHECK),
     )
     .await;
-    sink.validate_distributed()
-        .await
-        .expect("the matching weighted config must pass the startup check");
-    let drifted = parity_sink(
+    let err = try_parity_sink(
         "lines_w_local",
         &[(&c.node0.url, 1), (&c.node1.url, 1)],
         pw,
         Some(WEIGHTED_CHECK),
     )
-    .await;
-    let err = drifted
-        .validate_distributed()
-        .await
-        .expect_err("weight drift must fail the startup check");
+    .await
+    .expect_err("weight drift must fail the startup check");
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     assert!(
         err.to_string().contains("weight"),
         "the drift error must name the weight mismatch: {err}"

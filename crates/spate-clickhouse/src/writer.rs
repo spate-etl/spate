@@ -324,6 +324,11 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 /// function a materialized view runs on the rows, a damaged stored part, or a
 /// replica whose profile sets a lower cap can answer them too, and that insert
 /// fails as well.
+///
+/// A replica answers 452 when a settings constraint pins a setting the sink
+/// sends, such as `deduplicate_insert`, and 467 when a `settings` value does
+/// not parse as the bool the setting takes. Both answer every attempt the
+/// same way, at startup and at insert.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
@@ -341,6 +346,8 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
     131, // TOO_LARGE_STRING_SIZE
     192, // UNKNOWN_USER
     CANNOT_DECOMPRESS,
+    452, // SETTING_CONSTRAINT_VIOLATION
+    467, // CANNOT_PARSE_BOOL
     497, // ACCESS_DENIED
     516, // AUTHENTICATION_FAILED
 ];
@@ -368,22 +375,37 @@ fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
     }
 }
 
-/// Map a client error onto the framework's retryable/fatal taxonomy.
+/// Map an insert's client error onto the framework's retryable/fatal
+/// taxonomy, by [`class_of`] with `Retryable` for a variant it does not name.
+///
+/// An insert retries an unanticipated error: the retry is idempotent under
+/// dedup tokens and shows in the breaker metrics if it persists.
+fn classify(err: clickhouse::error::Error) -> SinkError {
+    SinkError::from_class(
+        class_of(&err, ErrorClass::Retryable),
+        crate::http::error_reason(&err),
+    )
+}
+
+/// The class of a client error, for an insert and for a startup request
+/// alike:
 ///
 /// - a TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) →
 ///   `Fatal`, whatever the variant carrying it;
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema, parse,
-///   settings, auth, size-limit and block-decoding codes above, `Retryable` otherwise (e.g.
-///   `TOO_MANY_PARTS`, memory pressure, shutdown races);
+///   settings, auth, size-limit and block-decoding codes above, `Retryable`
+///   otherwise (e.g. `TOO_MANY_PARTS`, memory pressure, shutdown races, or a
+///   proxy's 503 with no code);
 /// - client-side params and both codec directions (`InvalidParams`,
 ///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
-///   `Fatal`.
-fn classify(err: clickhouse::error::Error) -> SinkError {
+///   `Fatal`;
+/// - any other variant, such as a reply that does not decode → `otherwise`.
+pub(crate) fn class_of(err: &clickhouse::error::Error, otherwise: ErrorClass) -> ErrorClass {
     use clickhouse::error::Error as ChError;
-    let class = match &err {
-        _ if spate_core::tls_rejection!(rustls, &err).is_some() => ErrorClass::Fatal,
+    match err {
+        _ if spate_core::tls_rejection!(rustls, err).is_some() => ErrorClass::Fatal,
         ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
         ChError::BadResponse(reason) => {
             if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {
@@ -397,11 +419,8 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
         | ChError::Unsupported(_)
         | ChError::Compression(_)
         | ChError::Decompression(_) => ErrorClass::Fatal,
-        // Anything unanticipated: retry, which is idempotent under dedup
-        // tokens and visible through breaker metrics if persistent.
-        _ => ErrorClass::Retryable,
-    };
-    SinkError::from_class(class, crate::http::error_reason(&err))
+        _ => otherwise,
+    }
 }
 
 /// Extract the exception code from a ClickHouse error reason. Servers send
@@ -491,6 +510,72 @@ mod tests {
 
         let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
         assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
+    }
+
+    /// `class_of` gives each variant it names the same class whatever the
+    /// caller's `otherwise`, and every other variant `otherwise`. A server
+    /// answer with no exception code, as a proxy's 503 page has, is
+    /// retryable.
+    #[test]
+    fn class_of_names_each_variant_and_defers_the_rest() {
+        use ErrorClass::{Fatal, Retryable};
+        use clickhouse::error::Error as E;
+        let boxed = || -> Box<dyn std::error::Error + Send + Sync> { "x".into() };
+        let named: Vec<(E, ErrorClass)> = vec![
+            (E::Network(boxed()), Retryable),
+            (E::TimedOut, Retryable),
+            (E::Other(boxed()), Retryable),
+            (
+                E::BadResponse("Code: 516. DB::Exception: Authentication failed".into()),
+                Fatal,
+            ),
+            (
+                E::BadResponse(
+                    "Code: 452. DB::Exception: Setting deduplicate_insert should not be changed"
+                        .into(),
+                ),
+                Fatal,
+            ),
+            (
+                E::BadResponse(
+                    "Code: 467. DB::Exception: Cannot parse bool from string 'maybe'".into(),
+                ),
+                Fatal,
+            ),
+            (
+                E::BadResponse("Code: 241. DB::Exception: Memory limit exceeded".into()),
+                Retryable,
+            ),
+            (
+                E::BadResponse("<html><body>503 Service Unavailable</body></html>".into()),
+                Retryable,
+            ),
+            (E::InvalidParams(boxed()), Fatal),
+            (E::SchemaMismatch("x".into()), Fatal),
+            (E::Unsupported("x".into()), Fatal),
+            (E::Compression(boxed()), Fatal),
+            (E::Decompression(boxed()), Fatal),
+        ];
+        for (err, class) in &named {
+            for otherwise in [Fatal, Retryable] {
+                assert_eq!(
+                    class_of(err, otherwise),
+                    *class,
+                    "{err:?} under {otherwise:?}"
+                );
+            }
+        }
+        let unnamed = [
+            E::NotEnoughData,
+            E::DataFormat(boxed()),
+            E::RowNotFound,
+            E::Custom("x".into()),
+        ];
+        for err in &unnamed {
+            for otherwise in [Fatal, Retryable] {
+                assert_eq!(class_of(err, otherwise), otherwise, "{err:?}");
+            }
+        }
     }
 
     /// A body over a server size limit answers 128 or 131, which classify

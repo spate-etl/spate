@@ -6,7 +6,7 @@
 //   1. that `ClickHouseDistributedRouter::hash_key` reproduces the server's own
 //      `xxHash64(...)` bit-for-bit (the placement oracle; if this drifts,
 //      every parity claim is void), and
-//   2. that `validate_distributed()` reads a real `Distributed` table's DDL
+//   2. that `connect` reads a real `Distributed` table's DDL
 //      out of `system.tables` and agrees (or, on drift, disagrees with a
 //      diff naming both expressions).
 //
@@ -35,7 +35,11 @@ struct IdName {
 
 /// Build a sink whose `distributed_check` targets `dist_table` over
 /// `cluster`, keyed on `name` (expected DDL expression `xxHash64(name)`).
-async fn checked_sink(url: &str, cluster: &str, dist_table: &str) -> config::ClickHouseSink {
+async fn checked_sink(
+    url: &str,
+    cluster: &str,
+    dist_table: &str,
+) -> Result<config::ClickHouseSink, ConnectError> {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
@@ -54,7 +58,6 @@ distributed_check:
         .expect("valid sink config")
         .connect::<Owned<IdName>>()
         .await
-        .expect("schema fetch")
 }
 
 /// The live oracle: the server's `xxHash64` over strings and both integer
@@ -132,8 +135,6 @@ async fn distributed_check_passes_against_a_real_distributed_table() {
 
     checked_sink(&srv.url, &cluster, "orders_dist")
         .await
-        .validate_distributed()
-        .await
         .expect("a matching cluster + xxHash64(name) DDL must pass the parity check");
 }
 
@@ -165,9 +166,8 @@ async fn drifted_sharding_expression_fails_against_a_real_table() {
 
     let err = checked_sink(&srv.url, &cluster, "orders_dist_drift")
         .await
-        .validate_distributed()
-        .await
         .expect_err("a cityHash64 DDL must fail an xxHash64 sink config");
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     let msg = err.to_string();
     assert!(
         msg.contains("cityHash64") && msg.contains("xxHash64"),

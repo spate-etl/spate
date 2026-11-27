@@ -4,4 +4,4 @@
 
 These leave the public API: `ClickHouseEncoder`, `NativeEncoder`, `NativeSchema`, `NativeError`, `RowSchema`, `serialize_row`, `RowBinaryError`, the `native` and `rowbinary` modules, `ClickHouseSink::schema()` and `ClickHouseSink::native_schema()`. `PreEncodedRows` is removed; a pipeline of pre-encoded RowBinary rows writes a `RowEncoder` that appends each record's bytes. The type mapping the `rowbinary` module documented is in the crate docs, under Row types.
 
-Under `format: native`, `ClickHouseSinkBuilder::connect` refuses a declared column whose type the Native format does not write, with `SchemaError::Mismatch` and the full schema diff. In 0.5, `native_schema()` refused it, one column at a time.
+Under `format: native`, `ClickHouseSinkBuilder::connect` refuses a declared column whose type the Native format does not write, with a `ConnectError` of kind `Refused` whose source is a `SchemaError::Mismatch` holding the full schema diff. In 0.5, `native_schema()` refused it, one column at a time.

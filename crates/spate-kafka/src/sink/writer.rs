@@ -142,9 +142,15 @@ pub(crate) fn parse_messages(
     let mut messages = Vec::with_capacity(rows as usize);
     for frame in frames {
         for message in FrameParser::new(frame) {
-            messages.push(message.map_err(|e| {
-                SinkError::fatal(format!("corrupted sink frame (framework bug): {e}"))
-            })?);
+            // A `map_err` here would copy an error-sized `Result` per message.
+            match message {
+                Ok(message) => messages.push(message),
+                Err(e) => {
+                    return Err(SinkError::fatal(format!(
+                        "corrupted sink frame (framework bug): {e}"
+                    )));
+                }
+            }
         }
     }
     if messages.len() as u64 != rows {

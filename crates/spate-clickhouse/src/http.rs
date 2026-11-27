@@ -1,12 +1,14 @@
 //! The HTTP(S) client behind each replica endpoint, the roots it verifies
 //! `https://` replicas against, and the certificate rejections it reports.
 
+use crate::writer::class_of;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustls::crypto::aws_lc_rs;
 use rustls::{ClientConfig, RootCertStore};
 use spate_core::clock::SyncClock;
+use spate_core::error::ErrorClass;
 use spate_core::task::{BoundError, ThreadBound};
 use spate_core::tls::{SystemRoots, TlsSection, TrustError, TrustRoots};
 use std::sync::Arc;
@@ -85,22 +87,66 @@ impl StartupBound {
         }
     }
 
-    /// `request`'s answer, or the reason it has none.
+    /// `request`'s answer, or the reason it has none with its class.
+    ///
+    /// A client error is classed by [`class_of`] with `Fatal` for a variant
+    /// it does not name, since a startup read has no dedup token to make a
+    /// retry of an unknown failure safe to assume. A request that passes the
+    /// bound, or whose timing thread does not start, is `Retryable`.
     pub(crate) async fn request<T>(
         &self,
         request: impl Future<Output = Result<T, clickhouse::error::Error>>,
-    ) -> Result<T, String> {
+    ) -> Result<T, Classed<String>> {
+        let classed = |e: clickhouse::error::Error| Classed {
+            class: class_of(&e, ErrorClass::Fatal),
+            error: error_reason(&e),
+        };
         let Some(limit) = self.limit else {
-            return request.await.map_err(|e| error_reason(&e));
+            return request.await.map_err(classed);
         };
         let bound = ThreadBound::new("spate-clickhouse-startup-bound", limit)
             .with_clock(self.clock.clone());
         match bound.run(request).await {
-            Ok(answer) => answer.map_err(|e| error_reason(&e)),
-            Err(BoundError::Elapsed) => Err(format!(
-                "no answer within {limit:?}, the `startup_timeout` bound"
-            )),
-            Err(other) => Err(other.to_string()),
+            Ok(answer) => answer.map_err(classed),
+            Err(stopped) => Err(Classed {
+                class: ErrorClass::Retryable,
+                error: match stopped {
+                    BoundError::Elapsed => {
+                        format!("no answer within {limit:?}, the `startup_timeout` bound")
+                    }
+                    other => other.to_string(),
+                },
+            }),
+        }
+    }
+}
+
+/// A startup failure with the class that decides whether connecting again
+/// may succeed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Classed<E> {
+    pub(crate) class: ErrorClass,
+    pub(crate) error: E,
+}
+
+impl<E> Classed<E> {
+    /// The same class over the error `f` builds from this one.
+    pub(crate) fn map<U>(self, f: impl FnOnce(E) -> U) -> Classed<U> {
+        Classed {
+            class: self.class,
+            error: f(self.error),
+        }
+    }
+}
+
+/// An error with no class of its own, such as a mismatch between the
+/// configuration and the table, is `Fatal`: connecting again fails the same
+/// way.
+impl<E: std::error::Error> From<E> for Classed<E> {
+    fn from(error: E) -> Self {
+        Classed {
+            class: ErrorClass::Fatal,
+            error,
         }
     }
 }
@@ -126,9 +172,10 @@ mod tests {
     use std::path::Path;
     use std::sync::mpsc;
 
-    /// A startup request with no answer fails at its bound and names the
-    /// key, one that answers passes its answer through, and a bound past the
-    /// clock's range, or none, waits for the answer.
+    /// A startup request with no answer fails at its bound, retryable, and
+    /// names the key; one that answers passes its answer through, and a bound
+    /// past the clock's range, or none, waits for the answer. A client error
+    /// the classifier does not name is fatal with a bound or without one.
     #[test]
     fn a_startup_request_is_bounded() {
         type Answer = Result<u8, clickhouse::error::Error>;
@@ -151,7 +198,10 @@ mod tests {
         });
         assert_eq!(
             reason,
-            Err("no answer within 30s, the `startup_timeout` bound".to_owned())
+            Err(Classed {
+                class: ErrorClass::Retryable,
+                error: "no answer within 30s, the `startup_timeout` bound".to_owned(),
+            })
         );
         for limit in [Some(limit), Some(Duration::MAX), None] {
             let answered = std::future::ready::<Answer>(Ok(7));
@@ -161,13 +211,17 @@ mod tests {
                 "{limit:?}"
             );
         }
-        let refused = std::future::ready::<Answer>(Err(clickhouse::error::Error::Custom(
-            "refused".to_owned(),
-        )));
-        let reason = io
-            .block_on(bound(Some(limit)).request(refused))
-            .unwrap_err();
-        assert!(reason.ends_with("refused"), "{reason}");
+        for limit in [Some(limit), None] {
+            let refused = std::future::ready::<Answer>(Err(clickhouse::error::Error::Custom(
+                "refused".to_owned(),
+            )));
+            let failed = io.block_on(bound(limit).request(refused)).unwrap_err();
+            assert_eq!(failed.class, ErrorClass::Fatal, "{limit:?}");
+            assert!(failed.error.ends_with("refused"), "{}", failed.error);
+            let dropped = std::future::ready::<Answer>(Err(clickhouse::error::Error::TimedOut));
+            let failed = io.block_on(bound(limit).request(dropped)).unwrap_err();
+            assert_eq!(failed.class, ErrorClass::Retryable, "{limit:?}");
+        }
     }
 
     fn with_root_ca(path: &Path) -> TlsSection {

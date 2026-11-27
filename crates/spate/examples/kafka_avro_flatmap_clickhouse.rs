@@ -190,9 +190,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?
         .connect::<Owned<OrderLineRow>>(),
     )?;
-    // No-op unless the YAML opts into `distributed_check`; with it, startup
-    // fails fast if the sink topology drifts from the cluster + DDL.
-    pipeline.block_on(sink.validate_distributed())?;
     // Weights come from the validated YAML, so router and endpoints cannot
     // drift. With a single shard this routes identically to the default
     // (everything to shard 0); with N it matches `xxHash64(order_id)`.

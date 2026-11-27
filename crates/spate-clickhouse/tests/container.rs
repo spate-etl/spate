@@ -10,6 +10,7 @@ use spate_clickhouse::ClickHouseSinkBuilder;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::{ClickHouseCompression, ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
+use spate_core::error::{ConnectError, ConnectErrorKind, find_source};
 use spate_core::sink::SealedBatch;
 use spate_test::record;
 use spate_test_support::container_image;
@@ -214,7 +215,7 @@ async fn try_sink_with<F: ClickHouseRowFamily>(
     url: &str,
     table: &str,
     settings: &str,
-) -> Result<config::ClickHouseSink, spate_clickhouse::SchemaError> {
+) -> Result<config::ClickHouseSink, ConnectError> {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: {table}

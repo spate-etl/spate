@@ -9,9 +9,9 @@
 //! writer.
 
 use crate::codec::{BlockCodec, BlockMethod};
-use crate::distributed::{self, DistributedCheckError};
+use crate::distributed;
 use crate::encoder::ClickHouseFormatEncoder;
-use crate::http::StartupBound;
+use crate::http::{Classed, StartupBound};
 use crate::native::NativeSchema;
 use crate::router::{ClickHouseDistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
@@ -21,6 +21,7 @@ use rustls::ClientConfig;
 use serde::{Deserialize, Deserializer, de};
 use spate_core::config::{ComponentConfig, ConfigError, SectionPath, UrlRule, redact};
 use spate_core::deser::RecFamily;
+use spate_core::error::ConnectError;
 use spate_core::sink::{
     FrameCodecFactory, SinkBundle, SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
 };
@@ -32,6 +33,10 @@ use std::time::Duration;
 
 /// The sink's component type key, under `sink:` or a `sinks:` entry.
 pub(crate) const TAG: &str = "clickhouse";
+
+/// The component a startup error names, as in "the ClickHouse sink cannot
+/// start".
+const COMPONENT: &str = "ClickHouse sink";
 
 /// The `clickhouse` sink section.
 ///
@@ -482,7 +487,8 @@ impl ClickHouseShardSection {
 
 /// The opt-in `distributed_check:` block, a startup guard verifying that
 /// the sink config, the cluster topology, and the `Distributed` table's
-/// DDL agree (see [`ClickHouseSink::validate_distributed`]).
+/// DDL agree. [`ClickHouseSinkBuilder::connect`] runs it after the schema and
+/// settings checks.
 ///
 /// ```yaml
 /// sink:
@@ -671,7 +677,9 @@ impl ClickHouseSinkBuilder {
     /// the `settings` on a `SELECT 1`, and a setting one refuses fails the
     /// build with [`SchemaError::Settings`] and the server's message. That
     /// covers a constraint pinning `deduplicate_insert` and a server before
-    /// 26.2, which does not know it.
+    /// 26.2, which does not know it. Last, with a `distributed_check` block,
+    /// the cluster topology and the `Distributed` table's DDL are checked
+    /// against the config; with none, no query is sent for it.
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
@@ -679,21 +687,36 @@ impl ClickHouseSinkBuilder {
     ///
     /// # Errors
     ///
-    /// [`SchemaError::Columns`] when `F::COLUMNS` cannot produce an `INSERT`
-    /// or its header cannot be compressed, [`SchemaError::Fetch`] when a
-    /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
-    /// table is missing, the replicas disagree, a declared column does not
-    /// fit it, or, under `format: native`, a declared column has a type the
-    /// Native format does not support, and [`SchemaError::Settings`] when a
-    /// replica answers the
-    /// settings check with an error. A replica that gives a request no
-    /// answer within `startup_timeout` fails that request's variant,
-    /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
+    /// A [`ConnectError`] whose [`source`](std::error::Error::source) is the
+    /// check's [`SchemaError`] or
+    /// [`DistributedCheckError`](crate::DistributedCheckError), and whose
+    /// reason is that error's text:
+    ///
+    /// - [`Refused`](spate_core::error::ConnectErrorKind::Refused) for a
+    ///   mismatch: `F::COLUMNS` cannot produce an `INSERT` or its header
+    ///   cannot be compressed ([`SchemaError::Columns`]); the table is
+    ///   missing, the replicas disagree, a declared column does not fit it,
+    ///   or, under `format: native`, a declared column has a type the Native
+    ///   format does not support ([`SchemaError::Mismatch`]); or the cluster
+    ///   or DDL disagrees with `distributed_check`.
+    /// - `Refused` for a request that fails the same way on every attempt: a
+    ///   rejected TLS certificate, a server exception whose code the sink
+    ///   classes as fatal at insert too, such as an unknown setting name or a
+    ///   denied grant, or a reply that does not decode.
+    /// - [`Unavailable`](spate_core::error::ConnectErrorKind::Unavailable)
+    ///   for any other failed request: a connection that fails or times out,
+    ///   a server answer with any other code or none, such as a proxy's 503
+    ///   or a value an enum setting does not accept, and a replica that gives
+    ///   no answer within `startup_timeout`.
+    ///
+    /// A failed request is a [`SchemaError::Fetch`] for the schema read,
+    /// [`SchemaError::Settings`] for the settings check, and a
+    /// `DistributedCheckError::Fetch` for a `distributed_check` query.
     pub async fn connect<F: crate::ClickHouseRowFamily>(
         self,
-    ) -> Result<ClickHouseSink, SchemaError> {
+    ) -> Result<ClickHouseSink, ConnectError> {
         validate_columns(F::COLUMNS)
-            .map_err(|why| SchemaError::Columns(format!("sink.clickhouse: {why}")))?;
+            .map_err(|why| refused(SchemaError::Columns(format!("sink.clickhouse: {why}"))))?;
 
         let check = schema::SchemaCheck {
             wire: match self.cfg.format {
@@ -704,7 +727,9 @@ impl ClickHouseSinkBuilder {
             table: self.cfg.table.clone(),
             columns: F::COLUMNS,
         };
-        let schema = schema::validate(&check, &self.endpoints, &self.startup).await?;
+        let schema = schema::validate(&check, &self.endpoints, &self.startup)
+            .await
+            .map_err(failed)?;
         let encoding = match self.cfg.format {
             ClickHouseFormat::RowBinary => Encoding::RowBinary(Arc::clone(&schema)),
             ClickHouseFormat::Native => Encoding::Native(
@@ -725,7 +750,7 @@ impl ClickHouseSinkBuilder {
                     .make()
                     .encode_frame(&schema.header())
                     .map(Bytes::copy_from_slice)
-                    .map_err(|e| SchemaError::Columns(format!("sink.clickhouse: {e}")))?;
+                    .map_err(|e| refused(SchemaError::Columns(format!("sink.clickhouse: {e}"))))?;
                 Some(block)
             }
         };
@@ -741,10 +766,15 @@ impl ClickHouseSinkBuilder {
             self.startup
                 .request(writer.check_settings(endpoint))
                 .await
-                .map_err(|reason| SchemaError::Settings {
-                    url: endpoint.display_url().to_string(),
-                    reason,
+                .map_err(|e| {
+                    failed(e.map(|reason| SchemaError::Settings {
+                        url: endpoint.display_url().to_string(),
+                        reason,
+                    }))
                 })?;
+        }
+        if let Some(check) = &self.distributed {
+            check.verify().await.map_err(failed)?;
         }
         tracing::info!(
             table = %self.cfg.table,
@@ -759,7 +789,6 @@ impl ClickHouseSinkBuilder {
             encoding,
             probe_endpoints: self.probe_endpoints,
             shard_weights: self.shard_weights,
-            distributed: self.distributed,
         })
     }
 
@@ -774,6 +803,18 @@ impl ClickHouseSinkBuilder {
         ClickHouseDistributedRouter::new(extract, &self.shard_weights)
             .expect("config validation guarantees at least one shard and weights >= 1")
     }
+}
+
+/// The startup error for `failure`, with the check's own error as its
+/// `source()` and its text as the reason.
+fn failed<E: std::error::Error + Send + Sync + 'static>(failure: Classed<E>) -> ConnectError {
+    let reason = failure.error.to_string();
+    ConnectError::from_class(COMPONENT, failure.class, reason).with_source(failure.error)
+}
+
+/// The startup error for a check that fails the same way on every attempt.
+fn refused(error: SchemaError) -> ConnectError {
+    failed(Classed::from(error))
 }
 
 /// Everything the framework needs to run this sink.
@@ -795,8 +836,6 @@ pub struct ClickHouseSink {
     probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
     /// Per-shard weights in config order, for [`router`](Self::router).
     shard_weights: Arc<[u32]>,
-    /// The captured `distributed_check` block, if configured.
-    distributed: Option<distributed::DistributedCheck>,
 }
 
 /// What the sink's encoders are built from, fixed at `connect`.
@@ -874,22 +913,6 @@ impl ClickHouseSink {
     pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> ClickHouseDistributedRouter<F> {
         ClickHouseDistributedRouter::new(extract, &self.shard_weights)
             .expect("config validation guarantees at least one shard and weights >= 1")
-    }
-
-    /// Opt-in startup DDL-parity guard. Instant `Ok(())` when no
-    /// `distributed_check` block is configured. Otherwise verifies shard
-    /// count, per-shard weights, and the `Distributed` table's sharding
-    /// expression against the live cluster, failing fast with a readable
-    /// diff. Placement/DDL drift does not error at query time; it silently
-    /// returns wrong results under `optimize_skip_unused_shards`.
-    ///
-    /// Call **after** [`connect`](ClickHouseSinkBuilder::connect) and
-    /// **before** the pipeline consumes the sink.
-    pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
-        match &self.distributed {
-            None => Ok(()),
-            Some(check) => check.verify().await,
-        }
     }
 }
 
@@ -1133,12 +1156,14 @@ fn insert_statement(table: &str, columns: &[&str], format: ClickHouseFormat) -> 
 mod tests {
     use super::*;
     use crate::ClickHouseRow;
+    use crate::distributed::DistributedCheckError;
     use crate::test_startup;
     use clickhouse::test::{Mock, handlers};
     use serde::Serialize;
     use spate_core::clock::SyncClock;
     use spate_core::config::ComponentConfig;
     use spate_core::deser::Owned;
+    use spate_core::error::{ConnectErrorKind, find_source};
 
     /// `body` as the `sink: { clickhouse: ... }` section of a loaded
     /// pipeline config, so its errors start at `sink.clickhouse`.
@@ -1474,8 +1499,8 @@ settings: { insert_quorum: "auto" }
     }
 
     /// A replica that accepts the schema read and never answers it fails the
-    /// build once `startup_timeout` has passed, with an error naming the
-    /// replica and the bound. Regression for #1953.
+    /// build once `startup_timeout` has passed, unavailable, with an error
+    /// naming the replica and the bound. Regression for #1953.
     #[test]
     fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
         let io = test_startup::runtime();
@@ -1485,17 +1510,18 @@ settings: { insert_quorum: "auto" }
         let (url, held) = test_startup::silent_after(&io, &mock, 0);
         let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
-        let SchemaError::Fetch {
+        assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
+        let Some(SchemaError::Fetch {
             url: named, reason, ..
-        } = err
+        }) = find_source(&err)
         else {
             panic!("expected the schema read to fail: {err}");
         };
-        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+        assert_eq!((named.as_str(), reason.as_str()), (url.as_str(), NO_ANSWER));
     }
 
     /// A replica that answers the schema read and never answers the settings
-    /// check fails the build at the startup bound.
+    /// check fails the build at the startup bound, unavailable.
     #[test]
     fn a_settings_check_with_no_answer_fails_the_build_at_the_startup_bound() {
         let io = test_startup::runtime();
@@ -1506,14 +1532,15 @@ settings: { insert_quorum: "auto" }
         let (url, held) = test_startup::silent_after(&io, &mock, 1);
         let build = bounded_builder(&url, &given, "").connect::<spate_core::deser::Owned<IdOnly>>();
         let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
-        let SchemaError::Settings { url: named, reason } = err else {
+        assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
+        let Some(SchemaError::Settings { url: named, reason }) = find_source(&err) else {
             panic!("expected the settings check to fail: {err}");
         };
-        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+        assert_eq!((named.as_str(), reason.as_str()), (url.as_str(), NO_ANSWER));
     }
 
-    /// Each `distributed_check` query that gets no answer fails the check at
-    /// the startup bound, naming the query.
+    /// Each `distributed_check` query that gets no answer fails `connect` at
+    /// the startup bound, unavailable, naming the query.
     #[test]
     fn a_distributed_check_query_with_no_answer_fails_at_the_startup_bound() {
         #[derive(Serialize, clickhouse::Row)]
@@ -1538,28 +1565,27 @@ settings: { insert_quorum: "auto" }
                 }]));
             }
             let (url, held) = test_startup::silent_after(&io, &mock, 2 + answered);
-            let sink = io
-                .block_on(
-                    bounded_builder(&url, &given, CHECK)
-                        .connect::<spate_core::deser::Owned<IdOnly>>(),
-                )
-                .expect("the replica answers the build");
-            let checked = async move { sink.validate_distributed().await };
-            let err =
-                test_startup::past_the_bound(&io, &clock, STARTUP, &held, checked).unwrap_err();
-            let DistributedCheckError::Fetch {
+            let build =
+                bounded_builder(&url, &given, CHECK).connect::<spate_core::deser::Owned<IdOnly>>();
+            let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
+            assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
+            let Some(DistributedCheckError::Fetch {
                 what,
                 url: named,
                 reason,
-            } = err
+            }) = find_source(&err)
             else {
                 panic!("expected the {query} query to fail: {err}");
             };
-            assert_eq!((what, named, reason.as_str()), (query, url, NO_ANSWER));
+            assert_eq!(
+                (*what, named.as_str(), reason.as_str()),
+                (query, url.as_str(), NO_ANSWER)
+            );
         }
     }
 
-    /// A build on a runtime with no timer returns the replica's error.
+    /// A build on a runtime with no timer returns the replica's error: a
+    /// refused connection, unavailable.
     #[test]
     fn a_build_on_a_runtime_without_a_timer_returns_the_replicas_error() {
         let refusing = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1577,7 +1603,11 @@ settings: { insert_quorum: "auto" }
                     .connect::<spate_core::deser::Owned<IdOnly>>(),
             )
             .unwrap_err();
-        assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
+        assert_eq!(err.kind(), ConnectErrorKind::Unavailable, "{err}");
+        assert!(
+            matches!(find_source(&err), Some(SchemaError::Fetch { .. })),
+            "{err}"
+        );
     }
 
     /// The writer's `Debug` for a sink connected to a mock replica, with
@@ -1682,10 +1712,12 @@ settings: { insert_quorum: "auto" }
         .connect::<BadColumns>()
         .await
         .unwrap_err();
-        let SchemaError::Columns(msg) = err else {
+        assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+        let Some(SchemaError::Columns(msg)) = find_source(&err) else {
             panic!("the column check runs before the fetch: {err}");
         };
         assert_eq!(msg, "sink.clickhouse: column `id` is listed more than once");
+        assert_eq!(err.reason(), msg);
     }
 
     /// The framework's pool blocks sit beside `clickhouse:` in the sink

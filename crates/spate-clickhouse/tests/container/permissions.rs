@@ -130,7 +130,7 @@ async fn distributed_check_sees_the_table_through_a_grant_on_it() {
     }
 
     let guard = async |user: &str| {
-        sink_with::<Owned<Order>>(
+        try_sink_with::<Owned<Order>>(
             &srv.url,
             "orders",
             &format!(
@@ -145,15 +145,14 @@ distributed_check:
             ),
         )
         .await
-        .validate_distributed()
-        .await
     };
 
     // The row stays filtered out, so the guard reports the table as absent.
     let err = guard("sys_reader")
         .await
         .expect_err("SELECT ON system.tables must not reveal the Distributed table");
-    let spate_clickhouse::DistributedCheckError::Mismatch(msg) = &err else {
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+    let Some(spate_clickhouse::DistributedCheckError::Mismatch(msg)) = find_source(&err) else {
         panic!("the topology read must succeed, leaving the table as the failure: {err}");
     };
     assert!(
@@ -170,7 +169,10 @@ distributed_check:
     let err = guard("no_clusters")
         .await
         .expect_err("the topology read needs SELECT ON system.clusters");
-    let spate_clickhouse::DistributedCheckError::Fetch { what, reason, .. } = &err else {
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
+    let Some(spate_clickhouse::DistributedCheckError::Fetch { what, reason, .. }) =
+        find_source(&err)
+    else {
         panic!("the topology read should be refused for lack of the grant, got: {err}");
     };
     assert_eq!(

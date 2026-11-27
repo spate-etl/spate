@@ -82,10 +82,10 @@ sink:
 | `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough-and-the-denylist). Values render `<redacted>` in `Debug` output. |
 | `send_timeout` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. `0s` turns it off. |
 | `end_timeout` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. `0s` turns it off, and an insert is then bounded only by `checkpoint.drain_timeout` at [shutdown](../../../03-guides/graceful-shutdown.mdx). |
-| `startup_timeout` | duration | `30s` | Timeout of each request the sink sends a replica at startup: the schema read, the settings check and the `distributed_check` queries. A replica that gives no answer within it fails startup with an error naming the replica. `0s` turns it off, and startup waits on each replica for as long as it takes. |
+| `startup_timeout` | duration | `30s` | Timeout of each request the sink sends a replica at startup: the schema read, the settings check and the `distributed_check` queries. A replica that gives no answer within it fails startup with an error of kind `Unavailable` naming the replica. `0s` turns it off, and startup waits on each replica for as long as it takes. |
 | `compression` | string | `lz4` | Transport compression of insert bodies: `none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in `1..=22`. Insert bodies are compressed on the pipeline threads as each chunk seals, and sent with `decompress=1`. Unrelated to on-disk column codecs. |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
-| `distributed_check` | section | `none` | Opt-in startup parity check against the cluster topology and a `Distributed` table's DDL. Absent means no queries are issued. Its keys are on [Distributed parity](./distributed-parity.mdx). |
+| `distributed_check` | section | `none` | Opt-in startup parity check against the cluster topology and a `Distributed` table's DDL, run by `connect` after the settings check. Absent means no queries are issued. Its keys are on [Distributed parity](./distributed-parity.mdx). |
 
 ## The `settings` passthrough and the denylist
 
@@ -121,13 +121,16 @@ server fails a request that carries another spelling, such as
 `DEDUPLICATE_INSERT` or `DATABASE`.
 
 When the sink is built, it sends `settings` to every replica on a `SELECT 1`,
-together with `deduplicate_insert`.
-A setting a replica refuses fails startup with that replica's URL and the
-server's message. That covers a name the server does not know and a value it
-cannot parse. A misspelled `insert_quorum` fails like this:
+together with `deduplicate_insert`. A setting a replica refuses fails startup
+with that replica's URL and the server's message. That covers a name the server
+does not know and a value it cannot parse. The error is of kind `Refused` when
+the server's code is one an insert also treats as fatal, such as an unknown
+name, a constraint that pins the setting, or a bool that does not parse. Any
+other code, such as the one for a value an enum setting does not accept, is of
+kind `Unavailable`. A misspelled `insert_quorum` fails like this:
 
 ```text
-sink.clickhouse: replica http://ch-1.internal:8123 failed the settings check: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …
+the ClickHouse sink cannot start: sink.clickhouse: replica http://ch-1.internal:8123 failed the settings check: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …
 ```
 
 An insert that a replica answers with `UNKNOWN_SETTING` mid-run is a

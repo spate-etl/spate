@@ -14,13 +14,17 @@
 //! stays the operator's contract. A best-effort hostname cross-check
 //! warns (never fails) on apparent cross-wiring.
 
-use crate::http::StartupBound;
+use crate::http::{Classed, StartupBound};
 use crate::writer::ClickHouseEndpoint;
 use serde::Deserialize;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-/// Startup DDL-parity guard failed. Fatal: fix the config or the DDL.
+/// The startup DDL-parity guard failed. It is the source of the
+/// [`ConnectError`](spate_core::error::ConnectError) that
+/// [`connect`](crate::ClickHouseSinkBuilder::connect) returns: a `Mismatch`
+/// is refused, and a `Fetch` is refused or unavailable by the failure behind
+/// it.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DistributedCheckError {
@@ -56,8 +60,7 @@ pub(crate) struct TableEngineRow {
     pub(crate) engine_full: String,
 }
 
-/// What `ClickHouseSinkBuilder::new` captures for a later
-/// `validate_distributed()` call.
+/// What `ClickHouseSinkBuilder::new` captures for `connect` to check.
 #[derive(Debug)]
 pub(crate) struct DistributedCheck {
     /// The endpoint to query (`distributed_check.endpoint`, defaulting to
@@ -95,13 +98,14 @@ impl DistributedCheck {
         }
     }
 
-    fn mismatch(&self, detail: String) -> DistributedCheckError {
+    fn mismatch(&self, detail: String) -> Classed<DistributedCheckError> {
         DistributedCheckError::Mismatch(format!("sink.clickhouse.distributed_check: {detail}"))
+            .into()
     }
 
     /// Run the guard. Query order is fixed at cluster topology then table
     /// engine, and the mock tests depend on it.
-    pub(crate) async fn verify(&self) -> Result<(), DistributedCheckError> {
+    pub(crate) async fn verify(&self) -> Result<(), Classed<DistributedCheckError>> {
         let topology = self
             .endpoint
             .client()
@@ -111,12 +115,12 @@ impl DistributedCheck {
             )
             .bind(&self.cluster)
             .fetch_all::<ClusterReplicaRow>();
-        let replicas = self.startup.request(topology).await.map_err(|reason| {
-            DistributedCheckError::Fetch {
+        let replicas = self.startup.request(topology).await.map_err(|failed| {
+            failed.map(|reason| DistributedCheckError::Fetch {
                 what: "cluster topology",
                 url: self.endpoint.display_url().to_string(),
                 reason,
-            }
+            })
         })?;
         if replicas.is_empty() {
             return Err(self.mismatch(format!(
@@ -225,10 +229,12 @@ impl DistributedCheck {
             .startup
             .request(query.fetch_all::<TableEngineRow>())
             .await
-            .map_err(|reason| DistributedCheckError::Fetch {
-                what: "table engine",
-                url: self.endpoint.display_url().to_string(),
-                reason,
+            .map_err(|failed| {
+                failed.map(|reason| DistributedCheckError::Fetch {
+                    what: "table engine",
+                    url: self.endpoint.display_url().to_string(),
+                    reason,
+                })
             })?;
         let Some(row) = engines.first() else {
             return Err(self.mismatch(format!(
@@ -562,7 +568,8 @@ mod tests {
             weights: Arc::from([1]),
             replica_hosts: vec![vec!["127.0.0.1".into()]],
         };
-        let err = check.verify().await.unwrap_err();
+        let Classed { class, error: err } = check.verify().await.unwrap_err();
+        assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err:?}");
         assert!(
             matches!(err, DistributedCheckError::Fetch { .. }),
             "{err:?}"

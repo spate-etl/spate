@@ -104,11 +104,15 @@ async fn a_replica_that_pins_deduplication_off_fails_the_build() {
     )
     .await
     .expect_err("a replica that refuses deduplicate_insert");
+    assert_eq!(err.kind(), ConnectErrorKind::Refused, "{err}");
     assert!(
-        matches!(err, spate_clickhouse::SchemaError::Settings { .. }),
+        matches!(
+            find_source(&err),
+            Some(spate_clickhouse::SchemaError::Settings { .. })
+        ),
         "{err:?}"
     );
-    let msg = err.to_string();
+    let msg = err.reason();
     let prefix = format!(
         "sink.clickhouse: replica {} failed the settings check: ",
         srv.url
@@ -162,8 +166,12 @@ async fn a_refused_setting_fails_the_build() {
         )
         .await
         .expect_err(&format!("{setting} must not build"));
+        assert_eq!(err.kind(), ConnectErrorKind::Refused, "{setting}: {err}");
         assert!(
-            matches!(err, spate_clickhouse::SchemaError::Settings { .. }),
+            matches!(
+                find_source(&err),
+                Some(spate_clickhouse::SchemaError::Settings { .. })
+            ),
             "{err:?}"
         );
         assert!(err.to_string().contains(code), "{setting}: {err}");

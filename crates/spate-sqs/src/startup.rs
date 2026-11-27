@@ -339,7 +339,7 @@ mod tests {
                     .build();
                 let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
                 let e = SdkError::service_error(GetQueueAttributesError::generic(meta), raw);
-                Err(crate::error::classify("GetQueueAttributes", &e, None))
+                Err(crate::error::call_error("GetQueueAttributes", &e, None))
             } else {
                 let policy =
                     format!(r#"{{"deadLetterTargetArn":"{DEAD_ARN}","maxReceiveCount":5}}"#);
@@ -418,7 +418,7 @@ mod tests {
             .build();
         let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
         let e = SdkError::service_error(GetQueueAttributesError::generic(meta), raw);
-        crate::error::classify("GetQueueAttributes", &e, None)
+        crate::error::call_error("GetQueueAttributes", &e, None)
     }
 
     /// Attributes per queue URL, or the error reading that queue fails with.

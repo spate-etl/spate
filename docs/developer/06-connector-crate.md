@@ -143,8 +143,9 @@ Until one does, a connector keeps the client error's text in the reason.
 ### Name an error classifier for what it returns
 
 Name a function that decides the class of a client's error for what it returns.
-Name it `classify_<subject>` when it returns the class, such as an `ErrorClass` or a crate's own kind enum, and `<subject>_error` when it returns the error it builds.
-The subject is the operation or the client the error came from.
+Start its name with `classify_` when it returns the class, such as an `ErrorClass` or a crate's own kind enum.
+End its name with `_error`, without the `classify_` prefix, when it returns the error it builds.
+The rest of the name says what failed, such as the client's call or one operation.
 
 Keep the classifier for the client's errors in the crate's `error.rs`.
 A classifier that adds one operation's context, such as whether an insert body is compressed, stays beside that operation.
@@ -153,7 +154,12 @@ A classifier that adds one operation's context, such as whether an insert body i
 
 **Follow:** `classify_store_error` and `store_error` in [`crates/spate-s3/src/error.rs`](repo:crates/spate-s3/src/error.rs).
 
-**Departs:** spate-sqs's `classify`, the spate-avro registry's `failure`, spate-kafka's sink and feed classifiers with its producer classifier outside `error.rs`, and spate-clickhouse's `classify`, `class_of` and `classify_insert`, kept outside `error.rs` ([#1606](https://github.com/spate-etl/spate/issues/1606)).
+**Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
+
+- spate-sqs: `classify`.
+- spate-avro: the registry's `failure`.
+- spate-kafka: the sink's `classify`, the feed's `classify`, `class`, `error` and `classified`, and `report_class`, kept outside `error.rs`.
+- spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
 
 **Checked by:** review.
 

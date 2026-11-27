@@ -434,12 +434,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self.config.reject_bad_settling_window()?;
         self.config.reject_checkpoint_above_a_day()?;
         if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
-            let named = section.backend().type_tag();
-            if feed.backend() != named {
+            let named = section.backend().component_type();
+            if feed.component_type() != named {
                 return Err(ConfigError::Validation(format!(
                     "the feed passed to `{}` is `{}`, but `feed:` names `{named}`",
                     passed_to(*origin),
-                    feed.backend()
+                    feed.component_type()
                 ))
                 .into());
             }
@@ -449,7 +449,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             (Some(section), given) => {
                 let (feed, origin) = match given {
                     Some(given) => given,
-                    None if section.backend().type_tag() == memory::BACKEND => {
+                    None if section.backend().component_type() == memory::COMPONENT_TYPE => {
                         let feed = MemoryFeed::from_section(section)?;
                         (Arc::new(feed) as Arc<dyn Feed>, FeedOrigin::Section)
                     }
@@ -457,7 +457,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         return Err(ConfigError::Validation(format!(
                             "the `{}` feed backend is built in code: build it from the `feed:` \
                              section and pass it to `Pipeline::feed`",
-                            section.backend().type_tag()
+                            section.backend().component_type()
                         ))
                         .into());
                     }
@@ -471,7 +471,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         ConfigError::Validation(format!(
                             "checkpoint.drain_timeout: {e}: the `{}` feed stops reading {} \
                              before the drain deadline to hand its units back",
-                            feed.backend(),
+                            feed.component_type(),
                             format_duration(STOP_RESERVE)
                         ))
                     })?;
@@ -542,12 +542,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 let metrics = FeedMetrics::try_new(&ComponentLabels::new(
                     pipeline_name.clone(),
                     "feed",
-                    feed.backend().to_owned(),
+                    feed.component_type().to_owned(),
                 ))?;
                 let feed = Arc::new(MeteredFeed::new(feed, metrics, Arc::clone(&self.clock)));
                 feed.attach_metrics(
                     FeedMetricsCtx::new(Meter::for_component(
-                        feed.backend(),
+                        feed.component_type(),
                         MetricRole::Feed,
                         pipeline_name.clone(),
                         "feed",
@@ -956,7 +956,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         drop((signal_task, probe_task, admin_task, upkeep_task));
         let now = self.stop_clock.now();
         let give_up_at = deadline_after(close_by.map_or(now, |by| by.max(now)), CLOSE_GRACE);
-        let feed_backend = kept_feed.as_ref().map(|feed| feed.backend().to_owned());
+        let feed_backend = kept_feed
+            .as_ref()
+            .map(|feed| feed.component_type().to_owned());
         // The controller drops the source on its way out. The source's `Drop`
         // and the feed's may still need the io runtime (the S3 source aborts
         // its lister there), so both drop before it stops.
@@ -1073,12 +1075,12 @@ fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
     match io.block_on(async { tokio::time::timeout(within, confirmation).await }) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(
-            feed = feed.backend(),
+            feed = feed.component_type(),
             error = %e,
             "the feed did not close cleanly; the units it still held return through redelivery"
         ),
         Err(_) => tracing::warn!(
-            feed = feed.backend(),
+            feed = feed.component_type(),
             ?within,
             "the feed did not close before the drain deadline; the units it still held return \
              through redelivery"

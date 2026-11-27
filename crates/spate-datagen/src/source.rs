@@ -120,7 +120,7 @@ impl Source for DatagenSource {
     type Lane = DatagenLane;
 
     fn component_type(&self) -> &str {
-        crate::config::TAG
+        crate::config::COMPONENT_TYPE
     }
 
     fn framing_contract(&self) -> FramingContract {

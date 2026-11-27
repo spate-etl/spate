@@ -46,7 +46,9 @@ pub struct SinkParts<W: ShardWriter> {
     /// by field, and one set with
     /// [`SinkOptions`](crate::pipeline::SinkOptions) replaces it.
     pub pool: SinkPoolConfig,
-    /// The `component_type` metric label (e.g. `"clickhouse"`).
+    /// The key this sink registers under (e.g. `"clickhouse"`): the
+    /// `component_type` label on its series and the namespace of its
+    /// custom-metrics `Meter`.
     pub component_type: String,
     /// Per-replica display labels for shard metrics, same shape as
     /// `shard_endpoints`. Defaults to `"{component_type}-{shard}-{replica}"`.
@@ -63,25 +65,23 @@ pub struct SinkParts<W: ShardWriter> {
 }
 
 impl<W: ShardWriter> SinkParts<W> {
-    /// Minimal parts: `component_type` defaults to `"custom"`, replica
-    /// labels to `"{component_type}-{shard}-{replica}"`, no probe.
-    pub fn new(writer: W, shard_endpoints: Vec<Vec<W::Endpoint>>, pool: SinkPoolConfig) -> Self {
+    /// Minimal parts: replica labels default to
+    /// `"{component_type}-{shard}-{replica}"`, no probe.
+    pub fn new(
+        component_type: impl Into<String>,
+        writer: W,
+        shard_endpoints: Vec<Vec<W::Endpoint>>,
+        pool: SinkPoolConfig,
+    ) -> Self {
         SinkParts {
             writer,
             shard_endpoints,
             pool,
-            component_type: "custom".to_string(),
+            component_type: component_type.into(),
             replica_labels: Vec::new(),
             probe: None,
             frame_codec: None,
         }
-    }
-
-    /// Set the `component_type` metric label.
-    #[must_use]
-    pub fn with_component_type(mut self, component_type: impl Into<String>) -> Self {
-        self.component_type = component_type.into();
-        self
     }
 
     /// Set per-replica display labels (same `[shard][replica]` shape as
@@ -171,11 +171,11 @@ mod tests {
     #[test]
     fn default_replica_labels_follow_topology_shape() {
         let parts = SinkParts::new(
+            "stdout",
             NullWriter,
             vec![vec![(), ()], vec![()]],
             SinkPoolConfig::default(),
-        )
-        .with_component_type("stdout");
+        );
         assert_eq!(
             parts.effective_replica_labels(),
             vec![
@@ -187,8 +187,13 @@ mod tests {
 
     #[test]
     fn explicit_replica_labels_win() {
-        let parts = SinkParts::new(NullWriter, vec![vec![()]], SinkPoolConfig::default())
-            .with_replica_labels(vec![vec!["primary".to_string()]]);
+        let parts = SinkParts::new(
+            "null",
+            NullWriter,
+            vec![vec![()]],
+            SinkPoolConfig::default(),
+        )
+        .with_replica_labels(vec![vec!["primary".to_string()]]);
         assert_eq!(
             parts.effective_replica_labels(),
             vec![vec!["primary".to_string()]]
@@ -197,8 +202,12 @@ mod tests {
 
     #[test]
     fn sink_parts_round_trips_through_the_trait() {
-        let parts = SinkParts::new(NullWriter, vec![vec![()]], SinkPoolConfig::default())
-            .with_component_type("capture");
+        let parts = SinkParts::new(
+            "capture",
+            NullWriter,
+            vec![vec![()]],
+            SinkPoolConfig::default(),
+        );
         let parts = SinkBundle::into_parts(parts);
         assert_eq!(parts.component_type, "capture");
         assert_eq!(parts.shard_endpoints.len(), 1);

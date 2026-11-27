@@ -107,8 +107,8 @@ pub(crate) struct ControllerContext<S: Source> {
     /// only the client can measure. The controller records everything else.
     pub source_metrics: Arc<SourceMetrics>,
     /// The source's custom-metrics scope (`spate_<component_type>_source_*`),
-    /// handed to it at `open`. `None` unless the source declared a
-    /// non-reserved `component_type`.
+    /// handed to it at `open`. `None` when the source's `component_type`
+    /// cannot scope a family.
     pub source_meter: Option<Meter>,
     /// `metrics.per_partition_detail`, forwarded to the source so its own
     /// per-partition families honor the same cardinality gate.

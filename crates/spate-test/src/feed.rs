@@ -138,7 +138,7 @@ impl std::fmt::Debug for State {
 /// call with a receipt the feed no longer holds returns
 /// [`Gone`](FeedErrorKind::Gone) and is recorded by
 /// [`FeedScript::gone`]. A scripted refusal of that call is served before
-/// this check. Its [`backend`](Feed::backend) key is `scripted`,
+/// this check. Its [`component_type`](Feed::component_type) is `scripted`,
 /// so a pipeline it is passed to names `scripted` in its `feed:` section.
 #[derive(Debug)]
 pub struct ScriptedFeed {
@@ -570,9 +570,12 @@ impl ScriptedFeed {
     }
 }
 
+/// The key [`ScriptedFeed`] reports, and the one a `feed:` section names.
+const COMPONENT_TYPE: &str = "scripted";
+
 impl Feed for ScriptedFeed {
-    fn backend(&self) -> &str {
-        "scripted"
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
     }
 
     fn set_waker(&self, waker: FeedWaker) {

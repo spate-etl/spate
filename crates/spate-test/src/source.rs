@@ -299,12 +299,15 @@ pub struct MemorySource {
     issuer: Option<AckIssuer>,
 }
 
+/// The key [`MemorySource`] reports. It scopes the source's own metric
+/// families under `spate_memory_source_*`.
+const COMPONENT_TYPE: &str = "memory";
+
 impl Source for MemorySource {
     type Lane = MemoryLane;
 
-    /// Scopes the source's own metric families under `spate_memory_source_*`.
     fn component_type(&self) -> &str {
-        "memory"
+        COMPONENT_TYPE
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {

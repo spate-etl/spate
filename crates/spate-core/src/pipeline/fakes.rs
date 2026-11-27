@@ -190,6 +190,10 @@ impl FakeSource {
 impl Source for FakeSource {
     type Lane = FakeLane;
 
+    fn component_type(&self) -> &str {
+        "source"
+    }
+
     // `PerRecord` unless a test sets another, so tests can tell the source's
     // own contract from the trait default.
     fn framing_contract(&self) -> crate::framing::FramingContract {
@@ -590,7 +594,7 @@ impl HandingBack {
 }
 
 impl crate::feed::Feed for HandingBack {
-    fn backend(&self) -> &str {
+    fn component_type(&self) -> &str {
         self.backend
     }
 

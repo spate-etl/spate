@@ -39,6 +39,9 @@
 //! # #[derive(Clone, Default)]
 //! # struct LogDeser;
 //! # impl Deserializer<LogF> for LogDeser {
+//! #     fn component_type(&self) -> &str {
+//! #         "log"
+//! #     }
 //! #     fn deserialize<'buf>(
 //! #         &mut self,
 //! #         raw: &RawPayload<'buf>,

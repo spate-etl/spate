@@ -5,9 +5,10 @@
 //! It shares the worker feed's section parse, startup checks, producer
 //! settings and publish path, and holds no consumer, gate or follower.
 
-use super::config::{BACKEND, KafkaFeedConfig};
+use super::config::KafkaFeedConfig;
 use super::write::Producer;
 use super::{Core, check_topics, gone, producer_parts, publish_unit, startup};
+use crate::client::COMPONENT_TYPE;
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::error::ConnectError;
@@ -127,7 +128,7 @@ impl KafkaFeedPublisher {
         let config = KafkaFeedConfig::connecting(section)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
-            &spate_core::config::SectionPath::feed(BACKEND),
+            &spate_core::config::SectionPath::feed(COMPONENT_TYPE),
         );
         // A publisher's only timed read is the connect bound, which the
         // feed's tests drive on a test clock.
@@ -168,8 +169,8 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
 }
 
 impl Feed for KafkaFeedPublisher {
-    fn backend(&self) -> &str {
-        BACKEND
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
     }
 
     fn set_waker(&self, _waker: FeedWaker) {}

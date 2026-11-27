@@ -180,6 +180,10 @@ struct CounterSource {
 impl Source for CounterSource {
     type Lane = CounterLane;
 
+    fn component_type(&self) -> &str {
+        "counter"
+    }
+
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         self.issuer = Some(ctx.issuer);
         Ok(())
@@ -396,13 +400,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let written = Arc::new(Mutex::new(BTreeMap::new()));
     let sink = SinkParts::new(
+        "stdout",
         StdoutWriter {
             written: Arc::clone(&written),
         },
         (0..SHARDS).map(|s| vec![format!("shard-{s}")]).collect(),
         pool_cfg,
-    )
-    .with_component_type("stdout");
+    );
     // ANCHOR_END: bundle
 
     let runtime = pipeline

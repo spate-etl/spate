@@ -65,7 +65,14 @@ impl TestDeserializer {
     }
 }
 
+/// The key [`TestDeserializer`] reports.
+const COMPONENT_TYPE: &str = "test";
+
 impl Deserializer<Owned<Vec<u8>>> for TestDeserializer {
+    fn component_type(&self) -> &str {
+        COMPONENT_TYPE
+    }
+
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,
@@ -276,6 +283,10 @@ mod tests {
     }
 
     impl Deserializer<Owned<Vec<u8>>> for Waiting {
+        fn component_type(&self) -> &str {
+            "waiting"
+        }
+
         fn deserialize<'buf>(
             &mut self,
             raw: &RawPayload<'buf>,

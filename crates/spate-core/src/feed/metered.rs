@@ -81,8 +81,8 @@ impl MeteredFeed {
 }
 
 impl Feed for MeteredFeed {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
 
     fn set_waker(&self, waker: FeedWaker) {
@@ -192,7 +192,7 @@ impl DeadLetterSampler {
                         .saturating_add(depth.in_flight),
                 ),
                 Some(Err(e)) => tracing::warn!(
-                    feed = feed.backend(),
+                    feed = feed.component_type(),
                     error = %e,
                     "could not read the depth of the feed's dead-letter destination; \
                      `spate_feed_dead_letter_units` keeps its last reading"
@@ -273,7 +273,7 @@ mod tests {
     }
 
     impl Feed for Fake {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             "fake"
         }
 
@@ -427,7 +427,7 @@ mod tests {
         let (waker, _park) = crate::feed::wake_channel();
         rig.fake.deliver([7]);
 
-        assert_eq!(rig.feed.backend(), "fake");
+        assert_eq!(rig.feed.component_type(), "fake");
         rig.feed.attach_metrics(
             FeedMetricsCtx::new(Some(Meter::new("p", "feed", "fake"))).with_partition_detail(true),
         );

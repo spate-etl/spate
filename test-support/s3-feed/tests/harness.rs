@@ -42,7 +42,7 @@ fn acknowledged(script: &FeedScript, n: usize) {
 fn the_recording_passes_each_call_on_and_records_it() {
     let (feed, script) = scripted_feed();
     let recording = Recording::new(Arc::new(feed));
-    assert_eq!(recording.backend(), "scripted");
+    assert_eq!(recording.component_type(), "scripted");
     let first = script.deliver(Unit::new("a", b"a".to_vec()));
     let before = Instant::now();
     assert_eq!(recording.receive(8).unwrap().len(), 1);
@@ -286,7 +286,7 @@ fn the_pipeline_file_carries_each_section() {
     );
     assert!(config.feed.is_some());
     let feed: PipelineConfigFeed = serde_yaml::from_str(SCRIPTED).unwrap();
-    assert_eq!(feed.feed.backend().type_tag(), "scripted");
+    assert_eq!(feed.feed.backend().component_type(), "scripted");
 }
 
 // ------------------------------------------------------------ stalled --

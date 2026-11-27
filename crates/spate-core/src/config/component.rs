@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::fmt;
 
-/// An opaque component section: `{ <type_tag>: { ...connector config... } }`.
+/// An opaque component section: `{ <component_type>: { ...connector config... } }`.
 ///
 /// The framework records which component type the section selects (`kafka`,
 /// `clickhouse`, `memory`, ...) and hands the body to that component's
@@ -21,7 +21,7 @@ use std::fmt;
 /// check.
 #[derive(Clone, PartialEq)]
 pub struct ComponentConfig {
-    type_tag: String,
+    component_type: String,
     raw: serde_yaml::Value,
     /// Where this section sits in the pipeline config (`source`, `sink`,
     /// `sinks.<name>`, `deserializer`, `feed`). Set after parsing, used to
@@ -162,12 +162,12 @@ impl SectionPath {
 impl fmt::Debug for ComponentConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ComponentConfig {
-            type_tag,
+            component_type,
             raw,
             section,
         } = self;
         f.debug_struct("ComponentConfig")
-            .field("type_tag", type_tag)
+            .field("component_type", component_type)
             .field("raw", &redact::yaml(raw))
             .field("section", section)
             .finish()
@@ -177,8 +177,8 @@ impl fmt::Debug for ComponentConfig {
 impl ComponentConfig {
     /// Which component implementation this section selects.
     #[must_use]
-    pub fn type_tag(&self) -> &str {
-        &self.type_tag
+    pub fn component_type(&self) -> &str {
+        &self.component_type
     }
 
     /// Deserialize the opaque body into the component's typed config.
@@ -200,12 +200,12 @@ impl ComponentConfig {
     /// This section's path from the config root, such as `source.kafka` or
     /// `sinks.eu.clickhouse`. A section built with [`new`](Self::new) and
     /// never placed in a [`PipelineConfig`](super::PipelineConfig) has no
-    /// position, and its path is the type tag alone.
+    /// position, and its path is the component type alone.
     #[must_use]
     pub fn path(&self) -> SectionPath {
         match &self.section {
-            Some(section) => SectionPath(format!("{section}.{}", self.type_tag)),
-            None => SectionPath(self.type_tag.clone()),
+            Some(section) => SectionPath(format!("{section}.{}", self.component_type)),
+            None => SectionPath(self.component_type.clone()),
         }
     }
 
@@ -219,9 +219,9 @@ impl ComponentConfig {
     /// `raw` is the opaque connector body as a [`YamlValue`](super::YamlValue)
     /// (a `spate-core` re-export of `yaml_serde`'s `Value`, an INV-6
     /// exception), passed through untouched as on the YAML path.
-    pub fn new(type_tag: impl Into<String>, raw: super::YamlValue) -> Self {
+    pub fn new(component_type: impl Into<String>, raw: super::YamlValue) -> Self {
         ComponentConfig {
-            type_tag: type_tag.into(),
+            component_type: component_type.into(),
             raw,
             section: None,
         }
@@ -266,11 +266,11 @@ impl<'de> Deserialize<'de> for ComponentConfig {
             )));
         }
         let (key, value) = mapping.into_iter().next().expect("len checked above");
-        let type_tag = key.as_str().ok_or_else(|| {
+        let component_type = key.as_str().ok_or_else(|| {
             D::Error::custom("component type tag must be a string, e.g. `kafka:`")
         })?;
         Ok(ComponentConfig {
-            type_tag: type_tag.to_owned(),
+            component_type: component_type.to_owned(),
             raw: value,
             section: None,
         })
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn parses_single_key_section_and_deserializes_body() {
         let cc = parse("kafka:\n  brokers: k1:9092\n  topic: orders\n").unwrap();
-        assert_eq!(cc.type_tag(), "kafka");
+        assert_eq!(cc.component_type(), "kafka");
         let typed: FakeKafkaConfig = cc.deserialize_into().unwrap();
         assert_eq!(typed.brokers, "k1:9092");
         assert_eq!(typed.topic, "orders");
@@ -438,7 +438,7 @@ mod tests {
     }
 
     /// A section placed in a config starts at its position; one built in
-    /// code and never placed is its type tag alone.
+    /// code and never placed is its component type alone.
     #[test]
     fn a_component_path_starts_at_its_section() {
         let mut cc = parse("kafka:\n  brokers: k1:9092\n").unwrap();
@@ -558,7 +558,7 @@ mod tests {
         #[derive(Debug, Deserialize, Default)]
         struct Empty {}
         let cc = parse("memory:\n").unwrap();
-        assert_eq!(cc.type_tag(), "memory");
+        assert_eq!(cc.component_type(), "memory");
         // `memory:` with no body is a null value; struct with no required
         // fields must accept it.
         let _typed: Option<Empty> = cc.deserialize_into().unwrap();

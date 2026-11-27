@@ -38,12 +38,12 @@ use spate_core::tls::TlsSection;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The deserializer's component type, and the tag its section sits under.
-pub(crate) const TAG: &str = "avro";
+/// The deserializer's component type, and the key its section sits under.
+pub(crate) const COMPONENT_TYPE: &str = "avro";
 
 /// The path every refusal of this section starts at, `deserializer.avro`.
 pub(crate) fn section_path() -> SectionPath {
-    SectionPath::deserializer(TAG)
+    SectionPath::deserializer(COMPONENT_TYPE)
 }
 
 /// Payload framing mode.

@@ -139,13 +139,13 @@ impl Rig {
         let mut pool = SinkPoolConfig::default();
         pool.batch.linger = self.linger;
         let sink = SinkParts::new(
+            "count",
             CountWriter {
                 rows: Arc::clone(&rows),
             },
             vec![vec![()]],
             pool,
-        )
-        .with_component_type("count");
+        );
         // Built here without the `with_metrics` that
         // `spate_test::passthrough_runtime` adds, so the timed chain makes no
         // metric calls.
@@ -324,8 +324,8 @@ impl BenchFeed {
 }
 
 impl Feed for BenchFeed {
-    fn backend(&self) -> &str {
-        self.inner.backend()
+    fn component_type(&self) -> &str {
+        self.inner.component_type()
     }
     fn set_waker(&self, waker: FeedWaker) {
         *self.waker.lock().expect("never poisoned") = Some(waker.clone());

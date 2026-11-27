@@ -2070,7 +2070,7 @@ impl Source for KafkaSource {
     type Lane = KafkaLane;
 
     fn component_type(&self) -> &str {
-        "kafka"
+        crate::client::COMPONENT_TYPE
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
@@ -2079,7 +2079,7 @@ impl Source for KafkaSource {
         }
         crate::security::warn_sasl_plaintext(
             &self.config.rdkafka,
-            &SectionPath::source(crate::client::TAG),
+            &SectionPath::source(crate::client::COMPONENT_TYPE),
         );
         self.metrics = ctx.stage_metrics.clone();
         if self.config.statistics_interval.is_zero() {
@@ -2099,12 +2099,12 @@ impl Source for KafkaSource {
         members
             .try_reserve_exact(self.config.consumers)
             .map_err(|_| {
-                let at = SectionPath::source(crate::client::TAG);
+                let at = SectionPath::source(crate::client::COMPONENT_TYPE);
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
         let ca_pem = crate::security::ca_bundle(&self.config.tls).map_err(|why| {
-            let at = SectionPath::source(crate::client::TAG);
+            let at = SectionPath::source(crate::client::COMPONENT_TYPE);
             SourceError::fatal(at.invalid("tls.root_ca", why).to_string())
         })?;
         let base = self

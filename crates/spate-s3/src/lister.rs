@@ -709,7 +709,7 @@ mod tests {
     }
 
     impl Feed for HoldingFeed {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             "holding"
         }
         fn set_waker(&self, _waker: FeedWaker) {}
@@ -845,7 +845,7 @@ mod tests {
     }
 
     impl Feed for KeyedFeed {
-        fn backend(&self) -> &str {
+        fn component_type(&self) -> &str {
             "keyed"
         }
         fn set_waker(&self, _waker: FeedWaker) {}

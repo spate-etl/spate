@@ -131,8 +131,8 @@ pub(crate) fn lines_ndjson(n: u64) -> Vec<u8> {
 ///
 /// The hashing and allocation are those of the `HashMap<String, String>` a
 /// user's record declares. A random key makes the counted case vary by up to
-/// 0.8% from run to run under the `simd` backend, almost all of it in glibc
-/// malloc. A fixed key keeps it repeating to the instruction.
+/// 0.8% from run to run under the `simd-json` backend, almost all of it in
+/// glibc malloc. A fixed key keeps it repeating to the instruction.
 #[expect(
     clippy::disallowed_types,
     reason = "the bench measures decoding the std map a user's record declares"

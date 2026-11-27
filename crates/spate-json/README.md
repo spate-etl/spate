@@ -4,7 +4,7 @@ The JSON format (`spate-json`, feature `json` on the `spate` facade) decodes
 JSON payloads from a source into records, either your own serde types or
 dynamically-typed `serde_json::Value`s. One payload yields zero or more records,
 depending on its framing. Parsing uses `serde_json` by default, or `simd-json`
-behind an opt-in feature.
+for a deserializer whose builder chooses it.
 
 ## Enable
 
@@ -12,13 +12,13 @@ Turn on feature `json` on the [`spate`](https://crates.io/crates/spate) facade.
 The facade README has the Cargo snippet.
 
 Four more facade features each turn on `json`, and all are off by default.
-`json-simd` swaps the parser to `simd-json`. `json-float-roundtrip`,
+`json-simd` adds `JsonDeserializerBuilder::with_simd_json`, which makes the
+deserializers that builder builds parse with `simd-json`. `json-float-roundtrip`,
 `json-arbitrary-precision` and `json-raw-value` turn on the `serde_json`
 features `float_roundtrip`, `arbitrary_precision` and `raw_value`.
 
-`BACKEND_ID` names the compiled parser, `serde_json` or `simd-json`. Both
-parsers decode from the payload already in memory, and the crate never calls
-`from_reader`.
+Both parsers decode from the payload already in memory, and the crate never
+calls `from_reader`.
 
 ## Configuration
 
@@ -136,8 +136,8 @@ cover both policies.
   feature across the dependency graph, and it interacts with
   `#[serde(flatten)]`, `#[serde(untagged)]` and `RawValue`. See
   [Fidelity & features](https://spate.kainth.dev/docs/user-guide/connectors/formats/json#fidelity--features).
-- **`json-simd` is a different parser.** The three `serde_json` features do not
-  apply under it, and the two parsers differ on some numbers and on nesting
+- **`with_simd_json` is a different parser.** The three `serde_json` features
+  do not apply to it, and the two parsers differ on some numbers and on nesting
   limits. The duplicate-key check always runs on `serde_json`. See
   [Backends](https://spate.kainth.dev/docs/user-guide/connectors/formats/json#backends).
 

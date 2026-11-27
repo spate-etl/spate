@@ -2,9 +2,10 @@
 //!
 //! Every JSON document is decoded from an in-memory `&[u8]` slice, never
 //! `from_reader`, which serde_json's own docs note is slower than reading to a
-//! slice first and cannot borrow. The default backend is `serde_json`; the
-//! opt-in `simd` Cargo feature swaps [`decode_one`] to `simd-json`, leaving the
-//! framing and emit logic in `deser.rs` untouched.
+//! slice first and cannot borrow. Each deserializer decodes with the
+//! [`Backend`] its builder chose: `serde_json` unless it was built with
+//! `with_simd_json`, which the `simd-json` Cargo feature provides. The framing
+//! and emit logic in `deser.rs` is the same for both.
 //!
 //! `simd-json` parses a *mutable* buffer in place (it unescapes strings into the
 //! buffer), so the borrowed payload is copied into a reused thread-local scratch
@@ -31,15 +32,28 @@ use spate_core::hash::QualitySet;
 use std::borrow::Cow;
 use std::fmt;
 
-/// Identifier of the compiled decode backend, surfaced for benchmark and
-/// telemetry labels so an arm is tagged from the compiled code rather than a
-/// hand-passed label. The default backend is `serde_json`; the
-/// opt-in `simd` Cargo feature overrides it.
-#[cfg(feature = "simd")]
-pub const BACKEND_ID: &str = "simd-json";
-/// Identifier of the compiled decode backend (see the `simd` variant).
-#[cfg(not(feature = "simd"))]
-pub const BACKEND_ID: &str = "serde_json";
+/// The parser a deserializer decodes with, chosen on its builder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Backend {
+    /// `serde_json`, the default.
+    #[default]
+    SerdeJson,
+    /// `simd-json`, chosen with `with_simd_json`.
+    #[cfg(feature = "simd-json")]
+    SimdJson,
+}
+
+impl Backend {
+    /// Decode one complete JSON document from `bytes` into `T`.
+    #[inline]
+    pub(crate) fn decode<T: DeserializeOwned>(self, bytes: &[u8]) -> Result<T, DecodeError> {
+        match self {
+            Backend::SerdeJson => decode_serde_json(bytes),
+            #[cfg(feature = "simd-json")]
+            Backend::SimdJson => decode_simd_json(bytes),
+        }
+    }
+}
 
 /// A backend-agnostic decode failure at the seam.
 ///
@@ -47,7 +61,7 @@ pub const BACKEND_ID: &str = "serde_json";
 /// (`is_data`, to label a metric `duplicate_key` vs `malformed`) and report it
 /// (`Display`), but must not name a concrete backend's error type, so
 /// swapping the decode backend does not ripple into `deser.rs`. Each backend maps its
-/// native error into this on the way out of [`decode_one`] /
+/// native error into this on the way out of [`Backend::decode`] /
 /// [`check_no_duplicate_keys`].
 #[derive(Debug, thiserror::Error)]
 #[error("{msg}")]
@@ -83,9 +97,8 @@ impl DecodeError {
 /// Decode one complete JSON document from `bytes` into `T` (serde_json backend).
 ///
 /// serde_json borrows the immutable payload slice directly, with no copy.
-#[cfg(not(feature = "simd"))]
 #[inline]
-pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
+fn decode_serde_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     serde_json::from_slice(bytes).map_err(|e| DecodeError::from_serde_json(&e, MISMATCH))
 }
 
@@ -95,7 +108,7 @@ pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeE
 // default; reusing both across calls charges the backend only the unavoidable
 // memcpy, matching a production integration. `bytes` (the borrowed source
 // payload) is never mutated, so at-least-once replay is safe.
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 thread_local! {
     static SIMD: std::cell::RefCell<(Vec<u8>, simd_json::Buffers)> =
         std::cell::RefCell::new((Vec::new(), simd_json::Buffers::new(0)));
@@ -108,9 +121,9 @@ thread_local! {
 /// no trailing SIMD padding is appended here. `T: DeserializeOwned`
 /// borrows nothing out of the scratch, so it is free to be overwritten next
 /// call.
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 #[inline]
-pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
+fn decode_simd_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     SIMD.with(|cell| {
         let (buf, buffers) = &mut *cell.borrow_mut();
         buf.clear();
@@ -127,7 +140,7 @@ pub(crate) fn decode_one<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeE
 /// The text of a `simd-json` error: its kind and byte index.
 ///
 /// `simd-json`'s own `Display` also prints the input character at the index.
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_text(e: &simd_json::Error) -> String {
     use simd_json::ErrorType as T;
     match e.error() {
@@ -312,12 +325,19 @@ impl<'de> Visitor<'de> for DupVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, check_no_duplicate_keys, decode_one};
+    use super::{Backend, Key, check_no_duplicate_keys};
     use serde::Deserialize;
     use serde::de::{IgnoredAny, MapAccess, Visitor};
     use std::borrow::Cow;
     use std::collections::BTreeMap;
     use std::fmt;
+
+    /// Every backend this build compiles.
+    const BACKENDS: &[Backend] = &[
+        Backend::SerdeJson,
+        #[cfg(feature = "simd-json")]
+        Backend::SimdJson,
+    ];
 
     struct ObjectKeys<'de>(Vec<Cow<'de, str>>);
 
@@ -417,14 +437,13 @@ mod tests {
         small: Option<u8>,
     }
 
-    fn typed(doc: &[u8]) -> String {
-        decode_one::<Typed>(doc).unwrap_err().to_string()
+    fn typed(backend: Backend, doc: &[u8]) -> String {
+        backend.decode::<Typed>(doc).unwrap_err().to_string()
     }
 
     /// serde's message for a document that does not fit the record type
     /// quotes the value, variant or key it refused. The text carries none of
     /// them, nor a message the record type's own `Deserialize` wrote.
-    #[cfg(not(feature = "simd"))]
     #[test]
     fn a_data_error_carries_its_position_and_no_content() {
         const MISMATCH: &str = "the document does not match the record type";
@@ -435,9 +454,14 @@ mod tests {
             (br#"{"n":1,"small":4242}"#, 19),
         ];
         for (doc, column) in cases {
-            assert_eq!(typed(doc), format!("{MISMATCH} at line 1 column {column}"));
+            assert_eq!(
+                typed(Backend::SerdeJson, doc),
+                format!("{MISMATCH} at line 1 column {column}")
+            );
         }
-        let unknown_field = decode_one::<Strict>(br#"{"n":1,"hunter2":2}"#).unwrap_err();
+        let unknown_field = Backend::SerdeJson
+            .decode::<Strict>(br#"{"n":1,"hunter2":2}"#)
+            .unwrap_err();
         assert!(unknown_field.is_data, "{unknown_field}");
         assert_eq!(
             unknown_field.to_string(),
@@ -445,21 +469,22 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "simd"))]
     #[test]
     fn a_syntax_error_keeps_the_parser_text() {
-        let bare_word = decode_one::<Typed>(br#"{"n":hunter2}"#).unwrap_err();
+        let bare_word = Backend::SerdeJson
+            .decode::<Typed>(br#"{"n":hunter2}"#)
+            .unwrap_err();
         assert!(!bare_word.is_data, "{bare_word}");
         assert_eq!(bare_word.to_string(), "expected value at line 1 column 6");
         assert_eq!(
-            typed(br#"{"n":"hunter2"#),
+            typed(Backend::SerdeJson, br#"{"n":"hunter2"#),
             "EOF while parsing a string at line 1 column 13"
         );
     }
 
     /// `simd-json` gives no index for a document that does not fit the record
     /// type, so the text is the class.
-    #[cfg(feature = "simd")]
+    #[cfg(feature = "simd-json")]
     #[test]
     fn a_data_error_carries_no_content() {
         const MISMATCH: &str = "the document does not match the record type";
@@ -467,22 +492,30 @@ mod tests {
             &br#"{"n":1,"status":"hunter2"}"#[..],
             br#"{"n":1,"at":"hunter2"}"#,
         ] {
-            assert_eq!(typed(doc), MISMATCH);
+            assert_eq!(typed(Backend::SimdJson, doc), MISMATCH);
         }
-        let unknown_field = decode_one::<Strict>(br#"{"n":1,"hunter2":2}"#).unwrap_err();
+        let unknown_field = Backend::SimdJson
+            .decode::<Strict>(br#"{"n":1,"hunter2":2}"#)
+            .unwrap_err();
         assert_eq!(unknown_field.to_string(), MISMATCH);
         for doc in [&br#"{"n":"hunter2"}"#[..], br#"{"n":1,"small":4242}"#] {
-            assert_eq!(typed(doc), format!("{MISMATCH} (ExpectedUnsigned)"));
+            assert_eq!(
+                typed(Backend::SimdJson, doc),
+                format!("{MISMATCH} (ExpectedUnsigned)")
+            );
         }
     }
 
     /// `simd-json`'s own text ends with the input character at the index.
-    #[cfg(feature = "simd")]
+    #[cfg(feature = "simd-json")]
     #[test]
     fn a_syntax_error_names_its_kind_and_index_without_the_character() {
-        assert_eq!(typed(br#"{"n":hunter2}"#), "InternalError at character 5");
         assert_eq!(
-            typed(br#"{"n":"hun\qter2"}"#),
+            typed(Backend::SimdJson, br#"{"n":hunter2}"#),
+            "InternalError at character 5"
+        );
+        assert_eq!(
+            typed(Backend::SimdJson, br#"{"n":"hun\qter2"}"#),
             "InvalidEscape at character 3"
         );
     }
@@ -496,8 +529,10 @@ mod tests {
     /// decodes to another character.
     #[test]
     fn a_lone_surrogate_escape_is_malformed() {
-        let decoded = decode_one::<String>(br#""\ud800""#);
-        assert!(decoded.is_err(), "{decoded:?}");
+        for &backend in BACKENDS {
+            let decoded = backend.decode::<String>(br#""\ud800""#);
+            assert!(decoded.is_err(), "{backend:?}: {decoded:?}");
+        }
     }
 
     /// An array longer than the fixed-length type it decodes into is
@@ -511,23 +546,27 @@ mod tests {
             #[allow(dead_code)]
             a: u8,
         }
-        let tuple = decode_one::<(u8, u8)>(b"[1,2,3]");
-        assert!(tuple.is_err(), "{tuple:?}");
-        let array = decode_one::<[u8; 2]>(b"[1,2,3]");
-        assert!(array.is_err(), "{array:?}");
-        let pair = decode_one::<Pair>(b"[1,2,3]");
-        assert!(pair.is_err(), "{pair:?}");
-        let named = decode_one::<Named>(b"[1,2]");
-        assert!(named.is_err(), "{named:?}");
+        for &backend in BACKENDS {
+            let tuple = backend.decode::<(u8, u8)>(b"[1,2,3]");
+            assert!(tuple.is_err(), "{backend:?}: {tuple:?}");
+            let array = backend.decode::<[u8; 2]>(b"[1,2,3]");
+            assert!(array.is_err(), "{backend:?}: {array:?}");
+            let pair = backend.decode::<Pair>(b"[1,2,3]");
+            assert!(pair.is_err(), "{backend:?}: {pair:?}");
+            let named = backend.decode::<Named>(b"[1,2]");
+            assert!(named.is_err(), "{backend:?}: {named:?}");
+        }
     }
 
     /// A number whose exponent is past the `f64` range is malformed, and
     /// never decodes to another number.
     #[test]
     fn an_exponent_past_the_f64_range_is_malformed() {
-        for doc in [&b"1e4294967296"[..], b"1e4294967295"] {
-            let decoded = decode_one::<f64>(doc);
-            assert!(decoded.is_err(), "{decoded:?}");
+        for &backend in BACKENDS {
+            for doc in [&b"1e4294967296"[..], b"1e4294967295"] {
+                let decoded = backend.decode::<f64>(doc);
+                assert!(decoded.is_err(), "{backend:?}: {decoded:?}");
+            }
         }
     }
 
@@ -535,15 +574,19 @@ mod tests {
     /// and no leading zero.
     #[test]
     fn an_integer_key_follows_json_number_syntax() {
-        for doc in [&br#"{"+1":2}"#[..], br#"{"01":2}"#, br#"{"-01":2}"#] {
-            let decoded = decode_one::<BTreeMap<i32, u8>>(doc);
-            assert!(decoded.is_err(), "{decoded:?}");
+        for &backend in BACKENDS {
+            for doc in [&br#"{"+1":2}"#[..], br#"{"01":2}"#, br#"{"-01":2}"#] {
+                let decoded = backend.decode::<BTreeMap<i32, u8>>(doc);
+                assert!(decoded.is_err(), "{backend:?}: {decoded:?}");
+            }
         }
     }
 
     #[test]
     fn a_128_bit_integer_key_decodes() {
-        let decoded: BTreeMap<i128, u8> = decode_one(br#"{"7":1}"#).unwrap();
-        assert_eq!(decoded, BTreeMap::from([(7, 1)]));
+        for &backend in BACKENDS {
+            let decoded: BTreeMap<i128, u8> = backend.decode(br#"{"7":1}"#).unwrap();
+            assert_eq!(decoded, BTreeMap::from([(7, 1)]), "{backend:?}");
+        }
     }
 }

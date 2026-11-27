@@ -19,8 +19,9 @@ default = []
 float-roundtrip = ["serde_json/float_roundtrip"]
 arbitrary-precision = ["serde_json/arbitrary_precision"]
 raw-value = ["serde_json/raw_value"]
-# Opt-in SIMD decode backend behind the byte-slice to value seam (`backend.rs`).
-simd = ["dep:simd-json"]
+# `JsonDeserializerBuilder::with_simd_json`, a per-builder opt-in. Without the
+# call the deserializer keeps serde_json.
+simd-json = ["dep:simd-json"]
 
 [dependencies]
 spate-core = { workspace = true }

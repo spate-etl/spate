@@ -19,7 +19,7 @@ cargo xtask bench ab --ref main --replicates 20               # compare this tre
 cargo xtask bench ab --ref main --filter decode         # only cases whose id contains this
 cargo xtask bench ab --ref main --package spate-avro    # only that crate's targets
 cargo xtask bench ab --ref main --exclude spate-pipeline-bench  # every crate's targets but that one's
-cargo xtask bench arms --head-features spate-json/simd   # compare two feature arms
+cargo xtask bench arms --head-features spate-json/simd-json   # compare two feature arms
 cargo xtask bench compare <base-dir> <head-dir> --format markdown
 ```
 

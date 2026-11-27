@@ -208,21 +208,21 @@ pub(crate) fn install_recorder() {
 /// A rig whose decode backend, allocator and log limiter are already in the
 /// state a running pipeline's would be in.
 ///
-/// The warm pass carries the `simd` arm. That backend keeps its mutable
-/// scratch buffer and the parser's own reusable buffers in a thread-local,
-/// allocated lazily on first use. Because gungraun calls the benchmark
-/// function exactly once, they would otherwise be allocated *inside* the
-/// collected region and charged to the case as per-record cost. The heap
-/// counts say so directly:
-/// compiling this pass out takes `large_string` from 7 allocated blocks to 15
-/// and from 525 KB to 2.4 MB, and every other counted case gains between eight
-/// and twenty-one blocks of the same scratch. The counted tier's reference
-/// cases still carry that charge and are the control that makes it visible:
-/// `simd` allocates 19 blocks against `serde_json`'s 8 on `single_typed`, and
-/// reads between 12% and 22% above it depending on the architecture, where the
-/// warmed cases differ by a single block. The block counts are a property of
-/// the backend and hold everywhere; the percentages are not, and are quoted
-/// only to say the charge is large relative to a small case.
+/// The warm pass carries the `simd` arm, which decodes with `simd-json`. That
+/// backend keeps its mutable scratch buffer and the parser's own reusable
+/// buffers in a thread-local, allocated lazily on first use. Because gungraun
+/// calls the benchmark function exactly once, they would otherwise be allocated
+/// *inside* the collected region and charged to the case as per-record cost.
+/// The heap counts say so directly: compiling this pass out takes
+/// `large_string` from 7 allocated blocks to 15 and from 525 KB to 2.4 MB, and
+/// every other counted case gains between eight and twenty-one blocks of the
+/// same scratch. The counted tier's reference cases still carry that charge and
+/// are the control that makes it visible: `simd-json` allocates 19 blocks
+/// against `serde_json`'s 8 on `single_typed`, and reads between 12% and 22%
+/// above it depending on the architecture, where the warmed cases differ by a
+/// single block. The block counts are a property of the backend and hold
+/// everywhere; the percentages are not, and are quoted only to say the charge
+/// is large relative to a small case.
 ///
 /// Warming with the case's own payload rather than a token document is what
 /// makes it complete: both the scratch copy and the parser's buffers are sized
@@ -299,9 +299,36 @@ where
     rig
 }
 
-/// Settings for a case that varies all three knobs rather than only the
-/// framing.
-pub(crate) fn full_settings(
+/// The parser the cases decode with: `simd-json` in a build with the
+/// `simd-json` feature, which the counter matrix's `simd` arm turns on, and
+/// `serde_json` otherwise. The name the cases declare and the builder call sit
+/// under one `cfg`, so the two cannot disagree.
+#[cfg(feature = "simd-json")]
+pub(crate) mod arm {
+    use spate_json::JsonDeserializerBuilder;
+
+    pub(crate) const BACKEND: &str = "simd-json";
+
+    pub(crate) fn pick(builder: JsonDeserializerBuilder) -> JsonDeserializerBuilder {
+        builder.with_simd_json()
+    }
+}
+
+/// See the `simd-json` variant.
+#[cfg(not(feature = "simd-json"))]
+pub(crate) mod arm {
+    use spate_json::JsonDeserializerBuilder;
+
+    pub(crate) const BACKEND: &str = "serde_json";
+
+    pub(crate) fn pick(builder: JsonDeserializerBuilder) -> JsonDeserializerBuilder {
+        builder
+    }
+}
+
+/// A builder with the three knobs set and no parser chosen, so it decodes
+/// with `serde_json` in every build.
+fn base(
     framing: JsonFraming,
     on_error: JsonOnError,
     reject_duplicate_keys: bool,
@@ -314,21 +341,35 @@ pub(crate) fn full_settings(
         .framing(framing)
 }
 
+/// Settings for a case that varies all three knobs rather than only the
+/// framing, decoding with the arm's parser.
+pub(crate) fn full_settings(
+    framing: JsonFraming,
+    on_error: JsonOnError,
+    reject_duplicate_keys: bool,
+) -> JsonDeserializerBuilder {
+    arm::pick(base(framing, on_error, reject_duplicate_keys))
+}
+
+/// The default settings, decoding with the arm's parser.
+///
+/// Skip is the shipped default, so this is the path production takes. It is
+/// not the cheaper of the two by construction: on valid input Skip's error
+/// bookkeeping never runs, while ndjson under Fail buffers every decoded
+/// payload before emitting any of them. Measuring the default is the point; a
+/// Fail case would be a second shape, not a stricter version of this one.
+///
+/// The duplicate-key guard is off: the structural check parses each document
+/// a second time, which would measure the guard rather than the decode.
 pub(crate) fn settings(framing: JsonFraming) -> JsonDeserializerBuilder {
-    let mut config = JsonDeserializerConfig::default();
-    // Skip is the shipped default, so this is the path production takes.
-    // It is not the cheaper of the two by construction: on valid input
-    // Skip's error bookkeeping never runs, while ndjson under Fail buffers
-    // every decoded payload before emitting any of them. Measuring the
-    // default is the point; a Fail case would be a second shape, not a
-    // stricter version of this one.
-    config.on_error = JsonOnError::Skip;
-    // Off: the structural check parses each document a second time, which
-    // would measure the guard rather than the decode.
-    config.reject_duplicate_keys = false;
-    JsonDeserializerBuilder::new(config)
-        .expect("the config validates")
-        .framing(framing)
+    full_settings(framing, JsonOnError::Skip, false)
+}
+
+/// The default settings with no parser chosen, so `serde_json` decodes in
+/// every arm. Under the `simd` arm this is a build with the `simd-json`
+/// feature on and the call not made.
+pub(crate) fn serde_settings(framing: JsonFraming) -> JsonDeserializerBuilder {
+    base(framing, JsonOnError::Skip, false)
 }
 
 /// An unwarmed rig with no metrics, for a case whose point is the decode
@@ -339,8 +380,17 @@ pub(crate) fn rig<D>(
     expect: u64,
     build: impl FnOnce(&JsonDeserializerBuilder) -> D,
 ) -> Rig<D> {
-    let builder = settings(framing);
-    let deser = build(&builder);
+    rig_from(&settings(framing), payload, expect, build)
+}
+
+/// [`rig`] over a builder the case chose.
+pub(crate) fn rig_from<D>(
+    builder: &JsonDeserializerBuilder,
+    payload: Vec<u8>,
+    expect: u64,
+    build: impl FnOnce(&JsonDeserializerBuilder) -> D,
+) -> Rig<D> {
+    let deser = build(builder);
     // The receiver is dropped here, so when the last `AckRef` goes with the rig
     // the batch resolves into a disconnected channel and the send is discarded.
     // That happens in teardown, outside the collected region, which is why the

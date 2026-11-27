@@ -22,7 +22,7 @@
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. `arbitrary-precision` is crate-wide |
-//! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). The fidelity knobs above do not apply under it |
+//! | `json-simd` | `JsonDeserializerBuilder::with_simd_json` for [`json`]: a deserializer built from a builder that calls it decodes with `simd-json`. Others keep `serde_json`. The fidelity knobs above do not apply to `simd-json` |
 //! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker or bucket. A demo and test source: it keeps no durable progress |
 //! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
 //! | `tls-roots` | The loader in [`tls`]: the trust roots a TLS client in a third-party connector verifies servers against, from the system trust store and a `root_ca` file, how a reqwest-based client takes them, and whether an endpoint is `https://`. `tls::TlsSection`, the `tls:` key itself, is there without the feature |

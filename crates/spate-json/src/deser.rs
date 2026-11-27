@@ -65,6 +65,7 @@ pub(crate) struct DecoderCore {
     pub(crate) framing: JsonFraming,
     pub(crate) on_error: JsonOnError,
     pub(crate) reject_duplicate_keys: bool,
+    pub(crate) backend: backend::Backend,
     pub(crate) metrics: Option<JsonDeserMetrics>,
 }
 
@@ -195,7 +196,7 @@ impl DecoderCore {
         {
             return self.on_item_error(&e, dup_check_reason(&e), &meta);
         }
-        match backend::decode_one::<Vec<P>>(bytes) {
+        match self.backend.decode::<Vec<P>>(bytes) {
             Ok(items) => {
                 for payload in items {
                     let _ = out.emit(Record {
@@ -224,7 +225,7 @@ impl DecoderCore {
             self.on_item_error(&e, dup_check_reason(&e), meta)?;
             return Ok(None);
         }
-        match backend::decode_one::<P>(bytes) {
+        match self.backend.decode::<P>(bytes) {
             Ok(payload) => Ok(Some(payload)),
             Err(e) => {
                 self.on_item_error(&e, Reason::Malformed, meta)?;
@@ -688,6 +689,33 @@ mod tests {
         assert!(
             out.records.is_empty(),
             "no record may be emitted when the payload fails"
+        );
+    }
+
+    /// The array framing decodes with the builder's parser: `serde_json`
+    /// words a syntax error by line and column, and `simd-json` by kind and
+    /// character index.
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn an_array_decodes_with_the_parser_its_builder_chose() {
+        let refusal = |b: JsonDeserializerBuilder| {
+            b.build_serde::<Ev>()
+                .deserialize(
+                    &raw(br#"[{"id":hunter2}]"#),
+                    &test_ack(),
+                    &mut EmitCollector::new(),
+                )
+                .unwrap_err()
+                .to_string()
+        };
+        let base = builder(JsonFraming::Array, JsonOnError::Fail, false);
+        assert_eq!(
+            refusal(base.clone()),
+            "malformed payload: malformed: expected value at line 1 column 8"
+        );
+        assert_eq!(
+            refusal(base.with_simd_json()),
+            "malformed payload: malformed: InternalError at character 7"
         );
     }
 

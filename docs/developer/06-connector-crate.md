@@ -321,7 +321,7 @@ When the backend is faster for some data and slower for other data, each compone
 
 **Follow:** [`crates/spate-clickhouse/Cargo.toml`](repo:crates/spate-clickhouse/Cargo.toml).
 
-**Departs:** spate-json's `simd` feature, which switches the backend for the whole build, and spate-kafka's `json-simd` ([#2321](https://github.com/spate-etl/spate/issues/2321)), and spate-datagen's `avro`, which turns on `apache-avro` ([#1603](https://github.com/spate-etl/spate/issues/1603)).
+**Departs:** spate-datagen's `avro`, which turns on `apache-avro` ([#1603](https://github.com/spate-etl/spate/issues/1603)).
 
 **Checked by:** review.
 

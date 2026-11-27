@@ -60,22 +60,16 @@
 //!
 //! # Backends
 //!
-//! Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value
-//! step sits behind an internal seam, so the opt-in **`simd`** Cargo feature
-//! swaps in `simd-json` (SIMD-accelerated parsing) with no change to this
-//! API, and [`BACKEND_ID`] reports which is compiled. `simd` is faster on some
-//! payloads and slower on others, depending on the CPU, and the JSON connector
-//! guide's Backends section gives the measured figures. It is off by default.
-//! `simd` rejects integer literals outside
-//! the `i64`/`u64` range that serde_json accepts as `f64` and normalizes `-0`
-//! to `0`. Both backends reject NUL bytes after numbers and underscore separators
-//! in numbers. `serde_json` has a recursion limit of 128; `simd-json` limits
-//! nesting to 1024. With `reject_duplicate_keys`, the `serde_json` guard applies
-//! its limit before decoding. `simd` does not honor serde_json's
-//! `arbitrary_precision` / `raw_value` / `float_roundtrip` features; see the
-//! JSON connector guide's Backends section. `from_reader` is
-//! never used on the hot path, and decoding always operates on the in-memory
-//! payload slice.
+//! Decoding uses `serde_json` (stable 1.x) by default. With the `simd-json`
+//! Cargo feature, [`JsonDeserializerBuilder::with_simd_json`] makes the
+//! deserializers built from that builder decode with `simd-json`
+//! (SIMD-accelerated parsing) instead. The feature alone changes nothing: each
+//! pipeline chooses, because `simd-json` is faster on some payloads and slower
+//! on others, depending on the payload and the CPU. The JSON connector guide's
+//! Backends section gives the measured figures, and the method's
+//! documentation lists where the two parsers differ. `from_reader` is never
+//! used on the hot path, and decoding always operates on the in-memory payload
+//! slice.
 
 mod backend;
 mod config;
@@ -83,7 +77,6 @@ mod deser;
 mod framing;
 mod metrics;
 
-pub use backend::BACKEND_ID;
 pub use config::{JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonOnError};
 pub use deser::{JsonSerdeDeserializer, JsonValueDeserializer};
 pub use framing::JsonLinesFramer;

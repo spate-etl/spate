@@ -58,7 +58,7 @@ pub(crate) const NUMBERS: usize = 40_000;
 ///
 /// Half a megabyte: large enough that whatever a backend does per byte
 /// dominates whatever it does per document, which is the claim this case
-/// tests. The `simd` backend must copy the whole payload into its
+/// tests. The `simd-json` backend must copy the whole payload into its
 /// scratch buffer before it can parse destructively, and this is the case
 /// where that copy is big enough to see.
 pub(crate) const TEXT_BYTES: usize = 512 * 1024;

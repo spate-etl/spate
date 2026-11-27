@@ -41,16 +41,7 @@
 //!
 //! Nothing pins an iteration count; see `decode_wall.rs` for why.
 //!
-//! Every case declares [`BACKEND_ID`] as `decode_wall.rs` does, so the two arms
-//! of this crate are told apart here too; see that target's backend-axis
-//! section. Comparing them is `cargo xtask bench arms --head-features
-//! spate-json/simd --package spate-json --filter frame_`, though the framer
-//! does not decode and the two arms should measure the same. `--package` keeps
-//! spate-s3's `frame_` cases out.
-//!
 //! Run it with `cargo xtask bench ab --ref main --package spate-json --filter frame_`.
-//!
-//! [`BACKEND_ID`]: spate_json::BACKEND_ID
 //!
 //! [`JsonLinesFramer`]: spate_json::JsonLinesFramer
 
@@ -120,11 +111,6 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig, erratic: Option<&str>) -> Su
                 for chunk in &rig.chunks {
                     corpus.absorb("chunk", chunk);
                 }
-                // The framer does not decode, so the backend cannot change
-                // what this measures. Declared anyway, so that both of this
-                // crate's wall targets state the arm they compiled on the same
-                // two tripwires rather than on one each.
-                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 rig
             },
             |b, rig: &Rig| {

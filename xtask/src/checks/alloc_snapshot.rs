@@ -695,7 +695,9 @@ mod tests {
             argv,
             vec![
                 line("+1.0.0 bench -p spate-json --bench decode_alloc --locked"),
-                line("+1.0.0 bench -p spate-json --bench decode_alloc --locked --features simd"),
+                line(
+                    "+1.0.0 bench -p spate-json --bench decode_alloc --locked --features simd-json"
+                ),
                 line("+1.0.0 bench -p spate-kafka --bench encode_alloc --locked"),
             ]
         );
@@ -853,7 +855,7 @@ mod tests {
         let scratch = tree(&["crates/spate-json/benches/d_alloc.rs"]);
         for i in [
             inv("spate-json", "d_alloc", "default", ""),
-            inv("spate-json", "d_alloc", "simd", "simd"),
+            inv("spate-json", "d_alloc", "simd", "simd-json"),
         ] {
             let text = header("rustc r1", &i, "x86_64") + &body(i.arm);
             super::write(&scratch.join(&i.file("x86_64")), &text).unwrap();
@@ -880,7 +882,7 @@ mod tests {
                 if step.program == "rustc" {
                     return Ok("rustc r1\n".to_owned());
                 }
-                printed(if step.args.iter().any(|a| a == "simd") {
+                printed(if step.args.iter().any(|a| a == "simd-json") {
                     "simd"
                 } else {
                     "default"
@@ -946,7 +948,7 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "rustc +1.0.0 --version\n\
              cargo +1.0.0 bench -p spate-json --bench d_alloc --locked\n\
-             cargo +1.0.0 bench -p spate-json --bench d_alloc --locked --features simd\n"
+             cargo +1.0.0 bench -p spate-json --bench d_alloc --locked --features simd-json\n"
         );
     }
 }

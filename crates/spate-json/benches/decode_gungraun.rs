@@ -88,6 +88,20 @@
 //!   record count are `ndjson_clean`'s, so the pair differs in the record and
 //!   nothing else.
 //!
+//! ## The parser
+//!
+//! Every case above decodes with the parser of the arm it runs in:
+//! `serde_json` in the default arm, `simd-json` in the `simd` arm, whose build
+//! turns on the `simd-json` feature and calls `with_simd_json` on the builder.
+//! These two never make the call:
+//!
+//! - `single_typed_serde` and `ndjson_clean_serde` — `single_typed` and
+//!   `ndjson_clean` decoded with `serde_json` in every arm. In the default arm
+//!   they repeat their twins. In the `simd` arm they count a build with the
+//!   feature on and `serde_json` chosen, against their twins in the default
+//!   arm, which is what a deserializer built without the call pays for the
+//!   choice existing.
+//!
 //! ## The duplicate-key guard
 //!
 //! `reject_duplicate_keys` parses each document a second time through a
@@ -121,18 +135,18 @@
 //! share their corpora with; one guard row moving by a per cent while its twin
 //! and its guard-off pair sit still is the hasher.
 //!
-//! One other thing could in principle move a count without the code moving,
-//! and it is worth naming rather than leaving to be rediscovered. The rate
-//! limiter behind the skip warning allows five events per ten *seconds*, so a
-//! poison case whose warm pass and measured pass together straddled a window
-//! roll would emit up to five extra log events on one run and not the next.
-//! Nothing observed comes near it: the whole twenty-three-case binary takes 20
-//! to 30 seconds in an aarch64 Linux container on a development machine, which
-//! bounds any one case's process (valgrind startup, corpus construction, warm
-//! pass and measured region together) at a small multiple of a second. A
-//! poison row that moved by a few hundred instructions between runs would be
-//! this, and would mean the runner had become several times slower rather than
-//! that the decode had changed.
+//! One other thing could in principle move a count without the code moving, and
+//! it is worth naming rather than leaving to be rediscovered. The rate limiter
+//! behind the skip warning allows five events per ten *seconds*, so a poison
+//! case whose warm pass and measured pass together straddled a window roll
+//! would emit up to five extra log events on one run and not the next. Nothing
+//! observed comes near it: twenty-three of these cases together take 20 to 30
+//! seconds in an aarch64 Linux container on a development machine, which bounds
+//! any one case's process (valgrind startup, corpus construction, warm pass and
+//! measured region together) at a small multiple of a second. A poison row that
+//! moved by a few hundred instructions between runs would be this, and would
+//! mean the runner had become several times slower rather than that the decode
+//! had changed.
 //!
 //! ## What is left out
 //!
@@ -167,7 +181,10 @@ mod orders;
 #[path = "support/shapes.rs"]
 mod shapes;
 
-use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, keyed, rig, shape_rig};
+use decode_rig::{
+    Rig, batch_rig, decode_once, decode_run, decode_run_err, keyed, rig, rig_from, serde_settings,
+    shape_rig, warm_rig,
+};
 use orders::{BAD_EVERY, Corruption, Event, LineItem, Order, RECORDS};
 
 /// The number of records the batch framings carry. Fifty is the same batch
@@ -203,6 +220,15 @@ fn single_typed_rig() -> Rig<spate_json::JsonSerdeDeserializer<Order>> {
     })
 }
 
+fn single_typed_serde_rig() -> Rig<spate_json::JsonSerdeDeserializer<Order>> {
+    rig_from(
+        &serde_settings(JsonFraming::Single),
+        orders::order_document(),
+        1,
+        |b| b.build_serde::<Order>(),
+    )
+}
+
 fn single_value_rig() -> Rig<spate_json::JsonValueDeserializer> {
     rig(JsonFraming::Single, orders::order_document(), 1, |b| {
         b.build_value()
@@ -230,6 +256,16 @@ fn ndjson_clean_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
         JsonOnError::Skip,
         orders::lines_ndjson(RECORDS),
         RECORDS,
+    )
+}
+
+fn ndjson_clean_serde_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
+    warm_rig::<Owned<LineItem>, _>(
+        serde_settings(JsonFraming::Lines),
+        orders::lines_ndjson(RECORDS),
+        RECORDS,
+        LABELS,
+        |b| b.build_serde::<LineItem>(),
     )
 }
 
@@ -296,6 +332,7 @@ fn array_bad_last_rig() -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {
 // `#[doc]` attribute, which `#[library_benchmark]` rejects.
 #[library_benchmark]
 #[bench::single_typed(single_typed_rig())]
+#[bench::single_typed_serde(single_typed_serde_rig())]
 fn decode_typed(
     mut rig: Rig<spate_json::JsonSerdeDeserializer<Order>>,
 ) -> Rig<spate_json::JsonSerdeDeserializer<Order>> {
@@ -326,6 +363,7 @@ fn decode_framed(
 // input under `Skip`, and the array framing dropping a payload whole.
 #[library_benchmark]
 #[bench::ndjson_clean(ndjson_clean_rig())]
+#[bench::ndjson_clean_serde(ndjson_clean_serde_rig())]
 #[bench::ndjson_syntax_10pct(ndjson_bad_rig(BAD_EVERY, Corruption::Syntax))]
 #[bench::ndjson_type_10pct(ndjson_bad_rig(BAD_EVERY, Corruption::TypeMismatch))]
 #[bench::ndjson_syntax_all(ndjson_bad_rig(1, Corruption::Syntax))]

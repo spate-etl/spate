@@ -107,9 +107,9 @@ The `WARN` line for a skipped record and the failure reason carry no content
 from the record. The `WARN` line carries the record's `partition` and `offset`.
 The error text says that the document does not parse, that it does not match
 the record type, or that it repeats an object key. With `serde_json` the text
-ends in the line and column. With the `simd` feature a parse error gives the
-character index, and a document that does not match the record type gives no
-position.
+ends in the line and column. A deserializer that decodes with `simd-json`
+(see [Backends](#backends)) gives the character index for a parse error, and
+no position for a document that does not match the record type.
 
 Under `Lines` framing the position counts within the refused line, so the line
 is always 1. The text does not say which line of the payload was refused.
@@ -138,21 +138,22 @@ rejected.
 
 ## Backends
 
-Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value step
-sits behind an internal seam, so the opt-in **`simd`** Cargo feature
-(`json-simd` on the `spate` facade) swaps in
+Decoding uses `serde_json` (stable 1.x) by default. A builder can choose
 [`simd-json`](https://github.com/simd-lite/simd-json), a SIMD-accelerated
-parser, with no change to the builder API; `build_serde` and `build_value` are
-identical either way. `from_reader` is never used on the hot path. Decoding
-always operates on the in-memory payload slice, which is both faster and lets
-the parser see the whole document at once.
+parser, instead: with Cargo feature `simd-json` (`json-simd` on the `spate`
+facade), `JsonDeserializerBuilder::with_simd_json` makes every deserializer
+that builder builds decode with `simd-json`. The feature alone changes no
+deserializer, so one pipeline can decode one source with each parser.
+`build_serde` and `build_value` are the same for both parsers. `from_reader` is
+never used on the hot path. Decoding always operates on the in-memory payload
+slice, which is both faster and lets the parser see the whole document at once.
 
-The `simd` backend is faster than `serde_json` on some payloads and slower on
-others, and the difference depends on the CPU. The table gives the change in
-decode time under `simd` on three AWS 8xlarge hosts: c7i (Intel Xeon Platinum
+`simd-json` is faster than `serde_json` on some payloads and slower on others,
+and the difference depends on the CPU. The table gives the change in decode
+time with `simd-json` on three AWS 8xlarge hosts: c7i (Intel Xeon Platinum
 8488C, x86_64), c7a (AMD EPYC 9R14, x86_64) and c8g (Graviton, aarch64). A
-negative figure means `simd` is faster. "Under 5%" means the difference was too
-small for the measurement to resolve.
+negative figure means `simd-json` is faster. "Under 5%" means the difference
+was too small for the measurement to resolve.
 
 | Payload | Framing | c7i | c7a | c8g |
 |---|---|---:|---:|---:|
@@ -176,9 +177,9 @@ scalar code. Neither fallback was measured. The
 [`cpu features` log line](../../../05-deployment/monitoring.mdx#check-which-simd-features-a-host-offers)
 shows which of these features a host offers.
 
-The `simd` backend is **off by default**, because it is slower on some
-payloads. It is slower on number-heavy payloads on every host, and on the event
-lines on Graviton.
+`serde_json` is the default, because `simd-json` is slower on some payloads. It
+is slower on number-heavy payloads on every host, and on the event lines on
+Graviton.
 
 simd-json parses a mutable buffer in place, so the
 framework copies each borrowed payload into a reused thread-local buffer
@@ -202,9 +203,9 @@ or payload is dropped; under `on_error: fail`, decoding fails.
 
 Because parsing is done by `simd-json` rather than `serde_json`, the
 `serde_json`-specific knobs `json-float-roundtrip`, `json-arbitrary-precision`,
-and `json-raw-value` do **not** apply under `simd` (arbitrary precision is
-silently lost; `RawValue` capture is unsupported). Benchmark **and** validate
-against real data before switching.
+and `json-raw-value` do **not** apply to a deserializer that decodes with it
+(arbitrary precision is silently lost; `RawValue` capture is unsupported).
+Benchmark **and** validate against real data before switching.
 
 ## Metrics
 

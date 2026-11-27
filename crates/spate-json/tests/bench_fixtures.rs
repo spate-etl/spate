@@ -19,9 +19,7 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::stable_key_hash;
-use spate_json::{
-    JsonDeserializerBuilder, JsonDeserializerConfig, JsonFraming, JsonLinesFramer, JsonOnError,
-};
+use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonLinesFramer, JsonOnError};
 use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::pin;
 
@@ -36,7 +34,7 @@ mod orders;
 #[path = "../benches/support/shapes.rs"]
 mod shapes;
 
-use decode_rig::Sink;
+use decode_rig::{Sink, full_settings};
 use lines::Eol;
 use orders::{BAD_EVERY, Corruption, Event, LineItem, RECORDS};
 
@@ -61,19 +59,6 @@ fn drive_value(settings: JsonDeserializerBuilder, payload: &[u8]) -> (bool, u64)
         .deserialize(&raw_payload(payload), &ack, &mut sink)
         .is_err();
     (failed, sink.count)
-}
-
-fn settings(
-    framing: JsonFraming,
-    on_error: JsonOnError,
-    reject_duplicate_keys: bool,
-) -> JsonDeserializerBuilder {
-    let mut config = JsonDeserializerConfig::default();
-    config.on_error = on_error;
-    config.reject_duplicate_keys = reject_duplicate_keys;
-    JsonDeserializerBuilder::new(config)
-        .expect("the config validates")
-        .framing(framing)
 }
 
 /// Feed `stream` through a fresh framer in `chunk`-sized pieces, popping as a
@@ -311,7 +296,7 @@ fn the_event_corpus_is_the_shape_its_case_names() {
 /// per cent.
 const STRING_SHARE_PCT: usize = 55;
 
-/// The event corpus decodes through the compiled backend to the events it was
+/// The event corpus decodes through the arm's backend to the events it was
 /// built from.
 ///
 /// The `simd` arm and the default one are compared on the premise that both
@@ -320,7 +305,8 @@ const STRING_SHARE_PCT: usize = 55;
 /// and still emit the same record count the bench asserts.
 #[test]
 fn the_event_corpus_decodes_to_its_samples() {
-    let mut deser = settings(JsonFraming::Lines, JsonOnError::Fail, false).build_serde::<Event>();
+    let mut deser =
+        full_settings(JsonFraming::Lines, JsonOnError::Fail, false).build_serde::<Event>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = EmitCollector::new();
     deser
@@ -486,7 +472,7 @@ fn the_corpora_are_pinned_across_revisions() {
 /// clean and reporting a smaller number that reads like an improvement.
 #[test]
 fn the_error_cases_emit_what_they_claim() {
-    let skip_ndjson = settings(JsonFraming::Lines, JsonOnError::Skip, false);
+    let skip_ndjson = full_settings(JsonFraming::Lines, JsonOnError::Skip, false);
     assert_eq!(
         drive(skip_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
@@ -511,7 +497,7 @@ fn the_error_cases_emit_what_they_claim() {
         "ndjson_syntax_all"
     );
 
-    let fail_ndjson = settings(JsonFraming::Lines, JsonOnError::Fail, false);
+    let fail_ndjson = full_settings(JsonFraming::Lines, JsonOnError::Fail, false);
     assert_eq!(
         drive(fail_ndjson.clone(), &orders::lines_ndjson(RECORDS)),
         (false, RECORDS),
@@ -526,7 +512,7 @@ fn the_error_cases_emit_what_they_claim() {
         "ndjson_fail_bad_last: the payload fails and emits no prefix"
     );
 
-    let skip_array = settings(JsonFraming::Array, JsonOnError::Skip, false);
+    let skip_array = full_settings(JsonFraming::Array, JsonOnError::Skip, false);
     assert_eq!(
         drive(skip_array.clone(), &orders::lines_array(RECORDS)),
         (false, RECORDS),
@@ -566,10 +552,10 @@ fn the_two_corruptions_fail_for_different_reasons() {
          rather than the type-mismatch one"
     );
 
-    // And both still fail the decode, whichever backend is compiled in.
+    // And both still fail the decode, whichever backend the arm chose.
     let one = |bytes: &[u8]| {
         let mut deser =
-            settings(JsonFraming::Single, JsonOnError::Fail, false).build_serde::<LineItem>();
+            full_settings(JsonFraming::Single, JsonOnError::Fail, false).build_serde::<LineItem>();
         let (ack, _rx) = AckRef::test_pair();
         let mut sink = Sink::default();
         deser
@@ -594,8 +580,8 @@ fn the_two_corruptions_fail_for_different_reasons() {
 /// duplicated one would have decoded fine without it.
 #[test]
 fn the_duplicate_key_corpus_is_the_only_one_the_guard_rejects() {
-    let guarded = settings(JsonFraming::Single, JsonOnError::Skip, true);
-    let unguarded = settings(JsonFraming::Single, JsonOnError::Skip, false);
+    let guarded = full_settings(JsonFraming::Single, JsonOnError::Skip, true);
+    let unguarded = full_settings(JsonFraming::Single, JsonOnError::Skip, false);
 
     assert_eq!(
         drive_value(guarded.clone(), &shapes::wide_flat()),
@@ -1075,4 +1061,29 @@ fn a_keyed_rig_decodes_with_its_key() {
         RECORDS
     );
     assert_eq!(twin.sink.key_hash, None, "the keyless twin carries a key");
+}
+
+/// The `simd` arm decodes through `simd-json`.
+///
+/// The rig declares the parser it chose under the same `cfg` that makes the
+/// call, so the declaration alone would not show a rig that stopped making it.
+/// `simd-json` words a syntax error by kind and character index, where
+/// `serde_json` gives a line and column.
+#[cfg(feature = "simd-json")]
+#[test]
+fn the_simd_arm_decodes_through_simd_json() {
+    let mut deser =
+        full_settings(JsonFraming::Lines, JsonOnError::Fail, false).build_serde::<LineItem>();
+    let (ack, _rx) = AckRef::test_pair();
+    let err = deser
+        .deserialize(
+            &raw_payload(br#"{"sku":hunter2}"#),
+            &ack,
+            &mut Sink::default(),
+        )
+        .expect_err("the line is not JSON");
+    assert_eq!(
+        err.to_string(),
+        "malformed payload: malformed: InternalError at character 7"
+    );
 }

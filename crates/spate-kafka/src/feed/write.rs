@@ -315,14 +315,14 @@ pub(crate) enum WriteClass {
 
 /// Classify a failed write by the sink's table, except that an over-size
 /// message is refused.
-pub(crate) fn classify(code: Option<RDKafkaErrorCode>) -> WriteClass {
+pub(crate) fn classify_write(code: Option<RDKafkaErrorCode>) -> WriteClass {
     match code {
         Some(RDKafkaErrorCode::MessageSizeTooLarge) => WriteClass::Refused,
         // librdkafka's local code for a topic it has marked missing. One
         // stale metadata response can mark an existing topic missing for a
         // propagation window, so the write is sent again.
         Some(RDKafkaErrorCode::UnknownTopic) => WriteClass::Retryable,
-        code => match crate::sink::report_class(code) {
+        code => match crate::error::classify_producer_error(code) {
             ErrorClass::Fatal => WriteClass::Fatal,
             _ => WriteClass::Retryable,
         },

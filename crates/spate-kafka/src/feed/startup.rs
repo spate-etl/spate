@@ -57,7 +57,8 @@ const LOG_APPEND_TIME: &str = "LogAppendTime";
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A failed admin request, or a topic the request reported an error for.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message}")]
 pub(crate) struct AdminError {
     pub(crate) code: RDKafkaErrorCode,
     pub(crate) message: String,
@@ -337,7 +338,7 @@ fn elapsed(limit: Duration, step: &str) -> ConnectError {
 /// handshake: librdkafka keeps a broker that failed either out of use, and
 /// the read waits for a usable one. The client's error callback reports the
 /// rejection instead, which [`TopicAdmin::rejection`] returns.
-fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> ConnectError {
+fn connect_error(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> ConnectError {
     if let Some(text) = admin.rejection() {
         return rejected(doing, &text);
     }
@@ -393,7 +394,7 @@ pub(crate) async fn check(
                     ),
                 ));
             }
-            Err(e) => return Err(classified(admin, &doing, &e)),
+            Err(e) => return Err(connect_error(admin, &doing, &e)),
         }
     }
 
@@ -428,7 +429,7 @@ pub(crate) async fn check(
         let configs = admin
             .configs(topic)
             .await
-            .map_err(|e| classified(admin, &doing, &e))?;
+            .map_err(|e| connect_error(admin, &doing, &e))?;
         // Every existing topic has configuration entries, so a topic with
         // none is a read the cluster refused.
         if configs.is_empty() {

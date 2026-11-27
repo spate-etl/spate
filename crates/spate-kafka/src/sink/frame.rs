@@ -34,9 +34,10 @@ const KNOWN_FLAGS: u8 = FLAG_HAS_KEY | FLAG_TOMBSTONE;
 /// on the parse side any structural mismatch does. Both indicate a bug in
 /// this crate (the encoder writes what the parser reads), never bad user
 /// data; the writer surfaces parse failures as fatal.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum FrameError {
     /// A section exceeds the format's `u32` length limit.
+    #[error("{what} of {len} bytes exceeds the frame format's u32 limit")]
     TooLong {
         /// Which section (`"key"`, `"header name"`, ...).
         what: &'static str,
@@ -44,28 +45,13 @@ pub(crate) enum FrameError {
         len: usize,
     },
     /// The frame bytes do not parse.
+    #[error("corrupt frame at byte {offset}: {reason}")]
     Corrupt {
         /// Byte offset of the failed read.
         offset: usize,
         /// What went wrong there.
         reason: &'static str,
     },
-}
-
-impl std::fmt::Display for FrameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FrameError::TooLong { what, len } => {
-                write!(
-                    f,
-                    "{what} of {len} bytes exceeds the frame format's u32 limit"
-                )
-            }
-            FrameError::Corrupt { offset, reason } => {
-                write!(f, "corrupt frame at byte {offset}: {reason}")
-            }
-        }
-    }
 }
 
 fn put_section(buf: &mut BytesMut, what: &'static str, bytes: &[u8]) -> Result<(), FrameError> {
@@ -292,6 +278,27 @@ mod tests {
 
     fn parse_all(frame: &[u8]) -> Vec<Result<MessageRef<'_>, FrameError>> {
         FrameParser::new(frame).collect()
+    }
+
+    /// Each frame error renders its section, length or offset and reason.
+    #[test]
+    fn frame_errors_render_their_details() {
+        let too_long = FrameError::TooLong {
+            what: "key",
+            len: 5_000_000_000,
+        };
+        assert_eq!(
+            too_long.to_string(),
+            "key of 5000000000 bytes exceeds the frame format's u32 limit"
+        );
+        let corrupt = FrameError::Corrupt {
+            offset: 7,
+            reason: "truncated header",
+        };
+        assert_eq!(
+            corrupt.to_string(),
+            "corrupt frame at byte 7: truncated header"
+        );
     }
 
     #[test]

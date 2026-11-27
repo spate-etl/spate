@@ -1,5 +1,5 @@
-//! Classification of librdkafka consumer errors into framework error
-//! classes.
+//! Classification of librdkafka consumer and producer errors into framework
+//! error classes.
 //!
 //! librdkafka surfaces transient and permanent conditions through the same
 //! `poll` return value. Treating every poll error as [`ErrorClass::Retryable`]
@@ -136,6 +136,32 @@ pub(crate) fn ends_idempotent_producer(code: RDKafkaErrorCode) -> bool {
             | C::Inconsistent
             | C::GaplessGuarantee
     )
+}
+
+/// The class of a failed produce or delivery report.
+///
+/// Fatal covers what retrying cannot heal: authorization and configuration
+/// errors, an unknown topic, a message the broker's limits reject, and the
+/// idempotent producer's fenced/fatal states (retrying those would spin
+/// until the stalled-watermark deadline instead of surfacing the cause).
+/// Everything else (transport failures, timeouts, purges, and unknown codes)
+/// is retryable: with idempotence enabled a re-produce is safe in-session,
+/// and a batch replay costs duplicates, never loss.
+pub(crate) fn classify_producer_error(code: Option<RDKafkaErrorCode>) -> ErrorClass {
+    use RDKafkaErrorCode as C;
+    match code {
+        Some(
+            C::UnknownTopicOrPartition
+            | C::TopicAuthorizationFailed
+            | C::Authentication
+            | C::SaslAuthenticationFailed
+            | C::InvalidRequiredAcks
+            | C::MessageSizeTooLarge
+            | C::PolicyViolation,
+        ) => ErrorClass::Fatal,
+        Some(code) if ends_idempotent_producer(code) => ErrorClass::Fatal,
+        _ => ErrorClass::Retryable,
+    }
 }
 
 /// Whether an error callback's `code` and `text` report a rejection: a SASL

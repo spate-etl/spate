@@ -1,0 +1,3 @@
+**A Kafka feed reads an attempt partition again once its leader returns** (`spate-kafka`)
+
+When a watermark read of an attempt partition fails, the Kafka feed's gate now asks the broker for the attempt topic's metadata before its next pass. Once the partition has a leader again, the gate reads it within two passes and admits its units. In previous versions librdkafka kept the answer that the partition had no leader, and every later read failed with `UnknownPartition` until that cache entry expired after `metadata.max.age.ms`, 15 minutes by default. The partition's units waited at the gate meanwhile, and once 128 units waited the feed paused every work partition. A pass whose reads all succeed sends no extra request.

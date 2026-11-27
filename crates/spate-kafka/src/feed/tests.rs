@@ -2205,6 +2205,29 @@ mod cluster {
         });
     }
 
+    /// The first work offset whose unit's attempt record goes to attempt
+    /// `partition`.
+    fn offset_on(core: &Core, partition: i32) -> i64 {
+        (0..)
+            .find(|&o| super::attempt_partition(core, &super::identity(core, o)) == partition)
+            .unwrap()
+    }
+
+    /// Put a delivery from work partition 0 at the gate for each of
+    /// `offsets`, its unit named `u` and the offset. The tracker must own
+    /// that partition.
+    fn gate_units(core: &Core, offsets: &[i64]) {
+        let mut st = core.lock();
+        for &offset in offsets {
+            let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new(format!("u{offset}"), Vec::new()),
+                identity: super::identity(core, offset),
+            });
+        }
+    }
+
     /// A cluster with one partition each of the work, retry and
     /// dead-letter topics, two of the attempt topic, and `n` messages keyed
     /// `u0`, `u1`, … on the work topic.
@@ -3287,23 +3310,9 @@ mod cluster {
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
         let producer: Producer = feed_producer(&config, &core);
-        let on = |partition| {
-            (0..)
-                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
-                .unwrap()
-        };
-        {
-            let mut st = core.lock();
-            st.tracker.assign([super::tp(0)]);
-            for offset in [on(0), on(1)] {
-                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
-                st.gating.push_back(Gating {
-                    receipt,
-                    unit: Unit::new(format!("u{offset}"), Vec::new()),
-                    identity: super::identity(&core, offset),
-                });
-            }
-        }
+        let on = |partition| offset_on(&core, partition);
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[on(0), on(1)]);
         meet_a_broker(producer.client());
         // Partition 0 holds a record the ledger has read, so its read takes
         // its two requests and it is caught up; partition 1's is refused.
@@ -3339,11 +3348,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
-        let on = |partition| {
-            (0..)
-                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
-                .unwrap()
-        };
+        let on = |partition| offset_on(&core, partition);
         let (on0, on1) = (on(0), on(1));
         meet_a_broker(producer.client());
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
@@ -3353,18 +3358,8 @@ mod cluster {
                 .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
                 .is_err()
         });
-        {
-            let mut st = core.lock();
-            st.tracker.assign([super::tp(0)]);
-            for offset in [on0, on1] {
-                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
-                st.gating.push_back(Gating {
-                    receipt,
-                    unit: Unit::new(format!("u{offset}"), Vec::new()),
-                    identity: super::identity(&core, offset),
-                });
-            }
-        }
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[on0, on1]);
         let gate = Gate::new(
             Arc::clone(&core),
             producer,
@@ -3385,6 +3380,113 @@ mod cluster {
         assert!(st.signal.latched().is_none());
     }
 
+    /// Pins that the gate reads an attempt partition again once its leader
+    /// returns. librdkafka answers a partition its metadata cache holds with
+    /// no leader from that cache, so the lister reads the partition as
+    /// unknown until the gate asks the broker for the topic's metadata again.
+    /// Regression for #2448.
+    #[test]
+    fn a_gate_admits_once_its_leaderless_attempt_partition_has_a_leader() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("leader-returns");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let producer = feed_producer(&config, &core);
+        cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[offset_on(&core, 1)]);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_millis(100));
+        gate.pass();
+        {
+            let st = core.lock();
+            assert_eq!(st.gating.len(), 1, "the unit left the gate");
+            assert!(st.ready.is_empty());
+        }
+        cluster.partition_leader(ATTEMPTS, 1, Some(1)).unwrap();
+        wait_until(HANG, "the unit is buffered once the leader returns", || {
+            gate.pass();
+            core.lock().ready.len() == 1
+        });
+    }
+
+    /// Pins that a pass which reads every watermark it needs sends no
+    /// metadata request: the gate asks for the attempt topic's metadata only
+    /// after a failed read. A first pass on attempt partition 0 settles each
+    /// client's own startup requests, and the pass counted reads partition 1,
+    /// which is empty, so it needs no follower.
+    #[test]
+    fn a_pass_that_reads_every_watermark_sends_no_metadata_request() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gate-no-metadata");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let producer = feed_producer(&config, &core);
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[offset_on(&core, 0)]);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_millis(100));
+        wait_until(HANG, "the unit on partition 0 is buffered", || {
+            gate.pass();
+            core.lock().ready.len() == 1
+        });
+        cluster.track_requests();
+        gate_units(&core, &[offset_on(&core, 1)]);
+        wait_until(HANG, "the unit on partition 1 is buffered", || {
+            gate.pass();
+            core.lock().ready.len() == 2
+        });
+        assert_eq!(cluster.received(RDKafkaApiKey::Metadata), 0);
+    }
+
+    /// Pins that the metadata request after a failed read is bounded by the
+    /// gate's step: with the broker holding its reply far past `HANG`, a
+    /// pass whose read fails still returns.
+    #[test]
+    fn a_refresh_that_gets_no_answer_ends_within_the_step() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("refresh-bound");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let producer = feed_producer(&config, &core);
+        cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[offset_on(&core, 1)]);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_millis(200));
+        // The first pass caches the leaderless partition, so the second
+        // pass's read fails from the cache and sends only the refresh.
+        gate.pass();
+        assert_eq!(core.lock().gating.len(), 1, "the unit left the gate");
+        // librdkafka re-queries a leaderless partition of a topic the lister
+        // knows on its own, so that query can take a hold before the refresh.
+        for _ in 0..3 {
+            cluster.hold_next_reply(1, RDKafkaApiKey::Metadata, 2 * HANG);
+        }
+        assert!(
+            returns_within(HANG, move || gate.pass()),
+            "a refresh with no answer held the pass past its step"
+        );
+    }
+
     /// Pins that a pass which reads every watermark it needs admits its
     /// units and returns without waiting a step: with a step of an hour, a
     /// pass over one unit on a partition with a leader returns, and the unit
@@ -3398,9 +3500,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
-        let offset = (0..)
-            .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 0)
-            .unwrap();
+        let offset = offset_on(&core, 0);
         wait_until(HANG, "partition 0 reports its watermarks", || {
             producer
                 .client()
@@ -3412,16 +3512,8 @@ mod cluster {
         cluster
             .broker_round_trip_time(1, Duration::from_millis(300))
             .unwrap();
-        {
-            let mut st = core.lock();
-            st.tracker.assign([super::tp(0)]);
-            let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
-            st.gating.push_back(Gating {
-                receipt,
-                unit: Unit::new("u", Vec::new()),
-                identity: super::identity(&core, offset),
-            });
-        }
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[offset]);
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
@@ -3607,11 +3699,7 @@ mod cluster {
             SyncClock::new(clock.clone()),
         ));
         let producer: Producer = feed_producer(&config, &core);
-        let on = |partition| {
-            (0..)
-                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
-                .unwrap()
-        };
+        let on = |partition| offset_on(&core, partition);
         let offsets = [on(0), on(1), on(2)];
         {
             let mut st = core.lock();
@@ -3759,9 +3847,7 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
-        let offset = (0..)
-            .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 1)
-            .unwrap();
+        let offset = offset_on(&core, 1);
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
         wait_until(HANG, "partition 1 reports no leader", || {
             producer
@@ -3769,16 +3855,8 @@ mod cluster {
                 .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
                 .is_err()
         });
-        {
-            let mut st = core.lock();
-            st.tracker.assign([super::tp(0)]);
-            let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
-            st.gating.push_back(Gating {
-                receipt,
-                unit: Unit::new("u", Vec::new()),
-                identity: super::identity(&core, offset),
-            });
-        }
+        core.lock().tracker.assign([super::tp(0)]);
+        gate_units(&core, &[offset]);
         let gate = Gate::new(
             Arc::clone(&core),
             producer,

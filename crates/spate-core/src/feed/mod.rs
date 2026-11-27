@@ -269,7 +269,7 @@ impl FeedErrorKind {
 pub struct FeedError {
     kind: FeedErrorKind,
     reason: String,
-    source: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
+    source: Option<crate::error::Source>,
 }
 
 crate::error::role_error_methods!(FeedError, FeedErrorKind);

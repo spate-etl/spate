@@ -70,7 +70,7 @@ impl FatalError {
 
 /// The client error a role error carries, behind an `Arc` so the error stays
 /// cheap to clone.
-type Source = std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>;
+pub(crate) type Source = std::sync::Arc<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The methods every role error shares: `SourceError`, `SinkError`,
 /// `FeedError` and `DeserError`. Each type is a struct with private `kind`,

@@ -91,7 +91,7 @@ pub(crate) enum ProbeError {
     SequenceMustHaveLength,
     /// `#[serde(flatten)]`, unsupported on row structs.
     #[error("#[serde(flatten)] is not supported by RowBinary rows")]
-    Flatten,
+    FlattenUnsupported,
     /// An error raised by a `Serialize` implementation.
     #[error("serialize error: {0}")]
     Custom(String),
@@ -265,7 +265,7 @@ impl ser::Serializer for ShapeSer {
     fn serialize_map(self, len: Option<usize>) -> Result<MapShape, ProbeError> {
         if len.is_none() {
             // A length-less map is serde's #[serde(flatten)] lowering.
-            return Err(ProbeError::Flatten);
+            return Err(ProbeError::FlattenUnsupported);
         }
         Ok(MapShape {
             key: None,

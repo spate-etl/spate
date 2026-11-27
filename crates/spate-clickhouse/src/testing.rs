@@ -82,7 +82,7 @@ pub fn reserved_settings() -> Vec<&'static str> {
 /// classify the error.
 #[must_use]
 pub fn exception_code(reason: &str) -> Option<u32> {
-    crate::writer::exception_code(reason)
+    crate::error::exception_code(reason)
 }
 
 /// The settings the sink sets on an insert carrying `token`, with

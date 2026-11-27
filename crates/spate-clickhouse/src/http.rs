@@ -1,7 +1,7 @@
 //! The HTTP(S) client behind each replica endpoint, the roots it verifies
 //! `https://` replicas against, and the certificate rejections it reports.
 
-use crate::writer::class_of;
+use crate::error::classify_client_error;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
@@ -89,7 +89,7 @@ impl StartupBound {
 
     /// `request`'s answer, or the reason it has none with its class.
     ///
-    /// A client error is classed by [`class_of`] with `Fatal` for a variant
+    /// A client error is classed by [`classify_client_error`] with `Fatal` for a variant
     /// it does not name, since a startup read has no dedup token to make a
     /// retry of an unknown failure safe to assume. A request that passes the
     /// bound, or whose timing thread does not start, is `Retryable`.
@@ -98,7 +98,7 @@ impl StartupBound {
         request: impl Future<Output = Result<T, clickhouse::error::Error>>,
     ) -> Result<T, Classed<String>> {
         let classed = |e: clickhouse::error::Error| Classed {
-            class: class_of(&e, ErrorClass::Fatal),
+            class: classify_client_error(&e, ErrorClass::Fatal),
             error: error_reason(&e),
         };
         let Some(limit) = self.limit else {

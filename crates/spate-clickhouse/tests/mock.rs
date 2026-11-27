@@ -401,6 +401,11 @@ shards:
     fn assert_fatal_scale_mismatch(err: SinkError) {
         let reason = err.reason();
         assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+        // Both formats report the mismatch in the same words.
+        assert!(
+            reason.starts_with("row struct does not match declared columns for `events`:"),
+            "{reason}"
+        );
         assert!(
             reason.contains("Decimal64<4>") && reason.contains("Decimal(18, 2)"),
             "{reason}"

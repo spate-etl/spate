@@ -240,6 +240,7 @@ mod distributed;
 // unreachable from outside the crate without it.
 #[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 mod encoder;
+mod error;
 mod http;
 #[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
 mod native;

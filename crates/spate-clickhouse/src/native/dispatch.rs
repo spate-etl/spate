@@ -646,69 +646,69 @@ impl<'a> Serializer for RowDispatchSer<'a> {
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, NativeError> {
         // serde `flatten` lowers a struct to a length-less map; positional
         // columns cannot absorb that.
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
 
     // Everything else: a row must serialize as a struct/tuple of columns.
     fn serialize_bool(self, _v: bool) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_i8(self, _v: i8) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_i16(self, _v: i16) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_i32(self, _v: i32) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_i64(self, _v: i64) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_i128(self, _v: i128) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_u8(self, _v: u8) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_u16(self, _v: u16) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_u32(self, _v: u32) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_u64(self, _v: u64) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_u128(self, _v: u128) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_f32(self, _v: f32) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_f64(self, _v: f64) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_char(self, _v: char) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_str(self, _v: &str) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_bytes(self, _v: &[u8]) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_none(self) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_some<T: Serialize + ?Sized>(self, _v: &T) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_unit(self) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_unit_struct(self, _n: &'static str) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_unit_variant(
         self,
@@ -716,7 +716,7 @@ impl<'a> Serializer for RowDispatchSer<'a> {
         _i: u32,
         _v: &'static str,
     ) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
         self,
@@ -725,7 +725,7 @@ impl<'a> Serializer for RowDispatchSer<'a> {
         _v: &'static str,
         _val: &T,
     ) -> Result<(), NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_tuple_variant(
         self,
@@ -734,7 +734,7 @@ impl<'a> Serializer for RowDispatchSer<'a> {
         _v: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant, NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn serialize_struct_variant(
         self,
@@ -743,7 +743,7 @@ impl<'a> Serializer for RowDispatchSer<'a> {
         _v: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, NativeError> {
-        Err(NativeError::NotAStruct)
+        Err(NativeError::NotARow)
     }
     fn is_human_readable(&self) -> bool {
         false

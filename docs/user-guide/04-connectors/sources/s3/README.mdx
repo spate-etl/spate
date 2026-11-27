@@ -993,9 +993,9 @@ pipeline file and builds no sink. Build its feed with the backend's
 publish-only handle where it has one, such as the Kafka feed's
 [publish-only handle](../../feeds/kafka/README.mdx#a-publish-only-handle),
 which joins no group the workers read. It refuses the in-process feed, a section
-with no `location`, a feed other than the one the section names, a source
-and a call from a thread in a Tokio runtime context, such as async code or a
-`spawn_blocking` closure.
+with no `location`, a feed other than the one the section names, a `feed:` key
+that feed refuses, and a call from a thread in a Tokio runtime context, such as
+async code or a `spawn_blocking` closure.
 
 A unit the feed rejects as retryable is published again, up to five attempts,
 after waits of 200 ms, 400 ms, 800 ms and 1.6 s. A unit the feed refuses, or

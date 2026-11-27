@@ -313,7 +313,9 @@ impl S3Source {
     ///
     /// Fatal, before any store request, for a `location` that does not
     /// parse, the in-process feed, a durable feed with no `location`, a
-    /// `feed` other than the one `section` names, and a call from a thread in a Tokio runtime context:
+    /// `feed` other than the one `section` names, a key of `section` that
+    /// [`Feed::check_section`] refuses, and a call from a thread in a Tokio
+    /// runtime context:
     /// async code, a `spawn_blocking` closure, or a thread holding a
     /// `Handle::enter` guard. Fatal too for a store the source or its
     /// location cannot build from its URL and `store` options, another

@@ -3411,18 +3411,19 @@ fn a_memory_feed_passed_in_with_a_location_is_refused() {
 
 /// Pins that `run` asks a feed passed in code to check the section, for a
 /// feed given to `with_feed` and one given to `with_seeded_feed`, and that a
-/// refusal stops the run before the source is handed the feed.
+/// refusal stops the run before the source is handed the feed. The source
+/// refuses any feed it is handed, so a run that skips the check fails on the
+/// text.
 #[test]
 fn a_passed_feed_that_refuses_the_section_stops_the_run() {
     for seeded in [false, true] {
         let mut cfg = test_config(1);
         cfg.feed = feed_section("queue: {}\nattempt_cap: 3");
         let feed: Arc<dyn crate::feed::Feed> = Arc::new(RefusingFeed(MemoryFeed::new()));
-        let h = start_prepared(
+        let h = start_with(
             cfg,
             test_options(),
-            |log| log.accept_feed = true,
-            move |runtime, _| {
+            move |runtime| {
                 if seeded {
                     runtime.with_seeded_feed(feed)
                 } else {

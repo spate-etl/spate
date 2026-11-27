@@ -275,7 +275,7 @@ impl Endpoint {
         if let Some((user, password)) = &self.basic_auth {
             request = request.basic_auth(user, password.as_deref());
         }
-        let mut response = request.send().await.map_err(|e| self.failure(e))?;
+        let mut response = request.send().await.map_err(|e| self.client_error(e))?;
         let status = response.status();
         if !status.is_success() {
             let mut body = Vec::new();
@@ -290,12 +290,14 @@ impl Endpoint {
                 body: excerpt(&body),
             });
         }
-        let body = response.bytes().await.map_err(|e| self.failure(e))?;
+        let body = response.bytes().await.map_err(|e| self.client_error(e))?;
         serde_json::from_slice(&body)
             .map_err(|e| Failure::Transient(format!("unreadable registry response: {e}")))
     }
 
-    fn failure(&self, e: reqwest::Error) -> Failure {
+    /// The failure for a client error: `Rejected` when the TLS handshake was
+    /// refused, `Transient` otherwise.
+    fn client_error(&self, e: reqwest::Error) -> Failure {
         match spate_core::tls_rejection!(rustls, &e) {
             Some(tls) => Failure::Rejected(tls_reason(&self.registry, self.base.scheme(), tls)),
             None => Failure::Transient(chain(&e.without_url())),

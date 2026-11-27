@@ -313,8 +313,9 @@ pub(crate) enum WriteClass {
     Retryable,
 }
 
-/// Classify a failed write by the sink's table, except that an over-size
-/// message is refused.
+/// Classify a failed write by
+/// [`classify_producer_error`](crate::error::classify_producer_error)'s table,
+/// except that an over-size message is refused.
 pub(crate) fn classify_write(code: Option<RDKafkaErrorCode>) -> WriteClass {
     match code {
         Some(RDKafkaErrorCode::MessageSizeTooLarge) => WriteClass::Refused,

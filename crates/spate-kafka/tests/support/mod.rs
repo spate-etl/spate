@@ -311,7 +311,7 @@ pub(crate) fn log_end(brokers: &str, topic: &str, partition: i32) -> i64 {
     high_watermark(brokers, topic, partition, "read_uncommitted")
 }
 
-/// [`log_end`] as one client call, for a caller whose own wait reads again.
+/// [`log_end`] as one read, for a caller whose own wait reads again.
 pub(crate) fn log_end_once(brokers: &str, topic: &str, partition: i32) -> Result<i64, String> {
     high_watermark_once(brokers, topic, partition, "read_uncommitted")
 }
@@ -341,7 +341,7 @@ fn high_watermark(brokers: &str, topic: &str, partition: i32, isolation: &str) -
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// [`high_watermark`] as one client call.
+/// [`high_watermark`] as one read.
 fn high_watermark_once(
     brokers: &str,
     topic: &str,

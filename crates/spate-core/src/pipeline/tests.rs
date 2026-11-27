@@ -20,7 +20,7 @@ use crate::ops::{PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
-use crate::source::{LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
+use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
 use spate_test::{LogCapture, MetricSample, capture_logs, wait_until};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -7561,9 +7561,6 @@ impl Source for HookedSource {
     type Lane = FakeLane;
     fn component_type(&self) -> &str {
         "hooked"
-    }
-    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
-        self.inner.attach_metrics(cx);
     }
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         self.inner.open(ctx)

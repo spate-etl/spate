@@ -47,8 +47,9 @@ Some signals live inside the connector and nowhere else: per-partition lag that
 only the client can compute, an assignment callback firing. The framework
 defines the handle
 ([`SourceMetrics`](../07-reference/README.mdx)); the connector holds it and
-drives it. The handle arrives on `SourceCtx` at `open`; take it there, never
-through a builder of your own. What follows is a translation from what the
+drives it. The handle arrives in the `SourceMetricsCtx` that
+`Source::attach_metrics` receives before `open`. Take it there, never through a
+builder of your own. What follows is a translation from what the
 client reports into what the series means. A shipped source's translation, as a
 worked reference
 ([`spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs)):
@@ -63,8 +64,9 @@ publication is restricted to the partitions this member still owns.
 
 The handle is resolved once at build time and injected; the connector never
 looks up a metric name on the hot path, it only calls methods on a handle it was
-handed. Lag is the *only* part of it a source drives: take `ctx.stage_metrics`
-at `open` and call `set_partition_lag` and `retain_partitions`. Leave the rest
+handed. Lag is the *only* part of it a source drives: keep `stage_metrics` from
+the context in `attach_metrics` and call `set_partition_lag` and
+`retain_partitions`. Leave the rest
 alone. Records, bytes, poll duration, rebalance counts, and active lanes are
 all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
@@ -72,11 +74,11 @@ The rebalance counter counts one `assign` for each `LanesAssigned` and one
 `revoke` for each `LanesRevoked`, whatever the lane count. `LanesAdded` and
 `LanesRetired` count nothing.
 
-:::danger Take the handle from `SourceCtx`
+:::danger Take the handle from `SourceMetricsCtx`
 Publish only measured values, and clean up what you lose. Every one of these is
 scar tissue.
 
-**Take the handle from `SourceCtx`.** A builder the runtime cannot reach is
+**Take the handle from `SourceMetricsCtx`.** A builder the runtime cannot reach is
 dead code, not an option: the runtime registers the series either way, so a
 connector that never receives its handle leaves the gauge rendering a permanent
 `0`. That is worst for lag, where a maximally backlogged source
@@ -326,10 +328,11 @@ or the prefix.
   so it must be a distinct, non-reserved segment: the defaults (`"source"`,
   `"custom"`) opt out (see below), and `"custom"` in particular is reserved for
   pipeline-author metrics.
-- **Receive the `Meter`.** A source reads `Option<Meter>` from `SourceCtx` in
-  `open`; a sink's writer overrides `ShardWriter::attach_metrics`, which the
-  builder calls once before the writer is shared, with a `SinkMetricsCtx`
-  holding the `Meter`. The runtime scopes it by **role**, `source` or `sink`
+- **Receive the `Meter`.** A source overrides `Source::attach_metrics`, which
+  the runtime calls once before `configure_feed` and `open`, with a
+  `SourceMetricsCtx` holding the `Meter`. A sink's writer overrides
+  `ShardWriter::attach_metrics`, which the builder calls once before the writer
+  is shared, with a `SinkMetricsCtx` holding the `Meter`. The runtime scopes it by **role**, `source` or `sink`
   derived from the wiring position, so one crate's source families land under
   `spate_<namespace>_source_*` and its sink families under
   `spate_<namespace>_sink_*`, under distinct names. The connector's code is
@@ -353,21 +356,20 @@ or the prefix.
   forwards both methods to the inner one, and `check_source_framing` too.
 
 The source's two methods below are a shape rather than a program: the
-`impl Source for` header is left out and the rest of `open` is elided at the
-`// ...`, so this fence is written to be read rather than compiled.
+`impl Source for` header is left out, so this fence is written to be read
+rather than compiled.
 
 ```rust
-// A source, in open():
+// A source:
 fn component_type(&self) -> &str { "kafka" }
-fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
-    if let Some(m) = &ctx.meter {
+fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+    if let Some(m) = &cx.meter {
         self.queued = Some(m.gauge("fetch_queue_messages", &[])); // spate_kafka_source_fetch_queue_messages
     }
-    // ...
 }
 ```
 
-`SourceCtx` carries `per_partition_detail` (the `metrics` config flag), and so
+`SourceMetricsCtx` carries `per_partition_detail` (the `metrics` config flag), and so
 does the `FeedMetricsCtx` a feed backend receives; the sink's `SinkMetricsCtx`
 carries none. The flag lets a connector's own per-partition families honor the
 operator's cardinality choice. It gates your

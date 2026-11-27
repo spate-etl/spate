@@ -2116,7 +2116,7 @@ mod tests {
     }
 
     /// Regression: the runtime must hand the source the framework's
-    /// source-stage handles at `open`.
+    /// source-stage handles, through `attach_metrics` before `open`.
     ///
     /// `SourceMetrics::set_partition_lag` has exactly one possible caller, the
     /// source, because only the client can see the log end. When those handles
@@ -2128,7 +2128,7 @@ mod tests {
     /// `a_backlogged_consumer_publishes_its_lag` covers the value arriving,
     /// which this test does not.
     #[test]
-    fn source_open_receives_the_stage_metrics() {
+    fn source_receives_the_stage_metrics_before_open() {
         let (source, shared, script) = FakeSource::new();
         script
             .lock()
@@ -2158,11 +2158,17 @@ mod tests {
         shutdown.trigger();
         join.join().unwrap().unwrap();
 
-        assert!(
-            shared.lock().unwrap().stage_metrics_attached,
-            "the runtime must share SourceMetrics with the source at open, \
+        let log = shared.lock().unwrap();
+        assert_eq!(
+            log.metrics_attached
+                .iter()
+                .map(|m| m.stage_metrics)
+                .collect::<Vec<_>>(),
+            [true],
+            "the runtime must share SourceMetrics with the source once, \
              or consumer lag can never be published"
         );
+        assert_eq!(log.hooks, ["attach_metrics", "open"]);
     }
 
     /// The whole-builder happy path through `run()` (not `into_runtime`),

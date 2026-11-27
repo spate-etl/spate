@@ -20,7 +20,7 @@ use crate::ops::{PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
-use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
+use crate::source::{LaneId, Source, SourceCtx, SourceEvent, SourceMetricsCtx};
 use spate_test::{LogCapture, MetricSample, capture_logs, wait_until};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3946,6 +3946,91 @@ fn a_feed_backend_whose_key_cannot_scope_a_family_receives_no_meter() {
     }
 }
 
+/// Pins that the runtime hands the source its metrics before it hands it the
+/// feed, and before `open`.
+#[test]
+fn a_source_receives_its_metrics_before_the_feed_and_open() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    let h = start_prepared(
+        cfg,
+        test_options(),
+        |log| log.accept_feed = true,
+        |runtime, _| runtime,
+        ok_chain,
+    );
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        h.shared.lock().unwrap().hooks,
+        ["attach_metrics", "configure_feed", "open"]
+    );
+}
+
+/// Pins that the runtime hands a source its pipeline's
+/// `metrics.per_partition_detail` and the stage handles, once.
+#[test]
+fn a_source_receives_the_pipelines_per_partition_detail() {
+    for detail in [false, true] {
+        let mut cfg = test_config(1);
+        cfg.metrics.per_partition_detail = detail;
+        let h = start_prepared(cfg, test_options(), |_| {}, |runtime, _| runtime, ok_chain);
+        h.script.lock().unwrap().push_back(Script::Drained);
+        let report = h.join.join().unwrap().unwrap();
+        assert_eq!(report.state, ExitState::Completed, "{detail}");
+        assert_eq!(
+            h.shared.lock().unwrap().metrics_attached,
+            [MetricsAttached {
+                meter: false,
+                stage_metrics: true,
+                per_partition_detail: detail,
+            }],
+            "{detail}"
+        );
+    }
+}
+
+/// Pins that a source whose `component_type` can scope a family receives a
+/// `Meter` scoped to the source role, and that a handle it resolves in
+/// `attach_metrics` reaches the runtime's exposition.
+#[test]
+fn a_source_receives_a_meter_scoped_to_the_source_role() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let settings = crate::pipeline::metrics_settings(&cfg);
+    let h = start_prepared(
+        cfg,
+        test_options(),
+        |log| log.component_type = Some("probe"),
+        |runtime, _| runtime,
+        ok_chain,
+    );
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    // The runtime's own install, taken after it: in a process of its own, as
+    // nextest runs it, a handle resolved before the recorder existed would
+    // render nothing here.
+    let handle = crate::metrics::install(&settings).expect("the runtime's exporter");
+    let rendered = handle.render();
+    assert_eq!(
+        spate_test::metric_value(
+            &rendered,
+            "spate_probe_source_attached_total",
+            &[
+                ("pipeline", pipeline_name.as_str()),
+                ("component", "source"),
+                ("component_type", "probe"),
+            ],
+        ),
+        Some(1.0),
+        "{rendered}"
+    );
+}
+
 /// Pins that `run` passes a `location` beside a backend other than the
 /// in-process feed on to the feed checks that follow.
 #[test]
@@ -4152,7 +4237,7 @@ fn no_admin_listener_still_drains_and_completes() {
 /// a shadow and `spate_source_lag_records` would go silent again, as it did
 /// for fourteen days.
 ///
-/// `FakeSource` publishes `FAKE_SOURCE_LAG` for partition 0 at `open`, through
+/// `FakeSource` publishes `FAKE_SOURCE_LAG` for partition 0 in `attach_metrics`, through
 /// whatever handle set it was given. A per-partition gauge registers on its
 /// first published value, so a shadowed controller leaves the series *absent*.
 /// Flip `SourceMetrics::shadow` to `try_new` in `runtime.rs` and this test
@@ -7476,6 +7561,9 @@ impl Source for HookedSource {
     type Lane = FakeLane;
     fn component_type(&self) -> &str {
         "hooked"
+    }
+    fn attach_metrics(&mut self, cx: SourceMetricsCtx) {
+        self.inner.attach_metrics(cx);
     }
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         self.inner.open(ctx)

@@ -7,7 +7,7 @@
 //! source and Kafka feed. `KafkaSource::publish_stats` drains it on the
 //! source's controller thread, and the feed's consumer thread drains the
 //! feed's. All fixed handles are resolved from the runtime-minted
-//! [`Meter`](spate_core::metrics::Meter) once, at `open` or at the feed's
+//! [`Meter`](spate_core::metrics::Meter) once, in the source's or the feed's
 //! `attach_metrics`; per-broker and per-partition handles are registered
 //! lazily on first sighting, on a control-plane path and never per record.
 //!

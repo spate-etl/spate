@@ -1,8 +1,8 @@
 //! Connector-owned metric families, registered through the source's [`Meter`]
 //! (namespace `datagen`, role `source` → `spate_datagen_source_*`).
 //!
-//! Every handle is resolved once at `open` and never on the record path
-//! (INV-8). The `event_type` label has three values and exactly three
+//! Every handle is resolved once in `attach_metrics` and never on the record
+//! path (INV-8). The `event_type` label has three values and exactly three
 //! pre-registered handles behind it; a lane tallies a batch by index and adds
 //! the three totals at the batch boundary, so no name is resolved and no
 //! counter is touched per record.
@@ -14,7 +14,7 @@
 //! Both run on that one thread, so each series has exactly one live writer.
 //!
 //! This source registers no `spate_source_lag_records` and leaves
-//! `SourceCtx::stage_metrics` untouched: lag for an unbounded generator is
+//! `SourceMetricsCtx::stage_metrics` untouched: lag for an unbounded generator is
 //! infinite, so the series would exist or not depending on whether `count` was
 //! set.
 

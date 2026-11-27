@@ -319,9 +319,6 @@ Resolve a component's metric handles in its `attach_metrics` hook, from the cont
 
 **Follow:** [`crates/spate-json/src/deser.rs`](repo:crates/spate-json/src/deser.rs).
 
-**Departs:** a source reads its `Meter` from `SourceCtx` in `open`, because `Source` has no `attach_metrics` ([#2320](https://github.com/spate-etl/spate/issues/2320)).
-Until it does, a new source reads it from `SourceCtx`.
-
 **Checked by:** review.
 
 ### Hold its metric handles in one struct

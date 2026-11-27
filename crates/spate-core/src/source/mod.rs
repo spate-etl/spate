@@ -236,13 +236,53 @@ pub struct SourceCtx {
     /// every lane they construct; each lane issues one [`AckRef`] per poll
     /// batch (`issue(partition, last_offset)`).
     pub issuer: AckIssuer,
-    /// A [`Meter`] scoped `spate_<component_type>_source_*` for the source's own
-    /// metric families (e.g. consumer lag, broker statistics), pre-labeled
-    /// with the standard `pipeline`/`component`/`component_type`. `None` unless
-    /// the source declared a [`Source::component_type`] that is a usable,
+    /// The pipeline thread count the runtime resolved, the value
+    /// `spate_pipeline_threads` reports, for a source that sizes its read
+    /// parallelism from it. `None` only when the source is driven outside a
+    /// pipeline (tests, or a direct `open` call).
+    pub threads: Option<NonZeroUsize>,
+    /// The run's stop. A feed-reading source reads it to stop receiving and to answer
+    /// [`Source::reading_on_stop`].
+    pub stop: StopSignal,
+}
+
+impl SourceCtx {
+    /// Context wrapping the checkpointer's issuer.
+    #[must_use]
+    pub fn new(issuer: AckIssuer) -> Self {
+        SourceCtx {
+            issuer,
+            threads: None,
+            stop: StopSignal::default(),
+        }
+    }
+
+    /// Attach the run's stop. Called by the runtime.
+    #[must_use]
+    pub fn with_stop(mut self, stop: StopSignal) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    /// Attach the pipeline thread count. Called by the runtime.
+    #[must_use]
+    pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.threads = threads;
+        self
+    }
+}
+
+/// What the runtime hands a source for its metrics, through
+/// [`Source::attach_metrics`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SourceMetricsCtx {
+    /// Scoped `spate_<component_type>_source_*` for the source's own metric
+    /// families (e.g. consumer lag, broker statistics), and pre-labeled with
+    /// the standard `pipeline`/`component`/`component_type`. `None` unless the
+    /// source declared a [`Source::component_type`] that is a usable,
     /// non-reserved namespace. A reserved default (`"source"`) opts out
-    /// silently, and a malformed value is logged and also yields `None`. Resolve
-    /// handles from it once here in `open`; never on the poll path.
+    /// silently, and a malformed value is logged and also yields `None`.
     pub meter: Option<Meter>,
     /// The framework's own source-stage handles (`spate_source_*`), shared with
     /// the controller. A source that can observe its own consumer lag
@@ -250,8 +290,8 @@ pub struct SourceCtx {
     /// [`SourceMetrics::retain_partitions`] have no other caller, because the
     /// framework cannot compute lag without the client's view of the log end,
     /// nor tell which partitions the client still owns. `None` only when the
-    /// source is driven outside a pipeline (tests, or a direct `open` call),
-    /// in which case lag goes unpublished.
+    /// caller attached none, as a test may, in which case lag goes
+    /// unpublished.
     ///
     /// Everything else on these handles (records, bytes, poll duration,
     /// rebalances, active lanes) is recorded by the runtime itself; a source
@@ -264,53 +304,45 @@ pub struct SourceCtx {
     /// `spate_source_lag_records`; consumer lag has no aggregate series to fall
     /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
-    /// The pipeline thread count the runtime resolved, the value
-    /// `spate_pipeline_threads` reports, for a source that sizes its read
-    /// parallelism from it. `None` only when the source is driven outside a
-    /// pipeline (tests, or a direct `open` call).
-    pub threads: Option<NonZeroUsize>,
-    /// The run's stop. A feed-reading source reads it to stop receiving and to answer
-    /// [`Source::reading_on_stop`].
-    pub stop: StopSignal,
 }
 
-impl SourceCtx {
-    /// Context wrapping the checkpointer's issuer. The custom-metrics
-    /// [`meter`](Self::meter) is `None`; the runtime attaches one via
-    /// [`with_meter`](Self::with_meter).
+impl SourceMetricsCtx {
+    /// Context carrying `meter`, with no stage handles and per-partition
+    /// detail off. Sources outside this crate construct it here, as the
+    /// struct is `#[non_exhaustive]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::metrics::{Meter, render_local};
+    /// use spate_core::source::SourceMetricsCtx;
+    ///
+    /// let meter = Meter::with_namespace("probe_source", "orders", "source", "probe");
+    /// let cx = SourceMetricsCtx::new(Some(meter)).with_partition_detail(true);
+    /// assert!(cx.per_partition_detail);
+    /// assert!(cx.stage_metrics.is_none());
+    ///
+    /// let meter = cx.meter.expect("a scoped Meter");
+    /// let text = render_local(|| meter.counter("polls_total", &[]).increment(1));
+    /// assert!(text.lines().any(|l| {
+    ///     l == r#"spate_probe_source_polls_total{pipeline="orders",component="source",component_type="probe"} 1"#
+    /// }));
+    /// ```
     #[must_use]
-    pub fn new(issuer: AckIssuer) -> Self {
-        SourceCtx {
-            issuer,
-            meter: None,
+    pub fn new(meter: Option<Meter>) -> Self {
+        SourceMetricsCtx {
+            meter,
             stage_metrics: None,
             per_partition_detail: false,
-            threads: None,
-            stop: StopSignal::default(),
         }
-    }
-
-    /// Attach the source's custom-metrics scope. Called by the runtime, which
-    /// builds it from the source's `component_type`.
-    #[must_use]
-    pub fn with_meter(mut self, meter: Option<Meter>) -> Self {
-        self.meter = meter;
-        self
     }
 
     /// Share the framework's source-stage handles so the source can publish
     /// the one series only it can measure, consumer lag. Called by the
     /// runtime with the same instance the controller records against.
     #[must_use]
-    pub fn with_stage_metrics(mut self, metrics: Option<Arc<SourceMetrics>>) -> Self {
-        self.stage_metrics = metrics;
-        self
-    }
-
-    /// Attach the run's stop. Called by the runtime.
-    #[must_use]
-    pub fn with_stop(mut self, stop: StopSignal) -> Self {
-        self.stop = stop;
+    pub fn with_stage_metrics(mut self, metrics: Arc<SourceMetrics>) -> Self {
+        self.stage_metrics = Some(metrics);
         self
     }
 
@@ -319,13 +351,6 @@ impl SourceCtx {
     #[must_use]
     pub fn with_partition_detail(mut self, enabled: bool) -> Self {
         self.per_partition_detail = enabled;
-        self
-    }
-
-    /// Attach the pipeline thread count. Called by the runtime.
-    #[must_use]
-    pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
-        self.threads = threads;
         self
     }
 }
@@ -339,7 +364,7 @@ pub trait Source: Send {
     /// The `component_type` metric label for this source (e.g. `"kafka"`),
     /// mirroring [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
     /// on the sink side. It is also the namespace of the source's custom-metrics
-    /// [`Meter`](SourceCtx::meter): declaring `"kafka"` scopes the source's own
+    /// [`Meter`](SourceMetricsCtx::meter): declaring `"kafka"` scopes the source's own
     /// families under `spate_kafka_source_*`. The default `"source"` is a reserved
     /// root, so a source that does not override this gets no custom `Meter`
     /// (its framework stage metrics are unaffected).
@@ -357,6 +382,16 @@ pub trait Source: Send {
     fn framing_contract(&self) -> FramingContract {
         FramingContract::WholePayload
     }
+
+    /// Receive the [`SourceMetricsCtx`]: the source's own [`Meter`], the
+    /// framework's stage handles and the per-partition setting. The runtime
+    /// calls this once, before [`configure_feed`](Self::configure_feed) and
+    /// [`open`](Self::open); resolve handles here and keep them, never on the
+    /// poll path. A source driven outside a pipeline receives it only if its
+    /// caller makes the call. The default ignores it.
+    ///
+    /// A source that wraps another passes it on.
+    fn attach_metrics(&mut self, _cx: SourceMetricsCtx) {}
 
     /// Accept the pipeline's `feed:` section and the feed it names. The
     /// runtime calls this once, before [`open`](Self::open) and before the
@@ -515,8 +550,9 @@ impl SourceLane for DefaultLane {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceCtx, StopSignal};
+    use super::{SourceCtx, SourceMetricsCtx, StopSignal};
     use crate::checkpoint::Checkpointer;
+    use crate::metrics::{ComponentLabels, SourceMetrics};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -544,14 +580,23 @@ mod tests {
         assert!(!stop.is_set() && !clone.is_set());
     }
 
+    /// Pins that a metrics context carries no stage handles and no
+    /// per-partition detail unless they are attached, and carries what is.
     #[test]
-    fn source_ctx_partition_detail_defaults_off_and_round_trips() {
-        let cp = Checkpointer::new();
-        let ctx = SourceCtx::new(cp.handle());
-        assert!(!ctx.per_partition_detail);
-        assert!(ctx.meter.is_none());
-        let ctx = SourceCtx::new(cp.handle()).with_partition_detail(true);
-        assert!(ctx.per_partition_detail);
+    fn source_metrics_ctx_defaults_off_and_round_trips() {
+        let cx = SourceMetricsCtx::new(None);
+        assert!(cx.meter.is_none());
+        assert!(cx.stage_metrics.is_none());
+        assert!(!cx.per_partition_detail);
+
+        let stage = Arc::new(SourceMetrics::new(&ComponentLabels::new(
+            "p", "source", "probe",
+        )));
+        let cx = SourceMetricsCtx::new(None)
+            .with_stage_metrics(Arc::clone(&stage))
+            .with_partition_detail(true);
+        assert!(cx.per_partition_detail);
+        assert!(cx.stage_metrics.is_some_and(|m| Arc::ptr_eq(&m, &stage)));
     }
 
     /// Pins that a context carries no thread count unless one is attached,

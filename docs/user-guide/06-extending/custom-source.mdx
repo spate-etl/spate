@@ -281,6 +281,10 @@ exactly this with the memory source, and
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
 
+To test the source's own metrics, call `attach_metrics` with a
+`SourceMetricsCtx` before `open`, as the runtime does. A source driven without
+that call receives no `Meter` and no stage handles.
+
 ## Feed-reading sources
 
 A source whose input is a queue of

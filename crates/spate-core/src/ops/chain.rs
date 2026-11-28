@@ -628,7 +628,10 @@ where
                 *fatal += 1;
                 return Step::Fatal(self.ops.take_fatal().unwrap_or_else(|| FatalError {
                     component: "deserializer".to_string(),
-                    reason: e.reason().to_owned(),
+                    reason: match std::error::Error::source(&e) {
+                        Some(source) => format!("{}: {}", e.reason(), crate::error::chain(source)),
+                        None => e.reason().to_owned(),
+                    },
                 }));
             }
             Err(e) => {
@@ -639,7 +642,7 @@ where
                             DESER_SKIP_WARN,
                             partition = raw.partition.0,
                             offset = raw.offset,
-                            error = %e,
+                            error = %crate::error::chain(&e),
                             "payload skipped by deserializer error policy"
                         );
                     }
@@ -649,7 +652,7 @@ where
                         // recorded ahead of this error and reports instead.
                         return Step::Fatal(self.ops.take_fatal().unwrap_or_else(|| FatalError {
                             component: "deserializer".to_string(),
-                            reason: e.to_string(),
+                            reason: crate::error::chain(&e),
                         }));
                     }
                 }

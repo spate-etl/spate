@@ -507,7 +507,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         thread: params.thread,
                         error: FatalError {
                             component: format!("driver-{}", params.thread),
-                            reason: format!("source poll failed: {e}"),
+                            reason: format!("source poll failed: {}", crate::error::chain(&e)),
                         },
                     });
                     fatal_reported = true;
@@ -520,7 +520,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     crate::rate_limited_warn!(
                         POLL_ERROR_WARN,
                         thread = params.thread,
-                        error = %e,
+                        error = %crate::error::chain(&e),
                         "retryable source poll error"
                     );
                 }

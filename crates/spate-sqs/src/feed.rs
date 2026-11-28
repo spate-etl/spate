@@ -383,7 +383,9 @@ impl Shared {
     fn set_fatal(&self, e: &CallError) {
         let (error, first, sending, queued, close) = {
             let mut st = self.lock();
-            let (error, first) = st.signal.latch(&e.message);
+            let (error, first) = st
+                .signal
+                .latch(FeedError::new(FeedErrorKind::Fatal, e.message.as_str()));
             (
                 error,
                 first,
@@ -1220,7 +1222,8 @@ async fn receive_task(shared: Arc<Shared>) {
                 {
                     let mut st = shared.lock();
                     ended(&mut st);
-                    st.signal.fail_soon(e.message);
+                    st.signal
+                        .fail_soon(FeedError::new(FeedErrorKind::Retryable, e.message));
                 }
                 shared.progress.notify_one();
                 // Real time: it paces retries and no deadline reads it.

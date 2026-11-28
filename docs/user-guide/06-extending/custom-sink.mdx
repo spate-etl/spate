@@ -54,9 +54,10 @@ Contracts:
   type can never match the target schema) and every subsequent record would
   fail identically. See
   [Error handling](../02-concepts/04-error-handling.mdx).
-- **Error text is logged.** Spate writes a `SinkError`'s text to the `WARN`
-  line for a skipped record and uses it as the pipeline's failure reason. Keep
-  the record's content out of that text.
+- **Error text is logged.** Spate writes a `SinkError`'s text and its source
+  chain to the `WARN` line for a skipped record and uses them as the
+  pipeline's failure reason. Keep the record's content out of that text and out
+  of the text and `Debug` of any error you attach.
 - **The terminal stage clones one encoder per shard**, which is why the type is
   `Clone`. Shards never share encoder state, so anything you buffer is private
   to one shard and you do not need to synchronize it.
@@ -114,8 +115,10 @@ the frames) happens when the worker calls it, not when the future is polled:
   `checkpoint.stalled_fail_after` eventually fails the pipeline so the data
   replays after restart). A
   [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
-  fails each unit in the batch back to its feed instead. The error's message is
-  the reason that failure reports, so make it name the cause. A rejected
+  fails each unit in the batch back to its feed instead. The failure reports
+  the error's reason followed by its source chain. Write the reason as what the
+  sink was doing, and attach the client's error with `with_source` so its text
+  appears once. A rejected
   credential or TLS handshake is `Fatal`, and a failure to obtain credentials or
   reach the server is `Retryable`
   ([ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)).
@@ -123,7 +126,8 @@ the frames) happens when the worker calls it, not when the future is polled:
   wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that
   reject a handshake. With a rustls client,
   `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the rule,
-  and `spate::tls_reason!` gives the rejection's reason text.
+  and `spate::tls_hint!` gives a hint for the reason when the server's
+  certificate comes from an issuer the client does not trust.
 - **Bound the write.** Give the underlying client a request timeout and let the
   retry policy handle the failure, and never block the thread inside
   `write_batch`. At the

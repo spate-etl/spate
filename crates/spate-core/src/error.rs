@@ -106,7 +106,10 @@ macro_rules! role_error_accessors {
             /// [`source`](std::error::Error::source) returns.
             ///
             /// The source's text and `Debug` follow the rules for the reason:
-            /// no credential, and no record or payload content.
+            /// no credential, and no record or payload content. The source is
+            /// for logging through [`chain`](crate::error::chain); decide by
+            /// `kind()` or `class()`, since the source's type can change when
+            /// Spate updates a client crate.
             #[must_use]
             pub fn with_source(
                 mut self,
@@ -482,19 +485,27 @@ pub fn find_source<'a, T: std::error::Error + 'static>(
 /// [`std::io::Error`]'s `Display` already prints the error it wraps, so
 /// following that error as well would print its text twice.
 ///
-/// ```
-/// use spate_core::error::chain;
+/// A link whose text the link before it already ends with is left out, since
+/// many client errors print their source in their own text.
 ///
-/// let err = std::io::Error::other("connection reset");
-/// assert_eq!(chain(&err), "connection reset");
+/// ```
+/// use spate_core::error::{SourceError, chain};
+///
+/// let err = SourceError::retryable("listing").with_source(std::io::Error::other("connection reset"));
+/// assert_eq!(chain(&err), "source error (Retryable): listing: connection reset");
 /// ```
 #[must_use]
 pub fn chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut rendered = err.to_string();
+    let mut previous = rendered.clone();
     let mut next = err.source();
     while let Some(source) = next {
-        rendered.push_str(": ");
-        rendered.push_str(&source.to_string());
+        let text = source.to_string();
+        if !previous.ends_with(&text) {
+            rendered.push_str(": ");
+            rendered.push_str(&text);
+        }
+        previous = text;
         next = source.source();
     }
     rendered
@@ -555,6 +566,42 @@ macro_rules! tls_reason {
     }};
 }
 
+/// How to trust the issuer of a certificate the client rejected, as an
+/// `Option<String>`: `Some` for a certificate from an issuer the client does
+/// not trust, and `None` for any other TLS error.
+///
+/// A connector puts the hint in its error's reason and attaches the client's
+/// error as the source, which already carries the TLS error's text. The
+/// arguments are those of [`tls_reason!`].
+///
+/// ```ignore
+/// let hint = spate::tls_hint!(rustls, tls, Some("tls.root_ca"));
+/// ```
+#[macro_export]
+macro_rules! tls_hint {
+    ($($rustls:ident)::+, $tls:expr, $key:expr) => {{
+        let tls: &$($rustls)::+::Error = $tls;
+        let unknown_issuer = matches!(
+            tls,
+            $($rustls)::+::Error::InvalidCertificate(
+                $($rustls)::+::CertificateError::UnknownIssuer
+            )
+        );
+        $crate::error::tls_hint_text(unknown_issuer, $key)
+    }};
+}
+
+/// The text [`tls_hint!`] returns, given whether the error is an unknown
+/// issuer.
+#[doc(hidden)]
+#[must_use]
+pub fn tls_hint_text(unknown_issuer: bool, key: Option<&str>) -> Option<String> {
+    unknown_issuer.then(|| match key {
+        Some(key) => format!("add the issuing CA to the system trust store or `{key}`"),
+        None => "add the issuing CA to the system trust store".to_owned(),
+    })
+}
+
 /// The text [`tls_reason!`] returns, given whether the error is an unknown
 /// issuer.
 #[doc(hidden)]
@@ -564,16 +611,10 @@ pub fn tls_reason_text(
     unknown_issuer: bool,
     key: Option<&str>,
 ) -> String {
-    let mut reason = tls.to_string();
-    if unknown_issuer {
-        reason.push_str("; add the issuing CA to the system trust store");
-        if let Some(key) = key {
-            reason.push_str(" or `");
-            reason.push_str(key);
-            reason.push('`');
-        }
+    match tls_hint_text(unknown_issuer, key) {
+        Some(hint) => format!("{tls}; {hint}"),
+        None => tls.to_string(),
     }
-    reason
 }
 
 #[cfg(test)]
@@ -605,6 +646,32 @@ mod tests {
         assert_eq!(
             crate::tls_reason!(rustls, &general, Some("tls.root_ca")),
             "unexpected error: reset"
+        );
+    }
+
+    /// An unknown issuer gives a hint naming the system trust store, and the
+    /// key when there is one; any other TLS error gives none.
+    #[test]
+    fn tls_hint_only_for_an_unknown_issuer() {
+        use rustls::{CertificateError, Error as Tls};
+        let unknown = Tls::InvalidCertificate(CertificateError::UnknownIssuer);
+        assert_eq!(
+            crate::tls_hint!(rustls, &unknown, Some("tls.root_ca")).as_deref(),
+            Some("add the issuing CA to the system trust store or `tls.root_ca`")
+        );
+        assert_eq!(
+            crate::tls_hint!(rustls, &unknown, None).as_deref(),
+            Some("add the issuing CA to the system trust store")
+        );
+        let expired = Tls::InvalidCertificate(CertificateError::Expired);
+        assert_eq!(
+            crate::tls_hint!(rustls, &expired, Some("tls.root_ca")),
+            None
+        );
+        let general = Tls::General("reset".into());
+        assert_eq!(
+            crate::tls_hint!(rustls, &general, Some("tls.root_ca")),
+            None
         );
     }
 
@@ -883,6 +950,54 @@ mod tests {
     #[test]
     fn chain_joins_every_link() {
         assert_eq!(chain(&Outer(Middle(Target(3)))), "outer: middle: target 3");
+    }
+
+    /// An error with fixed text and an optional source.
+    #[derive(Debug)]
+    struct Link(&'static str, Option<Box<Link>>);
+
+    impl std::fmt::Display for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|l| l as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    fn links(texts: &[&'static str]) -> Link {
+        texts
+            .iter()
+            .rev()
+            .fold(None, |source, text| Some(Link(text, source.map(Box::new))))
+            .expect("at least one link")
+    }
+
+    /// A source whose text its parent already ends with is printed once, and
+    /// the links after it still follow.
+    #[test]
+    fn chain_prints_a_repeated_source_once() {
+        let err = links(&["outer: middle", "middle", "target"]);
+        assert_eq!(chain(&err), "outer: middle: target");
+    }
+
+    /// Two adjacent links with the same text print once.
+    #[test]
+    fn chain_collapses_equal_links() {
+        assert_eq!(chain(&links(&["same", "same", "target"])), "same: target");
+    }
+
+    /// A source whose text appears in its parent's text, though not at its
+    /// end, is printed.
+    #[test]
+    fn chain_keeps_a_source_its_parent_only_mentions() {
+        let err = links(&["x middle y", "middle"]);
+        assert_eq!(chain(&err), "x middle y: middle");
     }
 
     /// The error an `io::Error` wraps renders once, through the `io::Error`'s

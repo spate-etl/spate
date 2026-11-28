@@ -173,8 +173,9 @@ the line.
 ## Errors
 
 Choose a TLS stack whose rejections `spate::tls_rejection!` can read, which is
-rustls. `spate::tls_reason!` gives the reason text for a rustls error, and for
-a certificate from an unknown issuer adds where to install its CA. Pass it the
+rustls. Attach the client's error to the role error with `with_source`, which
+carries the TLS error's text. For a certificate from an unknown issuer,
+`spate::tls_hint!` gives where to install its CA, for the reason. Pass it the
 `root_ca` key only when the connector accepts that key. Classify the client's
 errors as [Custom sinks](custom-sink.mdx) and
 [Custom sources](custom-source.mdx) describe: a rejected credential or TLS

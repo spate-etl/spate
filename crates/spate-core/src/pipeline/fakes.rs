@@ -23,6 +23,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+/// The client error a scripted failure carries as its source.
+#[derive(Debug, thiserror::Error)]
+#[error("scripted cause")]
+pub(crate) struct ScriptedCause;
+
 /// Once `polled` has been polled, the first finished `finished()` read of
 /// `lane` that directly follows a finished read of `after` signals `reached`
 /// and blocks until `go` fires.
@@ -248,7 +253,7 @@ impl Source for FakeSource {
             let mut log = self.shared.lock().unwrap();
             log.hooks.push("open");
             if log.fail_open {
-                return Err(SourceError::fatal("scripted open failure"));
+                return Err(SourceError::fatal("scripted open failure").with_source(ScriptedCause));
             }
             log.opened = true;
             log.threads = ctx.threads;
@@ -351,7 +356,9 @@ impl Source for FakeSource {
             return Err(SourceError::retryable("the stop began during this commit"));
         }
         if log.fatal_commits {
-            return Err(SourceError::fatal("scripted fatal commit failure"));
+            return Err(
+                SourceError::fatal("scripted fatal commit failure").with_source(ScriptedCause)
+            );
         }
         if let Some(e) = log.commit_errors.pop_front() {
             return Err(e);

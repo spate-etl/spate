@@ -16,6 +16,11 @@ metrics. A record has no dead-letter queue, and nothing is dropped silently.
 | **Record-level** | A payload that won't deserialize, a `try_map` closure returning `Err` | Subject to the per-stage policy: **Skip** or **Fail** (below). |
 | **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option, a deserializer that can decode nothing further (a schema source that rejects its credentials, say) | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. A sink write reaches Failed through the stalled-watermark limit below. |
 
+An error can carry the client error that caused it as its source. Spate logs
+the source with the error, and the failure reason ends with it. Decide in code by
+the error's class: the source is there for logging, and its type can change
+when Spate updates a client crate.
+
 ## Record-level policy: Skip or Fail — nothing else
 
 - **Skip**: count the record on a metric, resolve its acknowledgment as

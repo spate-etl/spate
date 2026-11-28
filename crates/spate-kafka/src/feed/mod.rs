@@ -380,7 +380,9 @@ impl Core {
     pub(crate) fn latch(&self, reason: &str) -> FeedError {
         let (error, first, close) = {
             let mut st = self.lock();
-            let (error, first) = st.signal.latch(reason);
+            let (error, first) = st
+                .signal
+                .latch(FeedError::new(FeedErrorKind::Fatal, reason));
             st.resends.clear();
             (error, first, st.close.take())
         };

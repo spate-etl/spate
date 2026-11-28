@@ -2103,10 +2103,9 @@ fn a_fatal_final_commit_fails_the_run_with_its_reason() {
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal final commit must fail the run");
     };
-    assert!(
-        failure.reason.contains("commit failed fatally"),
-        "{}",
-        failure.reason
+    assert_eq!(
+        failure.reason,
+        "commit failed fatally: source error (Fatal): scripted fatal commit failure: scripted cause"
     );
 }
 
@@ -2646,10 +2645,9 @@ fn a_fatal_commit_fails_the_run() {
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal commit must fail the run");
     };
-    assert!(
-        failure.reason.contains("commit failed fatally"),
-        "{}",
-        failure.reason
+    assert_eq!(
+        failure.reason,
+        "commit failed fatally: source error (Fatal): scripted fatal commit failure: scripted cause"
     );
 }
 
@@ -2708,7 +2706,7 @@ fn a_fatal_lane_poll_error_fails_the_run() {
         .lock()
         .unwrap()
         .lane_poll_errors
-        .push_back(SourceError::fatal("scripted poll failure"));
+        .push_back(SourceError::fatal("scripted poll failure").with_source(ScriptedCause));
     assign_one_lane(&h, &[0..5, 5..10]);
     wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
@@ -2718,8 +2716,34 @@ fn a_fatal_lane_poll_error_fails_the_run() {
     assert_eq!(failure.component, "driver-0");
     assert_eq!(
         failure.reason,
-        "source poll failed: source error (Fatal): scripted poll failure"
+        "source poll failed: source error (Fatal): scripted poll failure: scripted cause"
     );
+}
+
+/// A retryable lane poll error's warning carries the error's source.
+#[test]
+fn a_retryable_lane_poll_warning_carries_the_source() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared
+        .lock()
+        .unwrap()
+        .lane_poll_errors
+        .push_back(SourceError::retryable("scripted poll failure").with_source(ScriptedCause));
+    assign_one_lane(&h, std::slice::from_ref(&(0..5)));
+    let line = h
+        .logs
+        .wait_for_line(spate_test::HANG, "retryable source poll error");
+    assert!(
+        line.contains("source error (Retryable): scripted poll failure: scripted cause"),
+        "{line}"
+    );
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
 }
 
 /// A retryable or record-level lane poll error leaves the lane polling, and
@@ -2762,12 +2786,9 @@ fn a_fatal_poll_events_error_fails_the_run() {
         mode: ChainMode::Ok,
         batches_seen: 0,
     });
-    h.script
-        .lock()
-        .unwrap()
-        .push_back(Script::PollError(SourceError::fatal(
-            "scripted control failure",
-        )));
+    h.script.lock().unwrap().push_back(Script::PollError(
+        SourceError::fatal("scripted control failure").with_source(ScriptedCause),
+    ));
     wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
@@ -2776,7 +2797,7 @@ fn a_fatal_poll_events_error_fails_the_run() {
     assert_eq!(failure.component, "source");
     assert_eq!(
         failure.reason,
-        "poll_events failed: source error (Fatal): scripted control failure"
+        "poll_events failed: source error (Fatal): scripted control failure: scripted cause"
     );
 }
 
@@ -5684,7 +5705,13 @@ fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
     );
     joined(&h);
     let report = h.join.join().unwrap().unwrap();
-    assert!(matches!(report.state, ExitState::Failed(_)), "{report:?}");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a source that failed to open must fail the run: {report:?}");
+    };
+    assert_eq!(
+        failure.reason,
+        "source open failed: source error (Fatal): scripted open failure: scripted cause"
+    );
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
     assert_eq!(h.shared.lock().unwrap().flush_commits, 0);
 }

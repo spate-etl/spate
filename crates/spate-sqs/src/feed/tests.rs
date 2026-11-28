@@ -1666,7 +1666,7 @@ fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
         let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
         let _ = tx.send(
             SqsFeed::connect_with(
-                &section,
+                SqsFeedConfig::from_section(&section).unwrap(),
                 &handle,
                 Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
                     credentials,
@@ -1694,6 +1694,85 @@ fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
         }
         other => panic!("expected unavailable, got {other:?}"),
     }
+}
+
+/// Pins that `connect` checks the config it is given before any request: a
+/// 2 s visibility is refused as a config error, where a connect that skipped
+/// the check would reach the silent endpoint and end at the bound.
+#[test]
+fn connect_refuses_a_config_validate_refuses() {
+    let addr = spate_test_support::silent_server();
+    let mut config = SqsFeedConfig::new(format!("http://{addr}/000000000000/jobs"));
+    config.region = Some("eu-west-2".to_owned());
+    config.endpoint = Some(format!("http://{addr}"));
+    config.visibility = Duration::from_secs(2);
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let clock = SyncTestClock::frozen();
+    let given = SyncClock::new(Arc::clone(&clock) as _);
+    let handle = io.handle().clone();
+    let (tx, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+        let _ = tx.send(
+            SqsFeed::connect_with(
+                config,
+                &handle,
+                Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
+                    credentials,
+                )),
+                given,
+            )
+            .map(drop),
+        );
+    });
+    // A connect that reaches the endpoint reads its deadline on a thread this
+    // one cannot see, so each pass moves the clock by a whole bound.
+    let mut got = None;
+    spate_test::wait_until(BOUND_DEADLINE, "connect ends", || {
+        clock.advance(CONNECT_BOUND);
+        got = done.recv_timeout(Duration::from_millis(100)).ok();
+        got.is_some()
+    });
+    match got {
+        Some(Err(e)) if e.kind() == ConnectErrorKind::Config => {
+            let message = e.to_string();
+            assert!(message.contains("feed.sqs.visibility"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+}
+
+/// Pins that the feed refuses the keys beside `sqs:` when the runtime or a
+/// lister run hands it the section, with the texts `from_section` gives:
+/// an `attempt_cap`, and a `settling_window` under a minute. A minute, and
+/// no window, pass.
+#[tokio::test]
+async fn the_feed_refuses_the_section_keys_it_cannot_honor() {
+    let (feed, _queue) = start(MINUTE);
+    let body = format!("sqs: {{ queue_url: \"{QUEUE_URL}\" }}");
+    let with = |edit: &dyn Fn(&mut FeedSection)| {
+        let mut section: FeedSection = serde_yaml::from_str(&body).unwrap();
+        edit(&mut section);
+        section
+    };
+    for section in [
+        with(&|s| s.attempt_cap = std::num::NonZeroU32::new(3)),
+        with(&|s| s.settling_window = Some(Duration::from_secs(59))),
+    ] {
+        assert_eq!(
+            feed.check_section(&section).unwrap_err().to_string(),
+            SqsFeedConfig::from_section(&section)
+                .unwrap_err()
+                .to_string(),
+        );
+    }
+    feed.check_section(&with(&|s| s.settling_window = Some(MINUTE)))
+        .expect("a minute passes");
+    feed.check_section(&with(&|_| {}))
+        .expect("no window passes");
 }
 
 /// Pins that the connect bound names the read it was on, for the queue and
@@ -3466,7 +3545,8 @@ fn an_unlisted_sender_error_refuses_connect() {
              region: eu-west-2, endpoint: \"http://{addr}\" }}"
         ))
         .unwrap();
-        match SqsFeed::connect_with_static_credentials(&section, io.handle(), "x", "x") {
+        let config = SqsFeedConfig::from_section(&section).unwrap();
+        match SqsFeed::connect_with_static_credentials(config, io.handle(), "x", "x") {
             Err(e) if e.kind() == ConnectErrorKind::Refused => {
                 let m = e.reason().to_owned();
                 assert!(m.contains("InvalidAction"), "{header}: {m}")

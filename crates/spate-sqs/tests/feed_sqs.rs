@@ -21,7 +21,7 @@ use spate_core::feed::{Feed, STOP_RESERVE, Unit, wake_channel};
 use spate_core::pipeline::ExitState;
 use spate_json::JsonLinesFramer;
 use spate_s3::S3Source;
-use spate_sqs::SqsFeed;
+use spate_sqs::{SqsFeed, SqsFeedConfig};
 use spate_test::{HANG, SinkScript, WriteOutcome, wait_for_value, wait_until};
 use spate_test_s3_feed::{
     CHECKPOINT, DRAIN_TIMEOUT, PipelineConfigFeed, STEP, TWO_RANGES, assert_stalled, data_dir,
@@ -153,7 +153,14 @@ fn launch_customized(
     stop_clock: Option<Arc<StopClock>>,
 ) -> Worker {
     spate_test_s3_feed::launch_customized(
-        |section, io| SqsFeed::connect_with_static_credentials(section, io, "test", "test"),
+        |section, io| {
+            SqsFeed::connect_with_static_credentials(
+                SqsFeedConfig::from_section(section)?,
+                io,
+                "test",
+                "test",
+            )
+        },
         &file_source(data, source_extra),
         feed_section,
         pre,
@@ -620,8 +627,13 @@ fn a_failed_unit_is_set_visible_at_once() {
         .enable_all()
         .build()
         .unwrap();
-    let feed =
-        SqsFeed::connect_with_static_credentials(&section, io.handle(), "test", "test").unwrap();
+    let feed = SqsFeed::connect_with_static_credentials(
+        SqsFeedConfig::from_section(&section).unwrap(),
+        io.handle(),
+        "test",
+        "test",
+    )
+    .unwrap();
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
     publish(&feed, Unit::new("f", "a unit to fail"));
@@ -664,8 +676,13 @@ fn connect(mq: &ElasticMq, queue_url: &str) -> Result<(), ConnectError> {
         .enable_all()
         .build()
         .unwrap();
-    let connected =
-        SqsFeed::connect_with_static_credentials(&section, io.handle(), "test", "test").map(drop);
+    let connected = SqsFeed::connect_with_static_credentials(
+        SqsFeedConfig::from_section(&section)?,
+        io.handle(),
+        "test",
+        "test",
+    )
+    .map(drop);
     io.shutdown_timeout(Duration::from_secs(2));
     connected
 }
@@ -770,8 +787,13 @@ fn list_once(data: &Path, feed_section: &str) {
         .enable_all()
         .build()
         .unwrap();
-    let feed =
-        SqsFeed::connect_with_static_credentials(&section, rt.handle(), "test", "test").unwrap();
+    let feed = SqsFeed::connect_with_static_credentials(
+        SqsFeedConfig::from_section(&section).unwrap(),
+        rt.handle(),
+        "test",
+        "test",
+    )
+    .unwrap();
     S3Source::from_component_config(&config.source, rt.handle(), || {
         Box::new(JsonLinesFramer::new(1 << 20))
     })
@@ -956,7 +978,7 @@ fn an_idle_worker_reads_a_unit_redelivered_after_its_owner_dies() {
         .build()
         .unwrap();
     let owner = SqsFeed::connect_with_static_credentials(
-        config.feed.as_ref().unwrap(),
+        SqsFeedConfig::from_section(config.feed.as_ref().unwrap()).unwrap(),
         rt.handle(),
         "test",
         "test",

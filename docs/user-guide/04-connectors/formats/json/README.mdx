@@ -138,12 +138,13 @@ rejected.
 
 ## Backends
 
-Decoding uses `serde_json` (stable 1.x) by default. A builder can choose
+Decoding uses `serde_json` (stable 1.x) by default. Cargo feature `simd-json`
+(`json-simd` on the `spate` facade) adds
+`JsonDeserializerBuilder::with_simd_json`. Each deserializer built from a
+builder that calls it decodes with
 [`simd-json`](https://github.com/simd-lite/simd-json), a SIMD-accelerated
-parser, instead: with Cargo feature `simd-json` (`json-simd` on the `spate`
-facade), `JsonDeserializerBuilder::with_simd_json` makes every deserializer
-that builder builds decode with `simd-json`. The feature alone changes no
-deserializer, so one pipeline can decode one source with each parser.
+parser. The feature alone changes no deserializer, so two deserializers in one
+binary can use different parsers.
 `build_serde` and `build_value` are the same for both parsers. `from_reader` is
 never used on the hot path. Decoding always operates on the in-memory payload
 slice, which is both faster and lets the parser see the whole document at once.

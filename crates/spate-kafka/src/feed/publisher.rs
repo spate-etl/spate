@@ -2,7 +2,7 @@
 //! work topic and reads none, for a process that only publishes, such as a
 //! lister run.
 //!
-//! It shares the worker feed's section parse, startup checks, producer
+//! It shares the worker feed's config checks, startup checks, producer
 //! settings and publish path, and holds no consumer, gate or follower.
 
 use super::config::{KafkaFeedConfig, Trusted};

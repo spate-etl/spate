@@ -825,7 +825,7 @@ fn start_depth(config: &Trusted, core: &Arc<Core>) -> Result<DepthThread, Connec
     })
 }
 
-/// Log the INFO line a feed that connected writes: its section and what the
+/// Log the INFO line a feed that connected writes: its config and what the
 /// startup checks read, `unreported` where the broker gave no value.
 fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
     let reported = |v: &Option<String>| v.clone().unwrap_or_else(|| "unreported".to_owned());

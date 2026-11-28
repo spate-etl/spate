@@ -1,4 +1,5 @@
-//! The `kafka:` body of a `feed:` section, decoded and checked.
+//! The Kafka feed's config, decoded from a `feed:` section or built in code,
+//! and the holder that carries its CA bundle to every client.
 
 use crate::client::{Base, COMPONENT_TYPE, Keys, Role, check_message_timeout};
 use serde::Deserialize;
@@ -259,7 +260,7 @@ struct Body {
 /// config.validate()?;
 /// # Ok::<(), spate_core::config::ConfigError>(())
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct KafkaFeedConfig {
     /// Comma-separated bootstrap servers.
@@ -367,9 +368,10 @@ impl KafkaFeedConfig {
     /// # Errors
     ///
     /// [`ConfigError::Component`] at `feed` for a section that names another
-    /// backend. [`ConfigError::Component`], starting at `feed.kafka`, for an
-    /// unknown key, an `attempt_cap` under `kafka:`, and a body
-    /// [`validate`](Self::validate) refuses.
+    /// backend. [`ConfigError::Component`], starting at `feed.kafka`, for a
+    /// body that does not decode, such as one missing a required key, holding
+    /// an unknown key or a value of the wrong type, for an `attempt_cap` under
+    /// `kafka:`, and for a body [`validate`](Self::validate) refuses.
     pub fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
         let body: Body = section.backend_body(COMPONENT_TYPE, NAME)?;
         if body.attempt_cap.is_some() {
@@ -403,8 +405,9 @@ impl KafkaFeedConfig {
     /// `dead_letter_topic` equal to either, an `attempt_topic` equal to any of
     /// the three, a `delivery_timeout` librdkafka refuses as
     /// `message.timeout.ms`, a `statistics_interval` it refuses, an `rdkafka`
-    /// property the feed owns or forbids, and a TLS setting the build cannot
-    /// honor.
+    /// property the feed owns or forbids, a security setting that a build
+    /// without the `tls` feature cannot honor, and a `tls.root_ca` without
+    /// `rdkafka."security.protocol"` set to `ssl` or `sasl_ssl`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::feed(COMPONENT_TYPE);
         for (key, value) in [
@@ -476,7 +479,7 @@ impl KafkaFeedConfig {
         }
     }
 
-    /// `role`'s client over this section.
+    /// `role`'s client over this config.
     pub(crate) fn client(&self, role: FeedRole) -> Client<'_> {
         Client { config: self, role }
     }

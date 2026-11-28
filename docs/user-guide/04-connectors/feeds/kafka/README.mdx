@@ -39,9 +39,9 @@ KAFKA_BROKERS=localhost:9092 \
 ```
 
 Code that builds its pipeline without a file starts from `KafkaFeedConfig::new`,
-which takes the brokers, the group and the four topics in the order the table
-lists them, sets the public fields it needs, and passes the config to
-`KafkaFeed::connect` in the same way. The config has the keys and defaults of
+sets the public fields it needs, and passes the config to `KafkaFeed::connect`
+in the same way. `new` takes the brokers, the group and the four topics in the
+order the table lists them. The config has the keys and defaults of
 the table under [Configuration](#configuration), and an `attempt_cap` field.
 
 `KafkaFeed::connect` first checks the config, and fails as a configuration

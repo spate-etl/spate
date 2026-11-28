@@ -8,7 +8,7 @@
 //! guard and writing the connector's internal frame format. Ship-with
 //! implementations: [`KafkaBytesEncoder`] (payload passthrough) and
 //! [`KafkaJsonEncoder`] (serde_json, or simd-json for an encoder built with
-//! `with_simd_json` under the `json-simd` feature).
+//! `with_simd_json` under the `simd-json` feature).
 
 use crate::sink::frame;
 use bytes::BytesMut;
@@ -316,7 +316,7 @@ pub struct KafkaJsonEncoder<F: RecFamily> {
 #[derive(Debug, Clone, Copy)]
 enum Backend {
     SerdeJson,
-    #[cfg(feature = "json-simd")]
+    #[cfg(feature = "simd-json")]
     SimdJson,
 }
 
@@ -359,7 +359,7 @@ impl<F: RecFamily> KafkaJsonEncoder<F> {
     ///   no error. A record type that holds either stays on the default.
     ///
     /// A serialization error carries `simd-json`'s message.
-    #[cfg(feature = "json-simd")]
+    #[cfg(feature = "simd-json")]
     #[must_use]
     pub fn with_simd_json(mut self) -> Self {
         self.backend = Backend::SimdJson;
@@ -403,7 +403,7 @@ where
             Backend::SerdeJson => {
                 serde_json::to_writer(payload, &rec.payload).map_err(|e| e.to_string())
             }
-            #[cfg(feature = "json-simd")]
+            #[cfg(feature = "simd-json")]
             Backend::SimdJson => {
                 simd_json::serde::to_writer(payload, &rec.payload).map_err(|e| e.to_string())
             }

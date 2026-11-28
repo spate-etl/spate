@@ -17,7 +17,7 @@ categories.workspace = true
 tls = ["rdkafka/ssl-vendored", "dep:openssl-sys", "spate-core/tls-roots", "spate-test-support/kafka-tls"]
 # `KafkaJsonEncoder::with_simd_json`, a per-encoder opt-in. Without the call
 # the encoder keeps serde_json.
-json-simd = ["dep:simd-json"]
+simd-json = ["dep:simd-json"]
 # Test-only. Off by default, not enabled by the `spate` facade, and outside
 # the semver surface.
 testing = []
@@ -38,9 +38,9 @@ tracing = { workspace = true }
 zstd-sys = { workspace = true }
 
 [dev-dependencies]
-# `json-simd`: the tests and the encode bench measure both JSON encoders in
+# `simd-json`: the tests and the encode bench measure both JSON encoders in
 # one build.
-spate-kafka = { path = ".", features = ["testing", "json-simd"] }
+spate-kafka = { path = ".", features = ["testing", "simd-json"] }
 gungraun = { workspace = true }
 spate-bench = { workspace = true }
 spate-json = { workspace = true }
@@ -65,7 +65,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [package.metadata.docs.rs]
-features = ["json-simd"]
+features = ["simd-json"]
 
 [[bench]]
 name = "encode_gungraun"

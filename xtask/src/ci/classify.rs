@@ -29,9 +29,9 @@ pub(crate) struct Context {
 /// `--features default` when absent.
 pub(crate) fn feature_arms_for(pkg: &str) -> Vec<(&'static str, &'static str)> {
     match pkg {
-        // `simd` replaces the byte-slice-to-value decoder behind the backend
-        // seam: one set of benches over two implementations.
-        "spate-json" => vec![("default", ""), ("simd", "simd")],
+        // The `simd-json` feature makes the decode rig call `with_simd_json`:
+        // one set of benches over two parsers.
+        "spate-json" => vec![("default", ""), ("simd", "simd-json")],
         _ => vec![("default", "")],
     }
 }

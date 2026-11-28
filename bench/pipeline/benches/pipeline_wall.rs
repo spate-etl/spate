@@ -86,7 +86,6 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
                     "run",
                     format!("stored={} threads={threads}", stored.name()).as_bytes(),
                 );
-                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
                 rig
             },
             move |b, rig: &Rig| {

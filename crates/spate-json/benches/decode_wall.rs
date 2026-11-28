@@ -15,12 +15,13 @@
 //!
 //! ## The backend axis
 //!
-//! `simd` swaps the byte-slice → value seam to a different parser, which makes
-//! this the one crate where a report could silently pair two implementations.
-//! Two independent tripwires stop it. The harness guards `features`, which
-//! records what was passed to cargo; every case here also *declares*
-//! [`BACKEND_ID`], which records what actually compiled. Only the second
-//! catches a change that makes `simd` a default feature; the two legs would
+//! A build with the `simd-json` feature makes the rig call `with_simd_json`,
+//! so every case decodes through a different parser. That makes this the one
+//! crate where a report could silently pair two implementations. Two
+//! independent tripwires stop it. The harness guards `features`, which records
+//! what was passed to cargo; every case here also *declares* the rig's
+//! `BACKEND`, which the same `cfg` that makes the call sets. Only the second
+//! catches a change that turns the feature on by default; the two legs would
 //! then agree on `features` while decoding through different parsers.
 //!
 //! Declared rather than absorbed into the corpus, so the digest over the
@@ -32,7 +33,7 @@
 //! which is what `arms` is:
 //!
 //! ```sh
-//! cargo xtask bench arms --head-features spate-json/simd --filter decode_
+//! cargo xtask bench arms --head-features spate-json/simd-json --filter decode_
 //! ```
 //!
 //! It builds each arm into its own directory, calibrates one iteration count on
@@ -46,8 +47,8 @@
 //! like.
 //!
 //! Expect the four `decode_floor_simd_*` cases to appear as present only in the
-//! head arm: they are `cfg(feature = "simd")`, so the base arm does not declare
-//! them and nothing pairs them.
+//! head arm: they are `cfg(feature = "simd-json")`, so the base arm does not
+//! declare them and nothing pairs them.
 //!
 //! The four `decode_floor_serde_*` cases pair and should read flat. They call
 //! `serde_json` on both arms, so what an arm run prices for them is the two
@@ -56,9 +57,9 @@
 //! than to the swap. Read them first, and treat a margin no larger than theirs
 //! as unresolved.
 //!
-//! A leg built with `--features simd` also carries that backend's own floors,
-//! so the library margin reads inside one leg without a second leg at all;
-//! `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
+//! A leg built with `--features simd-json` also carries that backend's own
+//! floors, so the library margin reads inside one leg without a second leg at
+//! all; `decode_floor_simd_ndjson` against `decode_floor_serde_ndjson` is two
 //! libraries over one corpus in one binary, and is the more direct answer when
 //! the question is about the parsers rather than about what this crate adds.
 //! `decode_floor_simd_events` against `decode_floor_serde_events` is the same
@@ -109,8 +110,6 @@
 //! together.
 //!
 //! Run it with `cargo xtask bench ab --ref main --filter decode_`.
-//!
-//! [`BACKEND_ID`]: spate_json::BACKEND_ID
 
 use serde_json::Value;
 use spate_bench::{Corpus, Suite, bench_main};
@@ -145,7 +144,7 @@ const COMPONENT: &str = "json";
 /// across them and the backend has to be the thing that says they are two arms.
 fn absorb<D>(corpus: &mut Corpus, rig: &Rig<D>) {
     corpus.absorb("payload", &rig.payload);
-    corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
+    corpus.declare("backend", decode_rig::arm::BACKEND.as_bytes());
 }
 
 fn payload_bytes<D>(rig: &RefCell<Rig<D>>) -> u64 {
@@ -430,7 +429,7 @@ fn serde_floor<T: 'static>(
             move |corpus, _seed| {
                 let bytes = payload();
                 corpus.absorb("payload", &bytes);
-                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
+                corpus.declare("backend", decode_rig::arm::BACKEND.as_bytes());
                 bytes
             },
             move |b, bytes: &Vec<u8>| {
@@ -479,17 +478,17 @@ fn serde_ndjson<T: DeserializeOwned>(bytes: &[u8]) -> u64 {
     decoded
 }
 
-#[cfg(not(feature = "simd"))]
+#[cfg(not(feature = "simd-json"))]
 fn floors(suite: Suite) -> Suite {
     serde_floors(suite)
 }
 
-/// Under `simd` the crate decodes through a different parser, so the leg
+/// Under `simd-json` the rig decodes through a different parser, so the leg
 /// carries both floor sets: `serde_json`, which is still the library the
-/// duplicate-key guard uses whatever the backend, and the compiled backend,
+/// duplicate-key guard uses whatever the backend, and the rig's backend,
 /// which is what every framework case is read against. Both are present for
 /// each entry point, so no pairing crosses two parsers.
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn floors(suite: Suite) -> Suite {
     simd_floors(serde_floors(suite))
 }
@@ -542,13 +541,13 @@ fn serde_floors(suite: Suite) -> Suite {
 /// `simd_json::Buffers` is not, or reproducing the crate's lazy cell, at which
 /// point the floor stops being the library and starts being a copy of the
 /// backend module.
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 struct SimdFloor {
     payload: Vec<u8>,
     scratch: RefCell<(Vec<u8>, simd_json::Buffers)>,
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_floor<T: 'static>(
     suite: Suite,
     id: &'static str,
@@ -562,7 +561,7 @@ fn simd_floor<T: 'static>(
             move |corpus, _seed| {
                 let bytes = payload();
                 corpus.absorb("payload", &bytes);
-                corpus.declare("backend", spate_json::BACKEND_ID.as_bytes());
+                corpus.declare("backend", decode_rig::arm::BACKEND.as_bytes());
                 let state = SimdFloor {
                     payload: bytes,
                     scratch: RefCell::new((Vec::new(), simd_json::Buffers::new(0))),
@@ -583,7 +582,7 @@ fn simd_floor<T: 'static>(
         .done()
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_decode<T: serde::de::DeserializeOwned>(state: &SimdFloor, bytes: &[u8]) -> T {
     let (buf, buffers) = &mut *state.scratch.borrow_mut();
     buf.clear();
@@ -592,17 +591,17 @@ fn simd_decode<T: serde::de::DeserializeOwned>(state: &SimdFloor, bytes: &[u8]) 
         .expect("the fixture is valid JSON")
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_array(state: &SimdFloor) -> Vec<LineItem> {
     simd_decode(state, &state.payload)
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_value(state: &SimdFloor) -> Value {
     simd_decode(state, &state.payload)
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_ndjson<T: DeserializeOwned>(state: &SimdFloor) -> u64 {
     let mut decoded = 0u64;
     for line in ndjson_lines(&state.payload) {
@@ -612,7 +611,7 @@ fn simd_ndjson<T: DeserializeOwned>(state: &SimdFloor) -> u64 {
     decoded
 }
 
-#[cfg(feature = "simd")]
+#[cfg(feature = "simd-json")]
 fn simd_floors(suite: Suite) -> Suite {
     let suite = simd_floor(
         suite,

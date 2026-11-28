@@ -15,6 +15,7 @@
 //! [`JsonDeserializerBuilder::framing`], since it follows the producer's
 //! format and the source the pipeline is built with.
 
+use crate::backend::Backend;
 use crate::deser::{DecoderCore, JsonSerdeDeserializer, JsonValueDeserializer};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -107,6 +108,7 @@ pub(crate) const COMPONENT_TYPE: &str = "json";
 pub struct JsonDeserializerBuilder {
     config: JsonDeserializerConfig,
     framing: JsonFraming,
+    backend: Backend,
 }
 
 impl JsonDeserializerBuilder {
@@ -120,6 +122,7 @@ impl JsonDeserializerBuilder {
         Ok(JsonDeserializerBuilder {
             config,
             framing: JsonFraming::Single,
+            backend: Backend::SerdeJson,
         })
     }
 
@@ -146,6 +149,34 @@ impl JsonDeserializerBuilder {
         self
     }
 
+    /// Decode with `simd-json`, which chooses its SIMD code at run time from
+    /// the CPU's features. Each deserializer built from this builder uses it;
+    /// any other keeps `serde_json`.
+    ///
+    /// It is faster on documents carrying long strings and slower on
+    /// number-heavy ones, by an amount that depends on the CPU. The JSON
+    /// connector guide's Backends section gives the measured figures.
+    ///
+    /// It accepts the same documents as `serde_json` and decodes them to the
+    /// same values, with these differences:
+    ///
+    /// - An integer literal outside the `i64`/`u64` range is refused, where
+    ///   `serde_json` reads it as an `f64`, and `-0` decodes as `0`.
+    /// - Nesting is limited to 1024 levels, where `serde_json` stops at 128.
+    ///   With `reject_duplicate_keys` on, the guard runs on `serde_json` first
+    ///   and its limit applies.
+    /// - `serde_json`'s `arbitrary_precision`, `raw_value` and
+    ///   `float_roundtrip` features have no effect on this parser.
+    /// - A refused document's error gives a character index for a syntax
+    ///   error and no position for a document that does not match the record
+    ///   type, where `serde_json` gives a line and column.
+    #[cfg(feature = "simd-json")]
+    #[must_use]
+    pub fn with_simd_json(mut self) -> Self {
+        self.backend = Backend::SimdJson;
+        self
+    }
+
     /// Decode each document into your own `T: serde::de::DeserializeOwned`.
     #[must_use]
     pub fn build_serde<T>(&self) -> JsonSerdeDeserializer<T>
@@ -166,6 +197,7 @@ impl JsonDeserializerBuilder {
             framing: self.framing,
             on_error: self.config.on_error,
             reject_duplicate_keys: self.config.reject_duplicate_keys,
+            backend: self.backend,
             metrics: None,
         }
     }

@@ -117,11 +117,12 @@ Leave the bench profile at the default number of codegen units.
 
 **Why:** a downstream build uses the default unless the user's own build sets one, so a bench at one codegen unit would count code that users do not run.
 
-### Add a feature arm only when a feature swaps an implementation
+### Add a feature arm only when a feature changes the code the benches run
 
 CI runs one counted job per package, feature arm and architecture, on Linux x86_64 and aarch64.
 The arms are listed in `feature_arms_for` in [`xtask/src/ci/classify.rs`](repo:xtask/src/ci/classify.rs).
-Add an arm when a feature swaps an implementation the benches execute, and not for every feature.
+Add an arm when building with a feature changes the code the benches execute, and not for every feature.
+The change can come from the library or from the bench rig: spate-json's `simd` arm turns on `simd-json`, and its rig then calls `with_simd_json` for every case but the two that keep `serde_json`.
 
 **Why:** each arm adds a pair of builds and valgrind runs on each architecture.
 
@@ -169,7 +170,7 @@ Each writes its report to its job summary.
 cargo xtask bench list                                    # every case, with its flags
 cargo xtask bench ab --ref main --replicates 20           # this tree against a reference
 cargo xtask bench ab --ref main --package spate-avro      # only one crate's targets
-cargo xtask bench arms --head-features spate-json/simd    # two feature arms of this tree
+cargo xtask bench arms --head-features spate-json/simd-json    # two feature arms of this tree
 ```
 
 The `--package` flag narrows the build as well as the report.

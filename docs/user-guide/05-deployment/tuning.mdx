@@ -135,8 +135,9 @@ of SIMD features.
 
 :::note Connector specifics
 What the build changes in one connector:
-[ClickHouse sink encoding](../04-connectors/sinks/clickhouse/performance-tuning.mdx#link-time-optimization)
-· [JSON format SIMD parser](../04-connectors/formats/json/README.mdx#backends).
+[ClickHouse sink encoding](../04-connectors/sinks/clickhouse/performance-tuning.mdx#link-time-optimization).
+The JSON format's SIMD parser is chosen per deserializer in code:
+[JSON format backends](../04-connectors/formats/json/README.mdx#backends).
 :::
 
 ## Threads: `pipeline.threads` vs `pipeline.io_threads`

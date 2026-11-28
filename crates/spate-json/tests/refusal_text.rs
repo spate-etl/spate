@@ -34,27 +34,44 @@ struct Login {
     status: Status,
 }
 
-/// `simd-json` gives a serde message no position.
-#[cfg(not(feature = "simd"))]
-const REASON: &str = "malformed payload: malformed: the document does not match the record type \
-                      at line 1 column 19";
-#[cfg(feature = "simd")]
-const REASON: &str = "malformed payload: malformed: the document does not match the record type";
-
+/// `serde_json` decodes unless the builder calls `with_simd_json`, whatever
+/// features the build turns on.
 #[test]
 fn an_unknown_variant_fails_the_pipeline_without_quoting_it() {
+    assert_eq!(
+        refusal(|b| b),
+        "malformed payload: malformed: the document does not match the record type \
+         at line 1 column 19"
+    );
+}
+
+/// `simd-json` gives a serde message no position.
+#[cfg(feature = "simd-json")]
+#[test]
+fn under_simd_json_an_unknown_variant_fails_the_pipeline_without_quoting_it() {
+    assert_eq!(
+        refusal(JsonDeserializerBuilder::with_simd_json),
+        "malformed payload: malformed: the document does not match the record type"
+    );
+}
+
+/// The failure reason a pipeline stops with after the typed deserializer,
+/// built through `choose`, refuses one record.
+fn refusal(choose: impl FnOnce(JsonDeserializerBuilder) -> JsonDeserializerBuilder) -> String {
     let (source, handle) = memory_source();
     let (sink, _script) = capture_sink(1, 1);
     let pipeline =
         Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config")).expect("builder");
-    let deser = JsonDeserializerBuilder::from_component_config(
-        pipeline
-            .config()
-            .deserializer
-            .as_ref()
-            .expect("deserializer"),
+    let deser = choose(
+        JsonDeserializerBuilder::from_component_config(
+            pipeline
+                .config()
+                .deserializer
+                .as_ref()
+                .expect("deserializer"),
+        )
+        .expect("json builder"),
     )
-    .expect("json builder")
     .build_serde::<Login>();
     let runtime = pipeline
         .sink(sink)
@@ -85,5 +102,5 @@ fn an_unknown_variant_fails_the_pipeline_without_quoting_it() {
     let ExitState::Failed(failure) = report.state else {
         panic!("expected a failed exit, got {:?}", report.state);
     };
-    assert_eq!(failure.reason, REASON);
+    failure.reason
 }

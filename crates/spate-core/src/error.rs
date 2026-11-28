@@ -556,13 +556,7 @@ macro_rules! tls_rejection {
 macro_rules! tls_reason {
     ($($rustls:ident)::+, $tls:expr, $key:expr) => {{
         let tls: &$($rustls)::+::Error = $tls;
-        let unknown_issuer = matches!(
-            tls,
-            $($rustls)::+::Error::InvalidCertificate(
-                $($rustls)::+::CertificateError::UnknownIssuer
-            )
-        );
-        $crate::error::tls_reason_text(tls, unknown_issuer, $key)
+        $crate::error::tls_reason_text(tls, $crate::tls_hint!($($rustls)::+, tls, $key))
     }};
 }
 
@@ -602,16 +596,12 @@ pub fn tls_hint_text(unknown_issuer: bool, key: Option<&str>) -> Option<String> 
     })
 }
 
-/// The text [`tls_reason!`] returns, given whether the error is an unknown
-/// issuer.
+/// The text [`tls_reason!`] returns: the TLS error's text, then the hint
+/// [`tls_hint!`] gave, if any.
 #[doc(hidden)]
 #[must_use]
-pub fn tls_reason_text(
-    tls: &dyn std::fmt::Display,
-    unknown_issuer: bool,
-    key: Option<&str>,
-) -> String {
-    match tls_hint_text(unknown_issuer, key) {
+pub fn tls_reason_text(tls: &dyn std::fmt::Display, hint: Option<String>) -> String {
+    match hint {
         Some(hint) => format!("{tls}; {hint}"),
         None => tls.to_string(),
     }

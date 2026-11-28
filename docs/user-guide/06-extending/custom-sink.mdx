@@ -115,10 +115,11 @@ the frames) happens when the worker calls it, not when the future is polled:
   `checkpoint.stalled_fail_after` eventually fails the pipeline so the data
   replays after restart). A
   [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
-  fails each unit in the batch back to its feed instead. The failure reports
-  the error's reason followed by its source chain. Write the reason as what the
-  sink was doing, and attach the client's error with `with_source` so its text
-  appears once. A rejected
+  fails each unit in the batch back to its feed instead. The line that logs the
+  abandoned batch carries the error's reason followed by its source chain, and
+  so does the failure reason of a pipeline that fails behind it. Write the
+  reason as what the sink was doing, and attach the client's error with
+  `with_source` so its text appears once. A rejected
   credential or TLS handshake is `Fatal`, and a failure to obtain credentials or
   reach the server is `Retryable`
   ([ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)).

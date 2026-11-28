@@ -1,3 +1,3 @@
-**A failed AWS credentials load reads once in the SQS warning** (`spate-sqs`)
+**A failed AWS credentials load no longer repeats its text** (`spate-sqs`)
 
-The warning logged when loading AWS credentials fails now prints the SDK's "an error occurred while loading credentials" once. In previous versions it appeared twice, because the SDK's error prints its source and also returns it.
+When loading AWS credentials fails, the error spate-sqs hands to the AWS SDK now prints "an error occurred while loading credentials" once in its source chain. In previous versions the phrase appeared twice, because spate-sqs wrapped the load's error in a type that printed the same text.

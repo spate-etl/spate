@@ -15,6 +15,12 @@ use spate_core::error::DeserError;
 /// Confluent framing: magic `0x00` + `u32` big-endian schema id + datum.
 ///
 /// Returns the schema id and the datum slice.
+///
+/// # Errors
+///
+/// A [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed)
+/// error when the first byte is not `0x00` or the payload is shorter than the
+/// 5-byte header.
 pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
     if let Some(&magic) = payload.first()
         && magic != 0x00
@@ -37,6 +43,12 @@ pub fn parse_confluent(payload: &[u8]) -> Result<(u32, &[u8]), DeserError> {
 /// fingerprint + datum.
 ///
 /// Returns the fingerprint and the datum slice.
+///
+/// # Errors
+///
+/// A [`DeserErrorKind::Malformed`](spate_core::error::DeserErrorKind::Malformed)
+/// error when the payload is shorter than the 10-byte header or does not start
+/// with `0xC3 0x01`.
 pub fn parse_single_object(payload: &[u8]) -> Result<(u64, &[u8]), DeserError> {
     if payload.len() < 10 {
         return Err(DeserError::malformed(format!(

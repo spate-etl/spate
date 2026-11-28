@@ -70,6 +70,25 @@ impl ser::Error for RowBinaryError {
 ///
 /// On error the buffer may contain a partial row; the caller rolls back to
 /// its pre-record length (the chain's terminal stage does this).
+///
+/// # Errors
+///
+/// A [`RowBinaryError`] for a value RowBinary cannot write:
+///
+/// - [`Unsupported`](RowBinaryError::Unsupported) for a `char`, a unit, a
+///   unit struct, or an enum variant other than a newtype variant.
+/// - [`NestedOption`](RowBinaryError::NestedOption) for an
+///   `Option<Option<T>>`.
+/// - [`VariantOutOfRange`](RowBinaryError::VariantOutOfRange) for a variant
+///   index above 255.
+/// - [`SequenceMustHaveLength`](RowBinaryError::SequenceMustHaveLength) for
+///   a sequence of unknown length.
+/// - [`FlattenUnsupported`](RowBinaryError::FlattenUnsupported) for a
+///   `#[serde(flatten)]` field.
+/// - [`FieldCountMismatch`](RowBinaryError::FieldCountMismatch) for a row
+///   whose field count differs from the count it declared.
+/// - [`Custom`](RowBinaryError::Custom) for an error a `Serialize` impl
+///   raised, such as a [`serde`](crate::serde) helper's range check.
 pub fn serialize_row<T: Serialize + ?Sized>(
     row: &T,
     buf: &mut BytesMut,

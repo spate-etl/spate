@@ -186,6 +186,10 @@ impl ComponentConfig {
     /// Errors carry the full dotted path from the pipeline config root,
     /// e.g. `source.kafka.brokers: missing field \`brokers\``, and name the
     /// expected type without the value.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the body does not deserialize into `T`.
     pub fn deserialize_into<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
         serde_path_to_error::deserialize(self.raw.clone())
             .map_err(|e| component_error(self.path(), None, e))

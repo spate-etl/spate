@@ -54,6 +54,13 @@ pub trait EmitRecord<'buf, T> {
 pub trait Deserializer<F: RecFamily>: Send {
     /// Decode `raw`, emitting each resulting record with the payload's
     /// metadata and a clone of `ack`.
+    ///
+    /// # Errors
+    ///
+    /// The stage handles an error as the trait says. Under the `Skip` policy
+    /// only the records not yet emitted are lost, because each emitted record
+    /// has already gone downstream. Return `NotReady` and `Fatal` before
+    /// emitting any record.
     fn deserialize<'buf>(
         &mut self,
         raw: &RawPayload<'buf>,

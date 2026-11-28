@@ -25,6 +25,11 @@ pub mod datetime {
     use super::*;
 
     /// Serialize as `UInt32` seconds since the Unix epoch.
+    ///
+    /// # Errors
+    ///
+    /// A custom error when the timestamp is outside `UInt32` seconds since the
+    /// epoch, or when `serializer` fails.
     pub fn serialize<S>(dt: &OffsetDateTime, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -36,6 +41,10 @@ pub mod datetime {
     }
 
     /// Deserialize from `UInt32` seconds since the Unix epoch.
+    ///
+    /// # Errors
+    ///
+    /// When the input is not a `UInt32`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
     where
         D: Deserializer<'de>,
@@ -77,6 +86,11 @@ pub mod datetime64 {
                 use super::*;
 
                 /// Serialize as `Int64` ticks at this column precision.
+                ///
+                /// # Errors
+                ///
+                /// A custom error when the value's ticks at this precision fall
+                /// outside `Int64`, or when `serializer` fails.
                 pub fn serialize<S>(dt: &OffsetDateTime, serializer: S) -> Result<S::Ok, S::Error>
                 where
                     S: Serializer,
@@ -85,6 +99,11 @@ pub mod datetime64 {
                 }
 
                 /// Deserialize from `Int64` ticks at this column precision.
+                ///
+                /// # Errors
+                ///
+                /// When the input is not an `Int64`, or the ticks fall outside
+                /// what `OffsetDateTime` holds.
                 pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
                 where
                     D: Deserializer<'de>,
@@ -123,6 +142,11 @@ pub mod date {
     const ORIGIN: Result<Date, ::time::error::ComponentRange> = Date::from_ordinal_date(1970, 1);
 
     /// Serialize as `UInt16` days since 1970-01-01.
+    ///
+    /// # Errors
+    ///
+    /// A custom error for a date before 1970-01-01 or past the `UInt16` day
+    /// range, or when `serializer` fails.
     pub fn serialize<S>(d: &Date, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -138,6 +162,10 @@ pub mod date {
     }
 
     /// Deserialize from `UInt16` days since 1970-01-01.
+    ///
+    /// # Errors
+    ///
+    /// When the input is not a `UInt16`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
     where
         D: Deserializer<'de>,
@@ -162,6 +190,11 @@ pub mod date32 {
 
     /// Serialize as `Int32` days since 1970-01-01 (server range
     /// 1900-01-01 through 2299-12-31).
+    ///
+    /// # Errors
+    ///
+    /// A custom error for a date outside 1900-01-01 through 2299-12-31, or when
+    /// `serializer` fails.
     pub fn serialize<S>(d: &Date, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -176,6 +209,10 @@ pub mod date32 {
     }
 
     /// Deserialize from `Int32` days since 1970-01-01.
+    ///
+    /// # Errors
+    ///
+    /// When the input is not an `Int32`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
     where
         D: Deserializer<'de>,
@@ -195,6 +232,11 @@ pub mod time {
     use ::time::Duration;
 
     /// Serialize as `Int32` whole seconds.
+    ///
+    /// # Errors
+    ///
+    /// A custom error when the whole seconds fall outside `Int32`, or when
+    /// `serializer` fails.
     pub fn serialize<S>(t: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -205,6 +247,10 @@ pub mod time {
     }
 
     /// Deserialize from `Int32` whole seconds.
+    ///
+    /// # Errors
+    ///
+    /// When the input is not an `Int32`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
         D: Deserializer<'de>,
@@ -228,6 +274,11 @@ pub mod time64 {
                 use super::*;
 
                 /// Serialize as `Int64` ticks at this column precision.
+                ///
+                /// # Errors
+                ///
+                /// A custom error when the duration has more ticks at this
+                /// precision than `Int64` holds, or when `serializer` fails.
                 pub fn serialize<S>(t: &Duration, serializer: S) -> Result<S::Ok, S::Error>
                 where
                     S: Serializer,
@@ -239,6 +290,10 @@ pub mod time64 {
                 }
 
                 /// Deserialize from `Int64` ticks at this column precision.
+                ///
+                /// # Errors
+                ///
+                /// When the input is not an `Int64`.
                 pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
                 where
                     D: Deserializer<'de>,

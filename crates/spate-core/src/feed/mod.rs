@@ -608,6 +608,12 @@ impl DepthReading {
     /// The outcome if the backend has settled the read, `None` while it is
     /// pending. Never waits. Once settled, every later call returns the same
     /// outcome.
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err)` holding the backend's [`FeedError`] when the read failed,
+    /// or a [`FeedErrorKind::Retryable`] one when the feed dropped the read
+    /// before settling it.
     pub fn try_outcome(&mut self) -> Option<Result<Depth, FeedError>> {
         if self.outcome.is_none() {
             use oneshot::error::TryRecvError;
@@ -729,6 +735,13 @@ impl Confirmation {
     /// The outcome if the feed has settled the call, `None` while it is
     /// pending. Never waits. Once settled, every later call returns the same
     /// outcome.
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err)` holding the feed's [`FeedError`] when the call failed, or
+    /// a [`FeedErrorKind::Retryable`] one when the feed dropped the
+    /// confirmation before settling it; the call may or may not have
+    /// finished.
     pub fn try_outcome(&mut self) -> Option<Result<(), FeedError>> {
         if self.outcome.is_none() {
             use oneshot::error::TryRecvError;

@@ -13,6 +13,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::net::Ipv4Addr;
 
 /// Serialize an `Ipv4Addr` as a ClickHouse `IPv4` (`UInt32`) value.
+///
+/// # Errors
+///
+/// When `serializer` fails.
 pub fn serialize<S>(ip: &Ipv4Addr, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -25,6 +29,11 @@ where
 }
 
 /// Deserialize an `Ipv4Addr` from a ClickHouse `IPv4` (`UInt32`) value.
+///
+/// # Errors
+///
+/// When the input is not a `UInt32`, or, from a human-readable deserializer,
+/// not a string holding an IPv4 address.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<Ipv4Addr, D::Error>
 where
     D: Deserializer<'de>,

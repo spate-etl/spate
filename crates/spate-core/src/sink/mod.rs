@@ -164,6 +164,13 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// The stage logs the error's text for a skipped record and uses it as
     /// the pipeline's failure reason, so an encoder keeps the record's
     /// content out of it.
+    ///
+    /// # Errors
+    ///
+    /// The stage rolls back the record's partial encoding. Under `Skip` it
+    /// counts and skips the record, unless the error is
+    /// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal); every other
+    /// case stops the pipeline.
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,
@@ -204,6 +211,10 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// Because a Native block concatenates with the blocks around it, each
     /// `finish_chunk` frame is independently valid, so workers still
     /// accumulate frames without re-encoding.
+    ///
+    /// # Errors
+    ///
+    /// Any error stops the pipeline; see above.
     fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
         let _ = buf;
         Ok(())

@@ -45,9 +45,9 @@ pub enum ConfigError {
     },
 
     /// A component section (`source:`, `sink:`, a `sinks:` entry,
-    /// `deserializer:`, a `feed:` backend) does not name exactly one
-    /// component, its opaque body failed to deserialize into the component's typed config,
-    /// or the component refuses what it holds.
+    /// `deserializer:`, a `feed:` backend) names a component other than the
+    /// one reading it, its opaque body failed to deserialize into the
+    /// component's typed config, or the component refuses what it holds.
     /// [`SectionPath::invalid`](super::SectionPath::invalid) builds a refusal
     /// of one key, and [`SectionPath::error`](super::SectionPath::error) one
     /// about the whole section.

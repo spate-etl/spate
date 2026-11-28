@@ -228,6 +228,10 @@ impl ExitReport {
     /// The report as a `Result`, so a `main` can `?` a failed run: a clean
     /// exit passes the report through, a failure returns the
     /// [`FatalError`] as the error.
+    ///
+    /// # Errors
+    ///
+    /// The run's [`FatalError`] when it ended in [`ExitState::Failed`].
     pub fn ok(self) -> Result<ExitReport, FatalError> {
         match &self.state {
             ExitState::Completed => Ok(self),

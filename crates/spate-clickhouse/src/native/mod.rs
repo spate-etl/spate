@@ -185,6 +185,11 @@ impl NativeSchema {
     /// must match the server's column types exactly, or the server rejects
     /// the block. The first-record check compares the row against the types
     /// named here.
+    ///
+    /// # Errors
+    ///
+    /// [`NativeError::UnsupportedColumn`] for the first type string the Native
+    /// encoder cannot write, including one it cannot parse.
     #[cfg(any(test, feature = "testing"))]
     pub fn from_columns(specs: &[(&str, &str)]) -> Result<Arc<NativeSchema>, NativeError> {
         Self::from_expected(RowSchema {

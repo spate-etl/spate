@@ -154,10 +154,6 @@ A classifier that adds one operation's context, such as whether an insert body i
 
 **Follow:** `classify_store_error` and `store_error` in [`crates/spate-s3/src/error.rs`](repo:crates/spate-s3/src/error.rs).
 
-**Departs:** these classifiers ([#1606](https://github.com/spate-etl/spate/issues/1606)):
-
-- spate-clickhouse: `classify`, `classify_insert`, and `class_of`, kept outside `error.rs`.
-
 **Checked by:** review.
 
 ### Refuse unknown YAML keys

@@ -193,7 +193,7 @@ where
                     "schema validation could not probe the row struct: {e}"
                 ))
             })?;
-            schema::check_first_record(&self.expected, &fields).map_err(SinkError::fatal)?;
+            schema::check_first_record(&self.expected, &fields)?;
             self.checked = true;
         }
         rowbinary::serialize_row(&rec.payload, buf)

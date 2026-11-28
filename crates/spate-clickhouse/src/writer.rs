@@ -1,6 +1,7 @@
 //! The I/O half of the sink: writing sealed batches to replica endpoints.
 
 use crate::codec::BlockMethod;
+use crate::error::{CANNOT_DECOMPRESS, classify_client_error, exception_code};
 use bytes::Bytes;
 use spate_core::config::{Denylist, redact};
 use spate_core::error::{ErrorClass, SinkError};
@@ -257,17 +258,17 @@ impl ShardWriter for ClickHouseWriter {
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());
         }
-        let classify = |err| classify_insert(err, coded);
+        let error = |err| insert_error(err, coded);
         // Once per request body, ahead of the rows, so a retry re-sends
         // identical bytes under an identical token.
         if let Some(header) = &self.header {
-            insert.send(header.clone()).await.map_err(classify)?;
+            insert.send(header.clone()).await.map_err(error)?;
         }
         for frame in &batch.frames {
             // `Bytes` clones are refcounted views, not copies.
-            insert.send(frame.clone()).await.map_err(classify)?;
+            insert.send(frame.clone()).await.map_err(error)?;
         }
-        insert.end().await.map_err(classify)
+        insert.end().await.map_err(error)
     }
 
     async fn probe(&self, endpoint: &ClickHouseEndpoint) -> Result<(), SinkError> {
@@ -277,7 +278,7 @@ impl ShardWriter for ClickHouseWriter {
             .fetch_one::<u8>()
             .await
             .map(drop)
-            .map_err(classify)
+            .map_err(client_error)
     }
 }
 
@@ -300,74 +301,19 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
     Ok(())
 }
 
-/// Server exception codes that cannot succeed on retry: schema, parse,
-/// settings, authentication, size-limit and block-decoding classes. Everything else is retried:
-/// with deduplication tokens a spurious retry is idempotent, and the circuit
-/// breaker plus the stalled-watermark alert surface persistent failures.
-///
-/// 271 is the block-decoding code. A `decompress=1` body whose block fails its
-/// checksum or does not decode answers 271. The sink makes those blocks once,
-/// at seal, and a retry resends the same bytes. An insert answers 271 too when
-/// the server reads a stored block that passes its checksum and fails to
-/// decode, such as a materialized view reading a damaged part, so
-/// [`classify_insert`] keeps 271 `Fatal` only for an insert whose body is coded.
-///
-/// An insert answers 50 or 62 when a type name it reads names no type or does
-/// not parse. The server reads the whole name before it parses it, so a body
-/// cut short never answers either. A stored `Dynamic` or `JSON` part that a
-/// materialized view reads during the insert can answer them too, and that
-/// insert fails as well.
-///
-/// An insert answers 128 or 131 when its body is over a size limit: a block
-/// header's column, row or name bounds, or a RowBinary value over
-/// `format_binary_max_array_size` or `format_binary_max_string_size`. A
-/// function a materialized view runs on the rows, a damaged stored part, or a
-/// replica whose profile sets a lower cap can answer them too, and that insert
-/// fails as well.
-///
-/// A replica answers 452 when a settings constraint pins a setting the sink
-/// sends, such as `deduplicate_insert`, and 467 when a `settings` value does
-/// not parse as the bool the setting takes. Both answer every attempt the
-/// same way, at startup and at insert.
-const FATAL_EXCEPTION_CODES: &[u32] = &[
-    6,   // CANNOT_PARSE_TEXT
-    16,  // NO_SUCH_COLUMN_IN_TABLE
-    20,  // NUMBER_OF_COLUMNS_DOESNT_MATCH
-    27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
-    50,  // UNKNOWN_TYPE
-    53,  // TYPE_MISMATCH
-    60,  // UNKNOWN_TABLE
-    62,  // SYNTAX_ERROR
-    73,  // UNKNOWN_FORMAT
-    81,  // UNKNOWN_DATABASE
-    115, // UNKNOWN_SETTING
-    117, // INCORRECT_DATA
-    128, // TOO_LARGE_ARRAY_SIZE
-    131, // TOO_LARGE_STRING_SIZE
-    192, // UNKNOWN_USER
-    CANNOT_DECOMPRESS,
-    452, // SETTING_CONSTRAINT_VIOLATION
-    467, // CANNOT_PARSE_BOOL
-    497, // ACCESS_DENIED
-    516, // AUTHENTICATION_FAILED
-];
-
-/// The server's block-decoding exception code.
-const CANNOT_DECOMPRESS: u32 = 271;
-
-/// Classifies an insert's error as [`classify`] does, except that 271 is
+/// Classifies an insert's error as [`client_error`] does, except that 271 is
 /// `Retryable` when the body is not `coded`.
 ///
 /// An uncoded body carries no compressed block, so its 271 comes from data the
 /// server reads itself, and another replica can take the insert.
-fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
+fn insert_error(err: clickhouse::error::Error, coded: bool) -> SinkError {
     let stored_block = !coded
         && matches!(
             &err,
             clickhouse::error::Error::BadResponse(reason)
                 if exception_code(reason) == Some(CANNOT_DECOMPRESS)
         );
-    let classified = classify(err);
+    let classified = client_error(err);
     if stored_block {
         classified.with_class(ErrorClass::Retryable)
     } else {
@@ -376,66 +322,15 @@ fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
 }
 
 /// Map an insert's client error onto the framework's retryable/fatal
-/// taxonomy, by [`class_of`] with `Retryable` for a variant it does not name.
+/// taxonomy, by [`classify_client_error`] with `Retryable` for a variant it does not name.
 ///
 /// An insert retries an unanticipated error: the retry is idempotent under
 /// dedup tokens and shows in the breaker metrics if it persists.
-fn classify(err: clickhouse::error::Error) -> SinkError {
+fn client_error(err: clickhouse::error::Error) -> SinkError {
     SinkError::from_class(
-        class_of(&err, ErrorClass::Retryable),
+        classify_client_error(&err, ErrorClass::Retryable),
         crate::http::error_reason(&err),
     )
-}
-
-/// The class of a client error, for an insert and for a startup request
-/// alike:
-///
-/// - a TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) →
-///   `Fatal`, whatever the variant carrying it;
-/// - other transport (`Network`, `TimedOut`) and uncategorized client errors
-///   (`Other`) → `Retryable`;
-/// - server exceptions (`BadResponse`) → fatal only for the schema, parse,
-///   settings, auth, size-limit and block-decoding codes above, `Retryable`
-///   otherwise (e.g. `TOO_MANY_PARTS`, memory pressure, shutdown races, or a
-///   proxy's 503 with no code);
-/// - client-side params and both codec directions (`InvalidParams`,
-///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
-///   `Fatal`;
-/// - any other variant, such as a reply that does not decode → `otherwise`.
-pub(crate) fn class_of(err: &clickhouse::error::Error, otherwise: ErrorClass) -> ErrorClass {
-    use clickhouse::error::Error as ChError;
-    match err {
-        _ if spate_core::tls_rejection!(rustls, err).is_some() => ErrorClass::Fatal,
-        ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
-        ChError::BadResponse(reason) => {
-            if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {
-                ErrorClass::Fatal
-            } else {
-                ErrorClass::Retryable
-            }
-        }
-        ChError::InvalidParams(_)
-        | ChError::SchemaMismatch(_)
-        | ChError::Unsupported(_)
-        | ChError::Compression(_)
-        | ChError::Decompression(_) => ErrorClass::Fatal,
-        _ => otherwise,
-    }
-}
-
-/// Extract the exception code from a ClickHouse error reason. Servers send
-/// `"Code: NNN. DB::Exception: ..."` bodies; the client's standardized
-/// fallback (empty/unreadable body) is the bare code from the
-/// `X-ClickHouse-Exception-Code` header, e.g. `"60"`.
-pub(crate) fn exception_code(reason: &str) -> Option<u32> {
-    let digits_at = |s: &str| -> Option<u32> {
-        let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse().ok()
-    };
-    match reason.find("Code: ") {
-        Some(at) => digits_at(&reason[at + 6..]),
-        None => digits_at(reason.trim()),
-    }
 }
 
 #[cfg(test)]
@@ -478,112 +373,30 @@ mod tests {
     }
 
     #[test]
-    fn exception_codes_are_extracted() {
-        assert_eq!(
-            exception_code("Code: 60. DB::Exception: Table default.x does not exist"),
-            Some(60)
-        );
-        assert_eq!(
-            exception_code("bad response: Code: 252. DB::Exception: Too many parts"),
-            Some(252)
-        );
-        assert_eq!(exception_code("no code here"), None);
-        // Standardized fallback: the bare header value.
-        assert_eq!(exception_code("60"), Some(60));
-        assert_eq!(exception_code(" 252 "), Some(252));
-    }
-
-    #[test]
     fn classification_matches_the_documented_taxonomy() {
-        let fatal = classify(clickhouse::error::Error::BadResponse(
+        let fatal = client_error(clickhouse::error::Error::BadResponse(
             "Code: 60. DB::Exception: Table default.orders does not exist".into(),
         ));
         assert_eq!(fatal.class(), ErrorClass::Fatal, "{fatal}");
 
-        let retryable = classify(clickhouse::error::Error::BadResponse(
+        let retryable = client_error(clickhouse::error::Error::BadResponse(
             "Code: 252. DB::Exception: Too many parts".into(),
         ));
         assert_eq!(retryable.class(), ErrorClass::Retryable, "{retryable}");
 
-        let timeout = classify(clickhouse::error::Error::TimedOut);
+        let timeout = client_error(clickhouse::error::Error::TimedOut);
         assert_eq!(timeout.class(), ErrorClass::Retryable, "{timeout}");
 
-        let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
+        let schema = client_error(clickhouse::error::Error::SchemaMismatch("boom".into()));
         assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
     }
 
-    /// An insert retries a client error `class_of` does not name, such as the
+    /// An insert retries a client error `classify_client_error` does not name, such as the
     /// `Custom` error the client returns for a cancelled request task.
     #[test]
     fn an_insert_retries_an_unnamed_client_error() {
-        let err = classify(clickhouse::error::Error::Custom("task cancelled".into()));
+        let err = client_error(clickhouse::error::Error::Custom("task cancelled".into()));
         assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
-    }
-
-    /// `class_of` gives each variant it names the same class whatever the
-    /// caller's `otherwise`, and every other variant `otherwise`. A server
-    /// answer with no exception code, as a proxy's 503 page has, is
-    /// retryable.
-    #[test]
-    fn class_of_names_each_variant_and_defers_the_rest() {
-        use ErrorClass::{Fatal, Retryable};
-        use clickhouse::error::Error as E;
-        let boxed = || -> Box<dyn std::error::Error + Send + Sync> { "x".into() };
-        let named: Vec<(E, ErrorClass)> = vec![
-            (E::Network(boxed()), Retryable),
-            (E::TimedOut, Retryable),
-            (E::Other(boxed()), Retryable),
-            (
-                E::BadResponse("Code: 516. DB::Exception: Authentication failed".into()),
-                Fatal,
-            ),
-            (
-                E::BadResponse(
-                    "Code: 452. DB::Exception: Setting deduplicate_insert should not be changed"
-                        .into(),
-                ),
-                Fatal,
-            ),
-            (
-                E::BadResponse(
-                    "Code: 467. DB::Exception: Cannot parse bool from string 'maybe'".into(),
-                ),
-                Fatal,
-            ),
-            (
-                E::BadResponse("Code: 241. DB::Exception: Memory limit exceeded".into()),
-                Retryable,
-            ),
-            (
-                E::BadResponse("<html><body>503 Service Unavailable</body></html>".into()),
-                Retryable,
-            ),
-            (E::InvalidParams(boxed()), Fatal),
-            (E::SchemaMismatch("x".into()), Fatal),
-            (E::Unsupported("x".into()), Fatal),
-            (E::Compression(boxed()), Fatal),
-            (E::Decompression(boxed()), Fatal),
-        ];
-        for (err, class) in &named {
-            for otherwise in [Fatal, Retryable] {
-                assert_eq!(
-                    class_of(err, otherwise),
-                    *class,
-                    "{err:?} under {otherwise:?}"
-                );
-            }
-        }
-        let unnamed = [
-            E::NotEnoughData,
-            E::DataFormat(boxed()),
-            E::RowNotFound,
-            E::Custom("x".into()),
-        ];
-        for err in &unnamed {
-            for otherwise in [Fatal, Retryable] {
-                assert_eq!(class_of(err, otherwise), otherwise, "{err:?}");
-            }
-        }
     }
 
     /// A body over a server size limit answers 128 or 131, which classify
@@ -596,8 +409,7 @@ mod tests {
         ];
         for reason in reasons {
             for coded in [false, true] {
-                let err =
-                    classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+                let err = insert_error(clickhouse::error::Error::BadResponse(reason.into()), coded);
                 assert_eq!(err.class(), ErrorClass::Fatal, "coded {coded}: {err:?}");
             }
         }
@@ -608,7 +420,7 @@ mod tests {
     #[test]
     fn an_unknown_setting_is_fatal() {
         let reason = "Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) (version 26.8.36.3 (official build))";
-        let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
+        let err = insert_error(clickhouse::error::Error::BadResponse(reason.into()), true);
         assert_eq!(err.class(), ErrorClass::Fatal, "{err:?}");
     }
 
@@ -617,12 +429,12 @@ mod tests {
     /// Regression for #566.
     #[test]
     fn codec_errors_classify_fatal() {
-        let compression = classify(clickhouse::error::Error::Compression(
+        let compression = client_error(clickhouse::error::Error::Compression(
             "zstd: out of memory".into(),
         ));
         assert_eq!(compression.class(), ErrorClass::Fatal, "{compression}");
 
-        let decompression = classify(clickhouse::error::Error::Decompression(
+        let decompression = client_error(clickhouse::error::Error::Decompression(
             "incorrect magic number".into(),
         ));
         assert_eq!(decompression.class(), ErrorClass::Fatal, "{decompression}");
@@ -636,7 +448,7 @@ mod tests {
             "Code: 271. DB::Exception: Checksum doesn't match: corrupted data.",
             "Code: 271. DB::Exception: Cannot decompress: LZ4 decompression failed.",
         ] {
-            let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
+            let err = insert_error(clickhouse::error::Error::BadResponse(reason.into()), true);
             assert_eq!(err.class(), ErrorClass::Fatal, "{reason}: {err:?}");
         }
     }
@@ -651,8 +463,7 @@ mod tests {
             "Code: 50. DB::Exception: Unknown data type family: ZZ: While executing WaitForAsyncInsert. (UNKNOWN_TYPE) (version 26.8.36.3 (official build))",
         ] {
             for coded in [false, true] {
-                let err =
-                    classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+                let err = insert_error(clickhouse::error::Error::BadResponse(reason.into()), coded);
                 assert_eq!(err.class(), ErrorClass::Fatal, "coded={coded}: {reason}");
             }
         }
@@ -665,7 +476,7 @@ mod tests {
     #[test]
     fn a_server_side_checksum_failure_is_retryable() {
         let reason = "Code: 40. DB::Exception: Checksum doesn't match: corrupted data. Reference: 2338a6e26c614fec6feb62deae67c37e. Actual: 71bfc9638d4ed97f67949d6eba179620. Size of compressed block: 32780: While reading or decompressing /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/data.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/ in table default.dim (c5066d20-e7a6-4ee3-83d5-a200e66893db) located on disk default of type local, from mark 0 with max_rows_to_read = 65536): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CHECKSUM_DOESNT_MATCH) (version 26.8.17.4 (official build))";
-        let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
+        let err = client_error(clickhouse::error::Error::BadResponse(reason.into()));
         assert_eq!(err.class(), ErrorClass::Retryable, "{err:?}");
     }
 
@@ -676,7 +487,7 @@ mod tests {
     fn a_server_side_decode_failure_is_fatal_only_when_coded() {
         let reason = "Code: 271. DB::Exception: Cannot decompress LZ4-encoded data: While reading or decompressing /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/k.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/ in table default.dim (a1609cef-2585-4c66-be6e-1707b7b286c6) located on disk default of type local, from mark 0 with max_rows_to_read = 49152): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CANNOT_DECOMPRESS) (version 26.8.17.4 (official build))";
         for (coded, expected) in [(false, ErrorClass::Retryable), (true, ErrorClass::Fatal)] {
-            let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+            let err = insert_error(clickhouse::error::Error::BadResponse(reason.into()), coded);
             assert_eq!(err.class(), expected, "coded: {coded}, {err:?}");
         }
     }
@@ -733,7 +544,7 @@ mod tests {
         });
         let err = failed_query(&TestCa::new("any"), &url).await;
         assert!(format!("{err:?}").contains("InvalidMessage"), "{err:?}");
-        let err = classify(err);
+        let err = client_error(err);
         let reason = err.reason();
         assert_eq!(err.class(), ErrorClass::Retryable, "{reason}");
     }
@@ -754,7 +565,7 @@ mod tests {
             let addr = spate_test::tls_alert_server(b"", u8::from(alert));
             let err = failed_query(&ca, &format!("https://{addr}")).await;
             assert!(format!("{err:?}").contains(&name), "{err:?}");
-            let err = classify(err);
+            let err = client_error(err);
             let reason = err.reason();
             assert_eq!(err.class(), expected, "{reason}");
             if expected == ErrorClass::Fatal {
@@ -770,7 +581,7 @@ mod tests {
         let server = TestCa::new("server");
         let url = serve(&server, Some(&TestCa::new("clients"))).await;
         let err = failed_query(&server, &url).await;
-        let err = classify(err);
+        let err = client_error(err);
         let reason = err.reason();
         assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
         assert!(reason.contains("CertificateRequired"), "{reason}");

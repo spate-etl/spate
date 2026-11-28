@@ -89,19 +89,12 @@ pub enum NativeError {
         /// Fields the row serialized.
         got: usize,
     },
-    /// The first record's probed struct does not match the declared
-    /// columns (pre-formatted multi-line diff): field names, order, and
-    /// class-incompatible types per position, including a wire-wrapper scale
-    /// that disagrees with the column (`DateTime64Millis` into
-    /// `DateTime64(6)`).
-    #[error("{0}")]
-    FirstRecord(String),
     /// A tuple/geo value serialized more elements than its column has.
     #[error("tuple value has more elements than the column type")]
     TupleArity,
-    /// The row did not serialize as a struct/tuple of columns.
+    /// The row did not serialize as a struct, tuple or sequence of columns.
     #[error("row must serialize as a struct or tuple of columns")]
-    NotAStruct,
+    NotARow,
     /// A `LowCardinality` column reached 2^32 distinct values in one block,
     /// the most its `UInt32` keys index.
     #[error(
@@ -354,8 +347,7 @@ where
         // tuple rows).
         if !self.checked {
             if let Ok(fields) = probe::probe_row(&rec.payload) {
-                crate::schema::check_first_record(&self.schema.expected, &fields)
-                    .map_err(|diff| NativeError::FirstRecord(diff).into_sink_error())?;
+                crate::schema::check_first_record(&self.schema.expected, &fields)?;
             }
             self.checked = true;
         }

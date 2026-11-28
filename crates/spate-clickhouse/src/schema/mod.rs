@@ -36,6 +36,7 @@ use bytes::{Bytes, BytesMut};
 pub(crate) use probe::Wire;
 use probe::{FieldShape, Shape, compatible};
 use serde::{Deserialize, Serialize};
+use spate_core::error::SinkError;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use typeparse::ChType;
@@ -383,8 +384,8 @@ pub(crate) async fn validate(
 }
 
 /// The first-record struct check: field names and order against the declared
-/// columns, plus class-based type compatibility per position. Returns the
-/// pre-formatted diff on failure.
+/// columns, plus class-based type compatibility per position. A mismatch
+/// fails `Fatal`, with the pre-formatted diff as its reason.
 ///
 /// This is not made redundant by `ClickHouseRow::COLUMNS` being a compile-time
 /// const: it compares that declared list against what the struct's `Serialize`
@@ -393,7 +394,10 @@ pub(crate) async fn validate(
 /// order, a hand-written `ClickHouseRowFamily` impl (see
 /// [`crate::ClickHouseRowFamily`]), or a `#[serde(skip_serializing_if)]`
 /// field that fires.
-pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> Result<(), String> {
+pub(crate) fn check_first_record(
+    schema: &RowSchema,
+    fields: &[FieldShape],
+) -> Result<(), SinkError> {
     let mut findings = Vec::new();
     if fields.len() != schema.columns.len() {
         findings.push(format!(
@@ -443,7 +447,7 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
             .collect::<Vec<_>>()
             .join(", ")
     );
-    Err(msg)
+    Err(SinkError::fatal(msg))
 }
 
 fn shape_desc(shape: &Shape) -> String {
@@ -488,6 +492,7 @@ mod tests {
     use super::*;
     use probe::probe_row;
     use serde::Serialize;
+    use spate_core::error::ErrorClass;
 
     fn schema(cols: &[(&str, &str)]) -> RowSchema {
         RowSchema {
@@ -519,13 +524,21 @@ mod tests {
     #[test]
     fn matching_struct_passes() {
         let s = schema(&[("id", "UInt64"), ("amount", "Int64"), ("name", "String")]);
-        assert_eq!(check_first_record(&s, &fields()), Ok(()));
+        assert!(check_first_record(&s, &fields()).is_ok());
+    }
+
+    /// The reason `check_first_record` fails `s` with, after asserting it is
+    /// `Fatal`.
+    fn mismatch(s: &RowSchema) -> String {
+        let err = check_first_record(s, &fields()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        err.reason().to_owned()
     }
 
     #[test]
     fn field_order_mismatch_is_reported_per_position() {
         let s = schema(&[("id", "UInt64"), ("name", "String"), ("amount", "Int64")]);
-        let err = check_first_record(&s, &fields()).unwrap_err();
+        let err = mismatch(&s);
         assert!(err.contains("position 1: struct field `amount` vs declared column `name`"));
         assert!(err.contains("position 2: struct field `name` vs declared column `amount`"));
         assert!(err.contains("struct fields (declaration order): id, amount, name"));
@@ -539,7 +552,7 @@ mod tests {
             ("amount", "DateTime"), // i64 field is not a u32 DateTime
             ("name", "String"),
         ]);
-        let err = check_first_record(&s, &fields()).unwrap_err();
+        let err = mismatch(&s);
         assert!(
             err.contains("struct field `amount` (i64) is not compatible with `amount` DateTime"),
             "{err}"
@@ -560,7 +573,7 @@ mod tests {
     #[test]
     fn field_count_mismatch_names_the_skip_footgun() {
         let s = schema(&[("id", "UInt64")]);
-        let err = check_first_record(&s, &fields()).unwrap_err();
+        let err = mismatch(&s);
         assert!(err.contains("serialized 3 field(s) but 1 column(s)"));
         assert!(err.contains("#[serde(skip)]"));
     }

@@ -122,7 +122,7 @@ Leave the bench profile at the default number of codegen units.
 CI runs one counted job per package, feature arm and architecture, on Linux x86_64 and aarch64.
 The arms are listed in `feature_arms_for` in [`xtask/src/ci/classify.rs`](repo:xtask/src/ci/classify.rs).
 Add an arm when building with a feature changes the code the benches execute, and not for every feature.
-The change can come from the library or from the bench rig: spate-json's `simd` arm turns on `simd-json`, and its rig then calls `with_simd_json` on every builder.
+The change can come from the library or from the bench rig: spate-json's `simd` arm turns on `simd-json`, and its rig then calls `with_simd_json` for every case but the two that keep `serde_json`.
 
 **Why:** each arm adds a pair of builds and valgrind runs on each architecture.
 

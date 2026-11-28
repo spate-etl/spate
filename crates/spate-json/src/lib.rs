@@ -61,10 +61,10 @@
 //! # Backends
 //!
 //! Decoding uses `serde_json` (stable 1.x) by default. With the `simd-json`
-//! Cargo feature, [`JsonDeserializerBuilder::with_simd_json`] makes the
+//! Cargo feature, `JsonDeserializerBuilder::with_simd_json` makes the
 //! deserializers built from that builder decode with `simd-json`
 //! (SIMD-accelerated parsing) instead. The feature alone changes nothing: each
-//! pipeline chooses, because `simd-json` is faster on some payloads and slower
+//! builder chooses, because `simd-json` is faster on some payloads and slower
 //! on others, depending on the payload and the CPU. The JSON connector guide's
 //! Backends section gives the measured figures, and the method's
 //! documentation lists where the two parsers differ. `from_reader` is never

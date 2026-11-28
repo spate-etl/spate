@@ -1087,3 +1087,28 @@ fn the_simd_arm_decodes_through_simd_json() {
         "malformed payload: malformed: InternalError at character 7"
     );
 }
+
+/// The `_serde` cases decode through `serde_json` in the `simd` arm.
+///
+/// They count a build with the feature on and the call not made, so a rig
+/// that routed them through the arm's parser would count `simd-json` under
+/// their names. `serde_json` reads an integer above `u64::MAX` as an `f64`,
+/// and `simd-json` refuses it, so the same line yields one record from the
+/// `_serde` settings and none from the arm's.
+#[cfg(feature = "simd-json")]
+#[test]
+fn the_serde_cases_decode_through_serde_json_in_the_simd_arm() {
+    let payload = raw_payload(br#"{"n":18446744073709551616}"#);
+    let (ack, _rx) = AckRef::test_pair();
+    let mut serde = decode_rig::serde_settings(JsonFraming::Lines).build_value();
+    let mut emitted = Sink::default();
+    serde
+        .deserialize(&payload, &ack, &mut emitted)
+        .expect("serde_json reads the integer as a float");
+    assert_eq!(emitted.count, 1);
+    let mut arm = full_settings(JsonFraming::Lines, JsonOnError::Skip, false).build_value();
+    let mut emitted = Sink::default();
+    arm.deserialize(&payload, &ack, &mut emitted)
+        .expect("a refused line is skipped");
+    assert_eq!(emitted.count, 0);
+}

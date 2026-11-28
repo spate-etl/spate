@@ -13,8 +13,8 @@ queue's redrive policy moves a unit that keeps failing to the dead-letter queue.
 The backend lives in its own crate so that a source names no backend
 ([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
 
-Construct it from the pipeline's opaque section, with the I/O runtime handle,
-and pass it to `Pipeline::feed`:
+Decode the pipeline's `feed:` section into an `SqsFeedConfig`, connect the feed
+with the I/O runtime handle, and pass it to `Pipeline::feed`:
 
 ```rust file=crates/spate/examples/s3_sqs_backfill.rs region=connect
 ```
@@ -29,10 +29,16 @@ JOB_LOCATION="file://$(mktemp -d)/" \
   cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
 ```
 
-`SqsFeed::connect` reads the queue and its dead-letter queue once and runs
-the [startup checks](#startup-checks), so a missing queue, a refused
-credential or a queue the feed cannot dead-letter from fails there, before the
-pipeline starts. Connecting takes at most 30 seconds, every step included;
+Code that builds its pipeline without a file starts from
+`SqsFeedConfig::new(queue_url)`, sets the public fields it needs, and passes the
+config to `SqsFeed::connect` in the same way. The config has the keys and
+defaults of the table under [Configuration](#configuration).
+
+`SqsFeed::connect` first checks the config, and fails as a configuration error
+on a value the table refuses. It then reads the queue and its dead-letter queue
+once and runs the [startup checks](#startup-checks), so a missing queue, a
+refused credential or a queue the feed cannot dead-letter from fails there,
+before the pipeline starts. Connecting takes at most 30 seconds, every step included;
 past that it fails as unavailable, naming the step it was on.
 
 ## Configuration
@@ -54,7 +60,10 @@ fields are rejected with the offending key.
 
 `units_held` beside `sqs:` sets how many units a worker holds at once. The
 section's `attempt_cap` is refused on `sqs`, because SQS counts deliveries
-through the queue's `maxReceiveCount`.
+through the queue's `maxReceiveCount`. The refusal, and the `settling_window`
+floor under [Ending a bounded job](#ending-a-bounded-job), also apply to a feed
+built from a config in code: the runtime hands it the section before the source
+opens, and a lister run does before it lists.
 
 In another AWS partition, the feed reads the region from the queue URL's host
 when the SDK's partition table lists that partition. A VPC endpoint host, a

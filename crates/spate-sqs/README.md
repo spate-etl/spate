@@ -18,8 +18,10 @@ feature `s3`.
 ## Configuration
 
 The feed reads the `sqs:` body of the pipeline's `feed:` section. `main()`
-builds it with `SqsFeed::connect` and passes it to `Pipeline::feed`. Only
-`queue_url` is required, and an unknown key is rejected.
+decodes it with `SqsFeedConfig::from_section`, builds the feed with
+`SqsFeed::connect` and passes it to `Pipeline::feed`. Code without a pipeline
+file starts from `SqsFeedConfig::new(queue_url)` instead. Only `queue_url` is
+required, and an unknown key is rejected.
 
 ```yaml
 feed:
@@ -54,15 +56,17 @@ feed:
 - `attempt_cap` is refused on `sqs`, because the queue's `maxReceiveCount`
   counts deliveries. A `settling_window` below `1m` is refused too, because
   AWS documents SQS's message counts as taking at least a minute to settle.
+  Both refusals also reach a feed built from a config in code, when the runtime
+  or a lister run hands it the section.
 
 `units_held`, `location` and `settling_window` belong to the `feed:` section and
 are read by the source. Unset, `units_held` leaves the source's own default.
 
-`SqsFeed::connect` reads the queue's attributes and its dead-letter queue's
-once, and takes at most 30 seconds. It refuses a FIFO queue, a queue with no
-redrive policy, a dead-letter queue it cannot read or that keeps messages no
-longer than the queue, and a queue of the two that does not report its message
-counts. Credentials come from the AWS SDK's default provider chain.
+`SqsFeed::connect` checks the config, as `SqsFeedConfig::validate` does, then
+reads the queue's attributes and its dead-letter queue's once, and takes at
+most 30 seconds. It refuses a FIFO queue, a queue with no redrive policy, a
+dead-letter queue it cannot read or that keeps messages no longer than the
+queue, and a queue of the two that does not report its message counts. Credentials come from the AWS SDK's default provider chain.
 
 The
 [Configuration section of the SQS feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#configuration)
@@ -191,8 +195,8 @@ makes on the feed under the framework's `spate_feed_*` families.
 - [SQS feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs)
   — every key, the IAM actions, the startup checks, redriving dead-lettered
   units, cost per request and the metric families.
-- [API documentation on docs.rs](https://docs.rs/spate-sqs) — `SqsFeed` and
-  `SqsFeed::connect`.
+- [API documentation on docs.rs](https://docs.rs/spate-sqs) — `SqsFeed`,
+  `SqsFeedConfig` and `SqsFeed::connect`.
 - [`s3_sqs_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_sqs_backfill.rs)
   — a bounded backfill whose work arrives through an SQS queue, with a job
   location. Needs an SQS queue, a dead-letter queue with a longer retention, and

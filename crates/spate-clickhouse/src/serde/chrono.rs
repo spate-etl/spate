@@ -91,8 +91,9 @@ pub mod datetime64 {
                 ///
                 /// # Errors
                 ///
-                /// When the input is not an `Int64`, or the ticks fall outside
-                /// what `DateTime<Utc>` holds.
+                /// When the input is not an `Int64`, or, in [`secs`](super::secs),
+                /// [`millis`](super::millis) and [`micros`](super::micros), when
+                /// the ticks fall outside what `DateTime<Utc>` holds.
                 pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
                 where
                     D: Deserializer<'de>,

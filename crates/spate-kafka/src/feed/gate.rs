@@ -88,6 +88,9 @@ enum Read {
 struct Unread {
     partitions: Vec<i32>,
     reasons: Vec<String>,
+    /// Whether a watermark read failed, as opposed to the pass reaching its
+    /// bound before it read.
+    failed: bool,
 }
 
 impl Gate {
@@ -169,7 +172,7 @@ impl Gate {
                     .partition(|e| unread.partitions.contains(&self.partition(e)));
                 self.put_back(back, Halt::Behind(unread.reasons.join("; ")));
                 self.admit(read);
-                self.rest();
+                self.rest(unread.failed);
             }
             Err(halt) => self.put_back(entries, halt),
         }
@@ -181,9 +184,25 @@ impl Gate {
     }
 
     /// Wait one step before the next pass, so a watermark read that fails
-    /// at once is not repeated in a busy loop. A stop, or a delivery that
-    /// arrives while it waits, ends the wait early.
-    fn rest(&self) {
+    /// at once is not repeated in a busy loop. When `refresh` is set, the
+    /// step begins with a metadata request for the attempt topic on the
+    /// lister, bounded by the step, and the wait takes what is left of it. A
+    /// feed that stopped or latched skips both, and a stop or a delivery that
+    /// arrives during the wait ends it early.
+    fn rest(&self, refresh: bool) {
+        // A refresh on an ended feed would hold its teardown for a step.
+        if self.ended().is_err() {
+            return;
+        }
+        let begun = Instant::now();
+        if refresh {
+            // librdkafka answers a partition its cache holds with no leader
+            // from that cache, without asking the broker again.
+            let _ = self
+                .lister
+                .fetch_metadata(Some(&self.core.topics.attempt), self.step);
+        }
+        let left = self.step.saturating_sub(begun.elapsed());
         let st = self.core.lock();
         // Checked under the state lock, as in `take`.
         if st.signal.latched().is_none() && !self.core.stopped() {
@@ -191,12 +210,13 @@ impl Gate {
             let st = {
                 let mut st = st;
                 st.step_waits += 1;
+                st.step_left = Some(left);
                 st
             };
             drop(
                 self.core
                     .gate_wake
-                    .wait_timeout(st, self.step)
+                    .wait_timeout(st, left)
                     .unwrap_or_else(PoisonError::into_inner),
             );
         }
@@ -253,6 +273,7 @@ impl Gate {
                 Read::Failed(reason) => {
                     unread.partitions.push(partition);
                     unread.reasons.push(reason);
+                    unread.failed = true;
                 }
                 Read::Late => late.push(partition),
             }
@@ -590,9 +611,10 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::mpsc;
 
-    /// Pins that the wait after a pass that put units back is skipped on a
-    /// feed that stopped or latched before the wait began, whose notify has
-    /// already fired or never fires: with a step of an hour, `rest` returns.
+    /// Pins that the refresh and the wait after a pass that put units back
+    /// are skipped on a feed that stopped or latched before the wait began,
+    /// whose notify has already fired or never fires: with a step of an hour
+    /// and a broker that never answers, `rest` returns.
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -629,7 +651,7 @@ mod tests {
             }
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                gate.rest();
+                gate.rest(true);
                 let _ = tx.send(());
             });
             assert!(

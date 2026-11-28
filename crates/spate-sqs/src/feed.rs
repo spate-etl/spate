@@ -34,7 +34,7 @@ use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
 use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::tokio::{Clock, SystemClock, before};
 use spate_core::clock::{SyncClock, deadline_after};
-use spate_core::config::{FeedSection, redact};
+use spate_core::config::{ConfigError, FeedSection, redact};
 use spate_core::error::ConnectError;
 use spate_core::error::ErrorClass;
 use spate_core::feed::{
@@ -420,8 +420,8 @@ impl Shared {
     }
 }
 
-/// The work feed over one SQS standard queue, built from a
-/// `feed: { sqs: … }` section.
+/// The work feed over one SQS standard queue, built from an
+/// [`SqsFeedConfig`] by [`SqsFeed::connect`].
 ///
 /// A unit is a message: its body is the message body, sent as text, and its
 /// id travels in the String message attribute `spate.unit`. A delivery's
@@ -457,8 +457,8 @@ impl std::fmt::Debug for SqsFeed {
 }
 
 impl SqsFeed {
-    /// Build the feed a `feed: { sqs: … }` section names, connect it, and
-    /// start its tasks on `io`, the pipeline's I/O runtime.
+    /// Check `config`, connect the feed it names, and start its tasks on
+    /// `io`, the pipeline's I/O runtime.
     ///
     /// Credentials come from the AWS provider chain. Connecting reads the
     /// queue's attributes and its dead-letter queue's once, so a missing
@@ -470,9 +470,9 @@ impl SqsFeed {
     ///
     /// # Errors
     ///
-    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed cannot read, a
-    /// `queue_url` ending in `.fifo` and a `settling_window` below one
-    /// minute among them, for a `tls.root_ca` that cannot be used, and for an
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a config
+    /// [`SqsFeedConfig::validate`] refuses, a `queue_url` ending in `.fifo`
+    /// among them, for a `tls.root_ca` that cannot be used, and for an
     /// `https://` endpoint when neither the system trust store nor
     /// `tls.root_ca` holds a usable certificate.
     /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when SQS refuses the credentials, the queue or a
@@ -494,19 +494,32 @@ impl SqsFeed {
     ///
     /// # Examples
     ///
+    /// From the pipeline's `feed:` section:
+    ///
     /// ```no_run
     /// use spate_core::config::FeedSection;
-    /// use spate_sqs::SqsFeed;
+    /// use spate_sqs::{SqsFeed, SqsFeedConfig};
     ///
     /// # fn run(section: &FeedSection, io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
-    /// let feed = SqsFeed::connect(section, io)?;
+    /// let feed = SqsFeed::connect(SqsFeedConfig::from_section(section)?, io)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// From a config built in code:
+    ///
+    /// ```no_run
+    /// use spate_sqs::{SqsFeed, SqsFeedConfig};
+    ///
+    /// # fn run(io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = SqsFeedConfig::new("https://sqs.eu-west-1.amazonaws.com/123456789012/units");
+    /// let feed = SqsFeed::connect(config, io)?;
     /// # Ok(()) }
     /// ```
     pub fn connect(
-        section: &FeedSection,
+        config: SqsFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> Result<SqsFeed, ConnectError> {
-        Self::connect_with(section, io, None, SyncClock::system())
+        Self::connect_with(config, io, None, SyncClock::system())
     }
 
     /// [`connect`](Self::connect) with a static access key in place of the
@@ -518,7 +531,7 @@ impl SqsFeed {
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn connect_with_static_credentials(
-        section: &FeedSection,
+        config: SqsFeedConfig,
         io: &tokio::runtime::Handle,
         access_key_id: &str,
         secret_access_key: &str,
@@ -531,7 +544,7 @@ impl SqsFeed {
             "spate-sqs-static",
         );
         Self::connect_with(
-            section,
+            config,
             io,
             Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
                 credentials,
@@ -543,12 +556,12 @@ impl SqsFeed {
     /// [`connect`](Self::connect) with `credentials` in place of the provider
     /// chain when given, and the connect bound timed on `clock`.
     fn connect_with(
-        section: &FeedSection,
+        config: SqsFeedConfig,
         io: &tokio::runtime::Handle,
         credentials: Option<aws_sdk_sqs::config::SharedCredentialsProvider>,
         clock: SyncClock,
     ) -> Result<SqsFeed, ConnectError> {
-        let config = SqsFeedConfig::from_section(section)?;
+        config.validate()?;
         let step = Mutex::new("starting");
         let connect = async {
             let queue = client::sdk_queue(&config, credentials, &step).await?;
@@ -693,6 +706,13 @@ fn gone(receipt: Receipt) -> FeedError {
 impl Feed for SqsFeed {
     fn component_type(&self) -> &str {
         COMPONENT_TYPE
+    }
+
+    /// Refuse an `attempt_cap`, since SQS counts deliveries through the
+    /// queue's `maxReceiveCount`, and a `settling_window` under a minute,
+    /// since the queue's counts take that long to settle.
+    fn check_section(&self, section: &FeedSection) -> Result<(), ConfigError> {
+        crate::config::check_section_keys(section)
     }
 
     fn set_waker(&self, waker: FeedWaker) {

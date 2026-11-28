@@ -63,7 +63,7 @@ use spate::feed::{Feed, Unit};
 use spate::json::JsonLinesFramer;
 use spate::prelude::*;
 use spate::s3::S3Source;
-use spate::sqs::SqsFeed;
+use spate::sqs::{SqsFeed, SqsFeedConfig};
 use spate_test::{TestDeserializer, TestEncoder, capture_sink, decode_rows};
 use std::sync::Arc;
 
@@ -144,7 +144,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .ok_or("the file names no feed")?;
     let feed = match section.backend().component_type() {
-        "sqs" => Arc::new(SqsFeed::connect(&section, &pipeline.io_handle())?),
+        "sqs" => Arc::new(SqsFeed::connect(
+            SqsFeedConfig::from_section(&section)?,
+            &pipeline.io_handle(),
+        )?),
         other => return Err(format!("this binary builds the `sqs` feed, not `{other}`").into()),
     };
     let pipeline = pipeline.feed(Arc::clone(&feed) as Arc<dyn Feed>);

@@ -56,26 +56,43 @@ pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
         .map_err(|e| SectionPath::feed(COMPONENT_TYPE).invalid("queue_url", e.to_string()))
 }
 
-/// The keys under `feed: { sqs: … }`.
+/// The keys under `feed: { sqs: … }`: the configuration
+/// [`SqsFeed::connect`](crate::SqsFeed::connect) builds the feed from.
+///
+/// Build one in code with [`new`](Self::new), or from a pipeline's `feed:`
+/// section with [`from_section`](Self::from_section).
+///
+/// ```
+/// use spate_sqs::SqsFeedConfig;
+/// use std::time::Duration;
+///
+/// let mut config =
+///     SqsFeedConfig::new("https://sqs.eu-west-1.amazonaws.com/123456789012/units");
+/// config.visibility = Duration::from_secs(120);
+/// config.validate()?;
+/// # Ok::<(), spate_core::config::ConfigError>(())
+/// ```
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SqsFeedConfig {
-    /// The queue's URL, as `GetQueueUrl` returns it.
-    pub(crate) queue_url: String,
+#[non_exhaustive]
+pub struct SqsFeedConfig {
+    /// The queue's URL, as `GetQueueUrl` returns it. A standard queue: the
+    /// feed refuses a FIFO queue.
+    pub queue_url: String,
     /// How long a received unit stays hidden from other readers without a
-    /// renewal.
+    /// renewal, in whole seconds from 3 s to 12 h. Defaults to 60 s.
     #[serde(default = "default_visibility", with = "humantime_serde")]
-    pub(crate) visibility: Duration,
+    pub visibility: Duration,
     /// The AWS region. Unset: the queue URL's host, then the AWS region
     /// chain.
     #[serde(default)]
-    pub(crate) region: Option<String>,
+    pub region: Option<String>,
     /// An endpoint in place of the region's, such as a local emulator.
     #[serde(default)]
-    pub(crate) endpoint: Option<String>,
+    pub endpoint: Option<String>,
     /// Trust settings: `tls.root_ca`, which requires an `https://` endpoint.
     #[serde(default)]
-    pub(crate) tls: TlsSection,
+    pub tls: TlsSection,
 }
 
 // A hand-written `Debug`, so the URLs print through `redact::url`. The
@@ -99,31 +116,73 @@ impl fmt::Debug for SqsFeedConfig {
     }
 }
 
+/// Refuse the keys beside `sqs:` that the feed cannot honor: an
+/// `attempt_cap`, and a `settling_window` under a minute.
+///
+/// # Errors
+///
+/// [`ConfigError::Component`] at `feed.sqs` naming the key.
+pub(crate) fn check_section_keys(section: &FeedSection) -> Result<(), ConfigError> {
+    // Both keys sit beside `sqs:`, so the refusal names the backend that
+    // refuses them.
+    let at = SectionPath::feed(COMPONENT_TYPE);
+    if section.attempt_cap.is_some() {
+        return Err(at.error(
+            "`attempt_cap` does not apply to `sqs`: SQS counts deliveries through the \
+             queue's `maxReceiveCount`",
+        ));
+    }
+    if let Some(window) = section.settling_window {
+        check_duration(window, DurationBounds::at_least(MIN_SETTLING_WINDOW)).map_err(|e| {
+            at.error(format!(
+                "`settling_window` {e}: `sqs` message counts take at least a minute to settle"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 impl SqsFeedConfig {
-    /// Decode and check the `sqs:` body of `section`.
-    pub(crate) fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
+    /// A config for the queue at `queue_url`. Every other field starts at its
+    /// YAML default.
+    #[must_use]
+    pub fn new(queue_url: impl Into<String>) -> SqsFeedConfig {
+        SqsFeedConfig {
+            queue_url: queue_url.into(),
+            visibility: default_visibility(),
+            region: None,
+            endpoint: None,
+            tls: TlsSection::default(),
+        }
+    }
+
+    /// Decode and check the `sqs:` body of `section`, and refuse the keys
+    /// beside it that the feed cannot honor.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] at `feed` for a section that names another
+    /// backend. [`ConfigError::Component`], starting at `feed.sqs`, for an
+    /// unknown key, an `attempt_cap`, a `settling_window` under a minute, and
+    /// a body [`validate`](Self::validate) refuses.
+    pub fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
         let config: SqsFeedConfig = section.backend_body(COMPONENT_TYPE, NAME)?;
-        // Both keys sit beside `sqs:`, so the refusal names the backend that
-        // refuses them.
-        let at = SectionPath::feed(COMPONENT_TYPE);
-        if section.attempt_cap.is_some() {
-            return Err(at.error(
-                "`attempt_cap` does not apply to `sqs`: SQS counts deliveries through the \
-                 queue's `maxReceiveCount`",
-            ));
-        }
-        if let Some(window) = section.settling_window {
-            check_duration(window, DurationBounds::at_least(MIN_SETTLING_WINDOW)).map_err(|e| {
-                at.error(format!(
-                    "`settling_window` {e}: `sqs` message counts take at least a minute to settle"
-                ))
-            })?;
-        }
+        check_section_keys(section)?;
         config.validate()?;
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    /// Check the config's values against each other and against what SQS
+    /// accepts.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`], starting at `feed.sqs`, for a
+    /// `visibility` outside 3 s to 12 h or not in whole seconds, a
+    /// `queue_url` or `endpoint` that is not an `http` or `https` URL or
+    /// carries userinfo, a `queue_url` that names a FIFO queue, and a
+    /// `tls.root_ca` with an `endpoint` that is not `https://`.
+    pub fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::feed(COMPONENT_TYPE);
         check_duration(self.visibility, VISIBILITY)
             .map_err(|e| at.invalid("visibility", e.to_string()))?;
@@ -484,6 +543,48 @@ pub(crate) mod tests {
                     Some(std::path::Path::new("/etc/ca.pem"))
                 );
             }
+        }
+    }
+
+    /// Pins that a config built in code starts at the defaults the YAML
+    /// path gives a section that holds only `queue_url`.
+    #[test]
+    fn new_matches_a_section_holding_only_the_queue_url() {
+        let url = "https://sqs.eu-west-2.amazonaws.com/1/jobs";
+        let from_section = parse(&format!("sqs: {{ queue_url: \"{url}\" }}")).unwrap();
+        assert_eq!(SqsFeedConfig::new(url), from_section);
+    }
+
+    /// Pins that `validate` refuses a config built in code with the texts
+    /// `from_section` gives the same values.
+    #[test]
+    fn validate_refuses_a_config_built_in_code_as_from_section_does() {
+        let fifo = SqsFeedConfig::new("https://sqs.eu-west-2.amazonaws.com/1/q.fifo");
+        let mut short = SqsFeedConfig::new("https://sqs.eu-west-2.amazonaws.com/1/q");
+        short.visibility = Duration::from_secs(2);
+        let mut plain_ca = SqsFeedConfig::new("http://127.0.0.1:9324/000000000000/q");
+        plain_ca.endpoint = Some("http://127.0.0.1:9324".to_owned());
+        plain_ca.tls.root_ca = Some("/etc/ca.pem".into());
+        let cases = [
+            (
+                fifo,
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q.fifo\" }",
+            ),
+            (
+                short,
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", visibility: 2s }",
+            ),
+            (
+                plain_ca,
+                "sqs: { queue_url: \"http://127.0.0.1:9324/000000000000/q\", endpoint: \"http://127.0.0.1:9324\", tls: { root_ca: /etc/ca.pem } }",
+            ),
+        ];
+        for (config, yaml) in cases {
+            assert_eq!(
+                refusal(config.validate().map(|()| config.clone())),
+                refusal(parse(yaml)),
+                "{yaml}"
+            );
         }
     }
 

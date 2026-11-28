@@ -29,7 +29,7 @@ The name also stays clear of the core trait it implements, such as `Source` or `
 
 **Follow:** [`crates/spate-kafka/src/lib.rs`](repo:crates/spate-kafka/src/lib.rs).
 
-**Departs:** the feed backends' config types are private ([#2319](https://github.com/spate-etl/spate/issues/2319)).
+**Departs:** the Kafka feed's config type is private ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 
@@ -97,15 +97,20 @@ The `new` constructor takes its config, calls the config's public `validate`, an
 The `from_component_config` constructor takes the role's YAML section, parses the config and goes through the same checks.
 Both also take any runtime handle the role needs, as `S3Source::new` takes the I/O runtime's handle.
 
-A role that needs I/O before it can run, such as the ClickHouse sink reading its table schema, builds in two steps.
+A role that needs I/O before it can run, such as the ClickHouse sink reading its table schema, builds in two steps, unless it is a feed backend.
 Its two constructors return a builder, and the builder's `connect` does the I/O and returns the role, as `ClickHouseSinkBuilder::connect` does.
+
+A feed backend builds from the pipeline's `feed:` section, so it has no `from_component_config`.
+Its config's `from_section` decodes the section and refuses the keys beside the body that the backend cannot honor.
+The feed's `connect` takes the config and the I/O runtime's handle, calls `validate` and does the I/O, as `SqsFeed::connect` does.
+A feed with no config and no I/O builds through `from_section` on the feed itself, as `MemoryFeed` does.
 
 **Why:** an application that builds a pipeline in code and one that reads YAML reach the same type and the same checks.
 An invalid config fails at construction, as the `ConfigError` the rest of the configuration returns, and never later as text inside a start error.
 
-**Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs).
+**Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs), and [`crates/spate-sqs/src/config.rs`](repo:crates/spate-sqs/src/config.rs) for a feed backend.
 
-**Departs:** the feed backends have no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
+**Departs:** the Kafka feed has no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 
@@ -289,8 +294,6 @@ A lister run calls it on the feed it publishes to, so a backend with a separate 
 
 **Follow:** [`crates/spate-core/src/config/feed.rs`](repo:crates/spate-core/src/config/feed.rs), and [`crates/spate-core/src/config/sink.rs`](repo:crates/spate-core/src/config/sink.rs) for a sink section.
 `check_section` in [`crates/spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs) for a refused feed key.
-
-**Departs:** the SQS feed, which refuses `attempt_cap` and a `settling_window` below one minute only when it is built from the section ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 

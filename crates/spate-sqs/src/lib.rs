@@ -1,9 +1,11 @@
 //! Amazon SQS work-feed backend for Spate.
 //!
 //! [`SqsFeed`] is a [`Feed`](spate_core::feed::Feed) over one SQS standard
-//! queue. A pipeline names it in its `feed:` section, `main()` builds it from
-//! that section with [`SqsFeed::connect`], and passes it to
-//! [`Pipeline::feed`](spate_core::pipeline::Pipeline::feed):
+//! queue. A pipeline names it in its `feed:` section. `main()` decodes that
+//! section into an [`SqsFeedConfig`], builds the feed from it with
+//! [`SqsFeed::connect`], and passes it to
+//! [`Pipeline::feed`](spate_core::pipeline::Pipeline::feed). Code that builds
+//! its pipeline without a file starts from [`SqsFeedConfig::new`]:
 //!
 //! ```yaml
 //! feed:
@@ -15,13 +17,13 @@
 //! ```no_run
 //! use spate_core::pipeline::Pipeline;
 //! use spate_core::config::PipelineConfig;
-//! use spate_sqs::SqsFeed;
+//! use spate_sqs::{SqsFeed, SqsFeedConfig};
 //! use std::sync::Arc;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let pipeline = Pipeline::from_config(PipelineConfig::from_path("pipeline.yaml".as_ref())?)?;
 //! let section = pipeline.config().feed.clone().expect("the file names a feed");
-//! let feed = SqsFeed::connect(&section, &pipeline.io_handle())?;
+//! let feed = SqsFeed::connect(SqsFeedConfig::from_section(&section)?, &pipeline.io_handle())?;
 //! let pipeline = pipeline.feed(Arc::new(feed));
 //! # Ok(()) }
 //! ```
@@ -51,7 +53,9 @@
 //!   end check reads both, and the runtime reads the dead-letter queue's on
 //!   every job. The queue's depth also counts the deletes and fails the feed
 //!   has accepted and not yet sent. A `feed:` section that sets
-//!   `settling_window` below one minute is refused.
+//!   `settling_window` below one minute is refused, both by
+//!   [`SqsFeedConfig::from_section`] and by the feed when the runtime or a
+//!   lister run hands it the section.
 //!
 //! No AWS SDK type appears in this crate's public API.
 
@@ -68,4 +72,5 @@ mod startup;
 #[cfg(test)]
 mod test_stub;
 
+pub use config::SqsFeedConfig;
 pub use feed::SqsFeed;

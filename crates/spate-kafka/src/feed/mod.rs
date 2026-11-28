@@ -546,8 +546,8 @@ impl Drop for LatchOnPanic {
     }
 }
 
-/// The work feed over Kafka topics, built from a
-/// [`KafkaFeedConfig`](crate::KafkaFeedConfig) by [`KafkaFeed::connect`].
+/// The work feed over Kafka topics, built from a [`KafkaFeedConfig`] by
+/// [`KafkaFeed::connect`].
 ///
 /// Workers that share a `group_id` share the work: each partition of the
 /// work and retry topics is read by one of them. A publish writes the unit

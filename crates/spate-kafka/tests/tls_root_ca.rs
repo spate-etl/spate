@@ -15,14 +15,13 @@ use spate_core::error::ErrorClass;
 use spate_core::feed::{Feed as _, Unit};
 use spate_core::source::{Source as _, SourceCtx};
 use spate_core::tls::TlsSection;
-use spate_kafka::feed::KafkaFeed;
 use spate_test::HANG;
 use spate_test_support::{TestCa, pem};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use support::Raw as _;
-use support::feed::{direct_with, publisher_on};
+use support::feed::{ON_BROKER, direct_with, publisher_on};
 use support::tls::{connector_clients, create_topic, raw, tls_broker, tls_source};
 
 const NAME: &str = "root_ca_adds_to_the_system_roots";
@@ -113,7 +112,7 @@ fn feed_round_trip(brokers: &str, arm: &str, root_ca: &Path) {
     let (publisher, _io) = publisher_on(&yaml);
     let unit = Unit::new(format!("{arm}-unit"), b"body".to_vec());
     spate_test_s3_feed::publish(&publisher.expect("publisher connects"), unit.clone());
-    let worker = direct_with(KafkaFeed::connect, &yaml);
+    let worker = direct_with(ON_BROKER, &yaml);
     let delivery = worker.take("the published unit");
     assert_eq!(delivery.unit, unit);
     worker.feed.acknowledge(delivery.receipt).unwrap();

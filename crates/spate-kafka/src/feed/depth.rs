@@ -1389,7 +1389,11 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let feed = KafkaFeed::connect_without_config_checks(&section, io.handle()).unwrap();
+        let feed = KafkaFeed::connect_without_config_checks(
+            crate::KafkaFeedConfig::from_section(&section).unwrap(),
+            io.handle(),
+        )
+        .unwrap();
         (feed, io)
     }
 

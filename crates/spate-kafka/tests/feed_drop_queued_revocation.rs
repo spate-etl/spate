@@ -140,7 +140,11 @@ fn the_drop_answers_a_revocation_queued_after_the_last_poll() {
         .enable_all()
         .build()
         .unwrap();
-    let feed = KafkaFeed::connect_without_config_checks(&section, io.handle()).unwrap();
+    let feed = KafkaFeed::connect_without_config_checks(
+        spate_kafka::KafkaFeedConfig::from_section(&section).unwrap(),
+        io.handle(),
+    )
+    .unwrap();
     hold.await_held();
     {
         let lines = hold.lines.lock().unwrap();

@@ -601,7 +601,7 @@ mod tests {
     use super::*;
     use crate::feed::FeedRole;
     use crate::feed::attempt::test_lister;
-    use crate::feed::config::KafkaFeedConfig;
+    use crate::feed::config::Trusted;
     use crate::feed::producer::FeedProducerHooks;
     use crate::feed::tests::{gated, tp};
     use crate::testutil::mock::MockKafka;
@@ -627,7 +627,7 @@ mod tests {
              attempt_topic: units-attempts\n  statistics_interval: 0s\n",
         )
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         for how in ["stopped", "latched"] {
             let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
             let producer = config
@@ -677,7 +677,7 @@ mod tests {
             cluster.bootstrap_servers()
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let producer = config
             .base(false)
@@ -724,7 +724,7 @@ mod tests {
              attempt_topic: units-attempts\n  statistics_interval: 0s\n",
         )
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let producer = config
             .base(false)
@@ -762,7 +762,7 @@ mod tests {
              attempt_topic: units-attempts\n  statistics_interval: 0s\n",
         )
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let producer = config
             .base(false)

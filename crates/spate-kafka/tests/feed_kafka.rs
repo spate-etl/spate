@@ -35,11 +35,11 @@ use spate_test_support::{ChildTest, SingleBroker};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, HeldUnit, RETRY, WORK, Worker, assert_stalled,
-    bounded_section, committed, committed_once, create_topics, direct_with, exists, feed_yaml,
-    group_stable, high_watermark, high_watermark_once, hold_for, hold_open, launch_bounded,
-    launch_source, launch_stopping, launch_with, list_once, open_transaction_with, produce_raw,
-    publish, publisher_on, read_attempts, read_depth, run_to_exit,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, HeldUnit, ON_BROKER, RETRY, WORK, Worker,
+    assert_stalled, bounded_section, committed, committed_once, create_topics, direct_with, exists,
+    feed_yaml, group_stable, high_watermark, high_watermark_once, hold_for, hold_open,
+    launch_bounded, launch_source, launch_stopping, launch_with, list_once, open_transaction_with,
+    produce_raw, publish, publisher_on, read_attempts, read_depth, run_to_exit,
 };
 use support::{
     TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, log_end_once,
@@ -90,7 +90,7 @@ fn worker_a_holds_a_unit_until_it_is_killed() {
     let cap = std::env::var(CHILD_CAP)
         .map_or_else(|_| String::new(), |cap| format!("  attempt_cap: {cap}\n"));
     let a = launch_with(
-        KafkaFeed::connect,
+        ON_BROKER,
         &data,
         &section_with(&brokers, &group, &cap),
         |sink| {
@@ -148,12 +148,7 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
 
     // B's join waits for A's session to lapse, and B is then assigned the
     // partition at the offset A never committed past.
-    let b = launch_with(
-        KafkaFeed::connect,
-        &data,
-        &section(&brokers, &group),
-        |_| {},
-    );
+    let b = launch_with(ON_BROKER, &data, &section(&brokers, &group), |_| {});
     wait_until(HANG, "B reads the unit", || {
         !b.recording.deliveries().is_empty()
     });
@@ -220,7 +215,7 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
     }
 
     let b = launch_with(
-        KafkaFeed::connect,
+        ON_BROKER,
         &data,
         &section_with(&brokers, &group, "  attempt_cap: 2\n"),
         |_| {},
@@ -293,7 +288,10 @@ fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, ConnectError> {
         .enable_all()
         .build()
         .unwrap();
-    KafkaFeed::connect(&section, io.handle())
+    KafkaFeed::connect(
+        spate_kafka::KafkaFeedConfig::from_section(&section).unwrap(),
+        io.handle(),
+    )
 }
 
 fn refusal(connected: Result<KafkaFeed, ConnectError>) -> String {
@@ -599,7 +597,10 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
             group = spate_test::unique_name("publisher"),
         ))
         .unwrap();
-        KafkaFeedPublisher::connect(&section, io.handle())
+        KafkaFeedPublisher::connect(
+            spate_kafka::KafkaFeedConfig::from_section(&section).unwrap(),
+            io.handle(),
+        )
     };
 
     create_topics_of(&brokers, "pub-compacted", &[("cleanup.policy", "compact")]);
@@ -637,7 +638,7 @@ fn a_keyless_message_is_read_as_a_unit() {
     let group = spate_test::unique_name("keyless");
     produce_raw(&brokers, WORK, &[(None, &b"keyless"[..])]);
 
-    let worker = direct_with(KafkaFeed::connect, &section(&brokers, &group));
+    let worker = direct_with(ON_BROKER, &section(&brokers, &group));
     let delivery = worker.take("the keyless message");
     assert_eq!(delivery.unit, Unit::new("units/0/0", b"keyless".to_vec()));
     worker.feed.acknowledge(delivery.receipt).unwrap();
@@ -676,7 +677,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
     );
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);
+    let worker = launch_bounded(ON_BROKER, &data, &section, &clock);
     wait_for_value(
         HANG,
         "the message is dead-lettered and committed",
@@ -727,8 +728,8 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
 
     let clock_a = TestClock::frozen();
     let clock_b = TestClock::frozen();
-    let a = launch_bounded(KafkaFeed::connect, &data, &section, &clock_a);
-    let b = launch_bounded(KafkaFeed::connect, &data, &section, &clock_b);
+    let a = launch_bounded(ON_BROKER, &data, &section, &clock_a);
+    let b = launch_bounded(ON_BROKER, &data, &section, &clock_b);
     wait_until(HANG, "every row is written once between them", || {
         let mut both = written(&a.script);
         both.extend(written(&b.script));
@@ -834,14 +835,9 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         "session.timeout.ms: \"30000\"",
     );
     let clock = StopClock::frozen();
-    let a = launch_stopping(
-        KafkaFeed::connect,
-        &data,
-        TWO_RANGES,
-        &section,
-        &clock,
-        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
-    );
+    let a = launch_stopping(ON_BROKER, &data, TWO_RANGES, &section, &clock, |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held())
+    });
     publish(&a.feed, finished);
     wait_until(HANG, "the finished unit's write is held", || {
         a.script.held_writes() == 1
@@ -872,7 +868,7 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         "  s3:\n    url: \"file://{}/\"\n{TWO_RANGES}",
         data.display()
     );
-    let b = launch_source(KafkaFeed::connect, &source, &section, |_| {});
+    let b = launch_source(ON_BROKER, &source, &section, |_| {});
     wait_until(HANG, "B receives the unit", || {
         !b.recording.receipts().is_empty()
     });
@@ -931,7 +927,7 @@ fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
     assert_eq!(job.committed(WORK), Some(5));
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_value(
         HANG,
         "every unit is read and committed",
@@ -960,7 +956,7 @@ fn a_feed_commit_carries_the_epoch_of_the_record_before_it() {
     job.publish("b.ndjson", &b);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_value(
         HANG,
         "every unit is read and committed",
@@ -1005,7 +1001,7 @@ fn a_member_reads_the_units_below_a_commit_the_leader_answers_lower() {
     );
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_value(
         HANG,
         "every unit is read and committed",
@@ -1039,7 +1035,7 @@ fn a_member_reads_a_partition_whose_epoch_carrying_commit_is_above_its_end() {
     support::commit_with_epoch(&brokers, &job.group, WORK, 5, epoch);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_value(
         HANG,
         "every unit is read and committed",
@@ -1102,7 +1098,7 @@ fn moved_to(
     job.publish("moved.ndjson", &rows);
     std::fs::rename(&object, &away).unwrap();
     let before = log_end(&job.brokers, topic, 0);
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, clock);
     wait_for_value(
         HANG,
         "the unit is moved and its offset committed",
@@ -1141,7 +1137,7 @@ fn a_unit_behind_an_open_transaction_on(brokers: &str) {
     rows.extend(later);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     hold_open(&worker, &clock);
     assert!(written(&worker.script).is_empty());
     assert_eq!(job.committed(WORK), None);
@@ -1209,7 +1205,7 @@ fn an_open_transaction_alone_on_the_dead_letter_topic_stalls_a_bounded_job() {
         let job = listed(brokers, "alone-dead", "");
         let _open = produce_transaction(brokers, DEAD, 1, "held", Transaction::Open);
         let clock = TestClock::frozen();
-        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
         assert_stalled(&run_to_exit(&worker, &clock));
     });
 }
@@ -1223,7 +1219,7 @@ fn an_aborted_transaction_alone_on_the_dead_letter_topic_stalls_a_bounded_job() 
         let job = listed(brokers, "aborted-dead", "");
         let _ended = produce_transaction(brokers, DEAD, 1, "gone", Transaction::Abort);
         let clock = TestClock::frozen();
-        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
         assert_stalled(&run_to_exit(&worker, &clock));
     });
 }
@@ -1244,7 +1240,7 @@ fn an_aborted_transaction_at_the_end_on(brokers: &str) {
     let _ended = produce_transaction(brokers, WORK, 1, "gone", Transaction::Abort);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_end(&job, &worker, &rows, WORK);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 
@@ -1253,7 +1249,7 @@ fn an_aborted_transaction_at_the_end_on(brokers: &str) {
     let later_rows = recs("later", 2);
     job.publish("later.ndjson", &later_rows);
     let clock = TestClock::frozen();
-    let later = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let later = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_end(&job, &later, &later_rows, WORK);
     assert_eq!(run_to_exit(&later, &clock).state, ExitState::Completed);
     assert_eq!(written(&later.script), sorted(later_rows));
@@ -1270,7 +1266,7 @@ fn an_aborted_transaction_on_the_work_topic_ends_a_bounded_job() {
         job.publish("kept.ndjson", &rows);
 
         let clock = TestClock::frozen();
-        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
         wait_for_end(&job, &worker, &rows, WORK);
         assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
     });
@@ -1290,7 +1286,7 @@ fn a_transaction_committed_during_the_window_on(brokers: &str) {
     let open = open_transaction_with(brokers, WORK, "held", &[held]);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     hold_for(&worker, &clock, HALF_WINDOW);
     let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
     assert!(depth.visible > 0, "the depth counts the open transaction");
@@ -1314,7 +1310,7 @@ fn a_transaction_aborted_during_the_window_on(brokers: &str) {
     let open = produce_transaction(brokers, RETRY, 1, "held", Transaction::Open);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     hold_for(&worker, &clock, HALF_WINDOW);
     let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
     assert!(depth.visible > 0, "the depth counts the open transaction");
@@ -1338,7 +1334,7 @@ fn a_transaction_opened_during_a_window_on(brokers: &str) {
     job.publish("first.ndjson", &rows);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_end(&job, &worker, &rows, WORK);
     hold_for(&worker, &clock, HALF_WINDOW);
     let (read, end) = (rows.clone(), job.committed(WORK));
@@ -1373,7 +1369,7 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     let open = open_transaction_with(brokers, WORK, "held", &[held]);
 
     let clock = TestClock::frozen();
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     hold_open(&worker, &clock);
     assert_eq!(worker.stop(), ExitState::Completed);
     assert_eq!(job.committed(WORK), None);
@@ -1381,7 +1377,7 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     open.commit_transaction(TRANSACTION_TIMEOUT)
         .expect("commit");
     let clock = TestClock::frozen();
-    let next = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    let next = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
     wait_for_end(&job, &next, &rows, WORK);
     assert_eq!(run_to_exit(&next, &clock).state, ExitState::Completed);
 }
@@ -1415,7 +1411,7 @@ fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
         job.publish("kept.ndjson", &rows);
 
         let clock = TestClock::frozen();
-        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
         wait_until(HANG, "the unit is admitted and read", || {
             written(&worker.script) == sorted(rows.clone())
         });
@@ -1532,7 +1528,7 @@ fn an_open_transaction_on_the_attempt_topic_keeps_the_attempt_cap() {
         job.publish("failing.ndjson", &rows);
         std::fs::rename(&object, job.dir.path().join("failing.away")).unwrap();
         let clock = TestClock::frozen();
-        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        let worker = launch_bounded(ON_BROKER, &job.data, &job.section, &clock);
         // Twice the cap, plus one, attempt writes, or the dead-letter write.
         let enough = usize::try_from(2 * CAP + 1).unwrap();
         let mut attempts = FeedAttempts::new(brokers);
@@ -1614,7 +1610,7 @@ fn job_with_its_unit_read(
     let job = listed(brokers, tag, "");
     let rows = recs("kept", 2);
     job.publish("kept.ndjson", &rows);
-    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
+    let worker = launch_bounded(ON_BROKER, &job.data, &job.section, clock);
     wait_for_value(
         HANG,
         "the unit is read and committed",

@@ -17,6 +17,7 @@ use spate_core::feed::{
     wake_channel,
 };
 use spate_json::JsonLinesFramer;
+use spate_kafka::KafkaFeedConfig;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_s3::S3Source;
 use spate_test::{HANG, SinkScript, WriteOutcome, wait_until};
@@ -153,7 +154,13 @@ pub(crate) type Connect = fn(&FeedSection, &Handle) -> Result<KafkaFeed, Connect
 
 /// Connect as on rdkafka's MockCluster, which answers no request for a
 /// topic's configuration: only the topics' existence is checked.
-pub(crate) const ON_MOCK: Connect = KafkaFeed::connect_without_config_checks;
+pub(crate) const ON_MOCK: Connect = |section, io| {
+    KafkaFeed::connect_without_config_checks(KafkaFeedConfig::from_section(section)?, io)
+};
+
+/// Connect with every startup check, as on a broker that answers them.
+pub(crate) const ON_BROKER: Connect =
+    |section, io| KafkaFeed::connect(KafkaFeedConfig::from_section(section)?, io);
 
 /// [`launch_with`] connecting as on the MockCluster.
 pub(crate) fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScript)) -> Worker {
@@ -207,7 +214,13 @@ pub(crate) fn launch_on(
     let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
     let clock = Arc::clone(clock);
     launch_customized(
-        move |section, io| KafkaFeed::connect_without_config_checks_on(section, io, clock),
+        move |section, io| {
+            KafkaFeed::connect_without_config_checks_on(
+                spate_kafka::KafkaFeedConfig::from_section(section).unwrap(),
+                io,
+                clock,
+            )
+        },
         &source,
         feed_section,
         pre,
@@ -355,7 +368,10 @@ pub(crate) fn publisher_on_mock(
         .enable_all()
         .build()
         .unwrap();
-    let publisher = KafkaFeedPublisher::connect_without_config_checks(&section(yaml), io.handle());
+    let publisher = KafkaFeedPublisher::connect_without_config_checks(
+        spate_kafka::KafkaFeedConfig::from_section(&section(yaml)).unwrap(),
+        io.handle(),
+    );
     (publisher, io)
 }
 
@@ -446,7 +462,13 @@ pub(crate) fn direct(yaml: &str) -> Direct {
 pub(crate) fn direct_on(clock: &Arc<FeedClock>, yaml: &str) -> Direct {
     let clock = Arc::clone(clock);
     direct_with(
-        move |section, io| KafkaFeed::connect_without_config_checks_on(section, io, clock),
+        move |section, io| {
+            KafkaFeed::connect_without_config_checks_on(
+                spate_kafka::KafkaFeedConfig::from_section(section).unwrap(),
+                io,
+                clock,
+            )
+        },
         yaml,
     )
 }
@@ -594,7 +616,10 @@ pub(crate) fn publisher_on(section_yaml: &str) -> Publisher {
         .enable_all()
         .build()
         .unwrap();
-    let publisher = KafkaFeedPublisher::connect(&section(section_yaml), io.handle());
+    let publisher = KafkaFeedPublisher::connect(
+        spate_kafka::KafkaFeedConfig::from_section(&section(section_yaml)).unwrap(),
+        io.handle(),
+    );
     (publisher, io)
 }
 
@@ -653,8 +678,8 @@ impl HeldUnit {
 
         let a_clock = TestClock::frozen();
         let b_clock = TestClock::frozen();
-        let a = launch_bounded(KafkaFeed::connect, &data, &section_a, &a_clock);
-        let b = launch_bounded_with(KafkaFeed::connect, &data, &section_b, &b_clock, |sink| {
+        let a = launch_bounded(ON_BROKER, &data, &section_a, &a_clock);
+        let b = launch_bounded_with(ON_BROKER, &data, &section_b, &b_clock, |sink| {
             sink.enqueue_global(WriteOutcome::ok().held());
         });
         group_stable(brokers, &group, 2);

@@ -832,7 +832,11 @@ mod silent_coordinator {
             .enable_all()
             .build()
             .expect("io");
-        let feed = spate_kafka::feed::KafkaFeed::connect(&section, io.handle()).expect("connect");
+        let feed = spate_kafka::feed::KafkaFeed::connect(
+            spate_kafka::KafkaFeedConfig::from_section(&section).unwrap(),
+            io.handle(),
+        )
+        .expect("connect");
         proxy.trigger.store(trigger, Ordering::SeqCst);
         let mut received = Vec::new();
         spate_test::wait_until(HANG, "every unit received", || {

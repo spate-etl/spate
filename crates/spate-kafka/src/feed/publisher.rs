@@ -2,15 +2,14 @@
 //! work topic and reads none, for a process that only publishes, such as a
 //! lister run.
 //!
-//! It shares the worker feed's section parse, startup checks, producer
+//! It shares the worker feed's config checks, startup checks, producer
 //! settings and publish path, and holds no consumer, gate or follower.
 
-use super::config::KafkaFeedConfig;
+use super::config::{KafkaFeedConfig, Trusted};
 use super::write::Producer;
 use super::{Core, check_topics, gone, producer_parts, publish_unit, startup};
 use crate::client::COMPONENT_TYPE;
 use spate_core::clock::SyncClock;
-use spate_core::config::FeedSection;
 use spate_core::error::ConnectError;
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
@@ -19,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A publish-only handle on the Kafka feed, built from the workers' own
-/// `feed: { kafka: … }` section.
+/// [`KafkaFeedConfig`].
 ///
 /// It writes each unit to the work topic through one producer with the
 /// settings the feed owns, `acks=all` and idempotence included, and a
@@ -53,10 +52,9 @@ impl std::fmt::Debug for KafkaFeedPublisher {
 }
 
 impl KafkaFeedPublisher {
-    /// Build the publisher a `feed: { kafka: … }` section names and check its
-    /// topics.
+    /// Check `config`, build the publisher it names and check its topics.
     ///
-    /// It reads the section a worker reads and refuses any section a worker
+    /// It takes the config a worker takes and refuses any config a worker
     /// refuses. Its writes use `brokers`, `topic`, `delivery_timeout`,
     /// `statistics_interval`, `tls` and the `rdkafka` passthrough; the other
     /// three topic names serve its checks. Connecting runs the checks
@@ -66,8 +64,8 @@ impl KafkaFeedPublisher {
     /// # Errors
     ///
     /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), less the
-    /// failure to start the feed's own threads: [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed
-    /// cannot read or a `tls.root_ca` it cannot read, [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) for a client configuration
+    /// failure to start the feed's own threads: [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a config
+    /// [`KafkaFeedConfig::validate`] refuses or a `tls.root_ca` it cannot read, [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) for a client configuration
     /// librdkafka refuses, a rejected credential or TLS handshake, a refused
     /// topic read and topics the feed cannot run on, and
     /// [`ConnectErrorKind::Unavailable`](spate_core::error::ConnectErrorKind::Unavailable) when a read of the topics fails
@@ -83,19 +81,20 @@ impl KafkaFeedPublisher {
     /// ```no_run
     /// use spate_core::config::FeedSection;
     /// use spate_core::feed::{Feed as _, Unit};
+    /// use spate_kafka::KafkaFeedConfig;
     /// use spate_kafka::feed::KafkaFeedPublisher;
     ///
     /// # fn run(section: &FeedSection, io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
-    /// let publisher = KafkaFeedPublisher::connect(section, io)?;
+    /// let publisher = KafkaFeedPublisher::connect(KafkaFeedConfig::from_section(section)?, io)?;
     /// let confirmation = publisher.publish(Unit::new("unit-1", b"body".to_vec()));
     /// io.block_on(confirmation)?;
     /// # Ok(()) }
     /// ```
     pub fn connect(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> Result<KafkaFeedPublisher, ConnectError> {
-        Self::connect_with(section, io, startup::Scope::All, startup::CONNECT_BOUND)
+        Self::connect_with(config, io, startup::Scope::All, startup::CONNECT_BOUND)
     }
 
     /// [`connect`](Self::connect) with only the checks that the topics
@@ -108,11 +107,11 @@ impl KafkaFeedPublisher {
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn connect_without_config_checks(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> Result<KafkaFeedPublisher, ConnectError> {
         Self::connect_with(
-            section,
+            config,
             io,
             startup::Scope::Existence,
             startup::CONNECT_BOUND,
@@ -120,12 +119,13 @@ impl KafkaFeedPublisher {
     }
 
     pub(crate) fn connect_with(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
         scope: startup::Scope,
         bound: Duration,
     ) -> Result<KafkaFeedPublisher, ConnectError> {
-        let config = KafkaFeedConfig::connecting(section)?;
+        config.validate()?;
+        let config = Trusted::new(config)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
             &spate_core::config::SectionPath::feed(COMPONENT_TYPE),

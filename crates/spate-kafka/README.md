@@ -183,8 +183,9 @@ on the sink page cover each case.
 ### Configuration
 
 The feed reads the `kafka:` body of the pipeline's `feed:` section. `main()`
-builds it with `KafkaFeed::connect` and passes it to `Pipeline::feed`. An
-unknown key is rejected.
+decodes it with `KafkaFeedConfig::from_section`, builds the feed with
+`KafkaFeed::connect` and passes it to `Pipeline::feed`. Code without a pipeline
+file starts from `KafkaFeedConfig::new` instead. An unknown key is rejected.
 
 ```yaml
 feed:
@@ -257,7 +258,7 @@ cover each case.
 - The S3 source reads its work units from a feed, and fails at start when the
   pipeline has no `feed:` section.
 - A process that only publishes, such as a lister run, builds a
-  `KafkaFeedPublisher` from the same section. It joins no group and records no
+  `KafkaFeedPublisher` from the same config. It joins no group and records no
   attempts, so it takes no partition from the workers.
 - A job is bounded when its `feed:` section names a `location`. Its workers read
   the group's lag on the work and retry topics as the feed's depth, and the job
@@ -337,7 +338,7 @@ release is not a breaking change here.
 - [Kafka feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka)
   — topics, startup checks, attempt counting, stopping and the metric families.
 - [API documentation on docs.rs](https://docs.rs/spate-kafka) — the source, the
-  sink and the feed, and the source and sink configuration types.
+  sink and the feed, and their configuration types.
 - [`kafka_avro_to_clickhouse.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/kafka_avro_to_clickhouse.rs)
   — an Avro order stream from Kafka into ClickHouse. Needs Kafka, a schema
   registry and ClickHouse.

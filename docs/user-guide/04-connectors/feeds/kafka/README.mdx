@@ -23,8 +23,8 @@ partition moves to. The backend lives in the Kafka connector's crate, so a
 source names no backend
 ([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
 
-Construct it from the pipeline's opaque section, with the I/O runtime handle,
-and pass it to `Pipeline::feed`:
+Decode the pipeline's `feed:` section into a `KafkaFeedConfig`, connect the feed
+with the I/O runtime handle, and pass it to `Pipeline::feed`:
 
 ```rust file=crates/spate/examples/s3_kafka_backfill.rs region=connect
 ```
@@ -38,7 +38,14 @@ KAFKA_BROKERS=localhost:9092 \
   cargo run -p spate --features s3,json,kafka --example s3_kafka_backfill
 ```
 
-`KafkaFeed::connect` checks the feed's topics (see
+Code that builds its pipeline without a file starts from `KafkaFeedConfig::new`,
+sets the public fields it needs, and passes the config to `KafkaFeed::connect`
+in the same way. `new` takes the brokers, the group and the four topics in the
+order the table lists them. The config has the keys and defaults of
+the table under [Configuration](#configuration), and an `attempt_cap` field.
+
+`KafkaFeed::connect` first checks the config, and fails as a configuration
+error on a value the table refuses. It then checks the feed's topics (see
 [Startup checks](#startup-checks)), then builds the feed's clients and starts
 its four threads: the consumer thread, which polls the group member and
 translates its statistics; the
@@ -52,9 +59,11 @@ unreachable broker fails the call within 30 seconds.
 
 ## Configuration
 
-The `feed: { kafka: ... }` section deserializes into `KafkaFeedConfig`
-([`spate-kafka/src/feed/config.rs`](repo:crates/spate-kafka/src/feed/config.rs));
-unknown fields are rejected with the offending key.
+`KafkaFeedConfig::from_section` decodes the `feed: { kafka: ... }` section
+into a `KafkaFeedConfig`
+([`spate-kafka/src/feed/config.rs`](repo:crates/spate-kafka/src/feed/config.rs)),
+with the section's `attempt_cap`; unknown fields are rejected with the offending
+key.
 
 ```yaml file=crates/spate/examples/s3_kafka_backfill.rs region=feed
 ```
@@ -77,7 +86,8 @@ unknown fields are rejected with the offending key.
 unit its reader fails on that attempt or later, and a unit whose recorded
 attempts have reached it, which moves without being read (see
 [Counting deliveries](#counting-deliveries)). `attempt_cap` inside the
-`kafka:` body is refused.
+`kafka:` body is refused. A config built in code sets the cap in its
+`attempt_cap` field.
 
 ## The `rdkafka` passthrough and the denylist
 
@@ -158,8 +168,8 @@ dead-letter write that times out is sent again.
 `KafkaFeedPublisher::connect` builds a handle that writes units to the work
 topic and reads none, for a process that only publishes, such as a lister run
 (see [The lister run](../../sources/s3/README.mdx#the-lister-run)).
-It reads the workers' own `feed: { kafka: … }` section and refuses any section
-a worker refuses, so every key stays required. Its writes use `brokers`,
+It takes the workers' own `KafkaFeedConfig` and refuses any config a worker
+refuses, so every key stays required. Its writes use `brokers`,
 `topic`, `delivery_timeout`, `statistics_interval`, `tls` and the `rdkafka`
 passthrough, and the other three topic names serve its checks. Connecting runs
 the [startup checks](#startup-checks) a worker runs, then builds one producer

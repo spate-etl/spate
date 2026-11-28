@@ -10,7 +10,7 @@
 
 use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
-use super::config::KafkaFeedConfig;
+use super::config::Trusted;
 use super::consumer::{Read, commit_moved, commit_revoked, read, retire_offsets, take_due};
 use super::events::Cause;
 use super::gate::admission;
@@ -42,7 +42,7 @@ use std::time::Duration;
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
 /// The feed's producer for `core`, built from `config`.
-fn feed_producer(config: &KafkaFeedConfig, core: &Arc<Core>) -> write::Producer {
+fn feed_producer(config: &Trusted, core: &Arc<Core>) -> write::Producer {
     config
         .base(false)
         .create::<write::Producer, _>(
@@ -65,7 +65,7 @@ fn core_on(cap: u32, clock: Arc<TestClock>) -> Core {
     ))
     .unwrap();
     Core::new(
-        &KafkaFeedConfig::from_section(&section).unwrap(),
+        &Trusted::from_section(&section).unwrap(),
         TWO,
         SyncClock::new(clock),
     )
@@ -722,14 +722,14 @@ fn a_producer_error_event_is_logged_once() {
 }
 
 /// The section of a feed whose clients reach no broker.
-fn unreachable_config(extra: &str) -> KafkaFeedConfig {
+fn unreachable_config(extra: &str) -> Trusted {
     let section: FeedSection = serde_yaml::from_str(&format!(
         "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
          retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
          attempt_topic: units-attempts\n  statistics_interval: 0s\n{extra}"
     ))
     .unwrap();
-    KafkaFeedConfig::from_section(&section).unwrap()
+    Trusted::from_section(&section).unwrap()
 }
 
 /// A feed with no threads, whose producer reaches no broker.
@@ -748,7 +748,7 @@ fn idle_feed() -> KafkaFeed {
 }
 
 /// A publisher whose producer reaches no broker, over `config`.
-fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
+fn idle_publisher_over(config: &Trusted) -> KafkaFeedPublisher {
     let core = Arc::new(Core::new(config, TWO, SyncClock::system()));
     let producer = feed_producer(config, &core);
     KafkaFeedPublisher::from_parts(core, producer)
@@ -976,28 +976,6 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     assert_eq!(err.kind(), FeedErrorKind::Fatal, "{}", err.reason());
     assert!(fresh.latched());
 }
-/// Pins that the publisher refuses a section a worker refuses, with the
-/// worker's error, before it builds any client.
-#[test]
-fn a_publisher_refuses_the_section_a_worker_refuses() {
-    let section: FeedSection = serde_yaml::from_str(
-        "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
-         retry_topic: units\n  dead_letter_topic: units-dead\n  \
-         attempt_topic: units-attempts\n",
-    )
-    .unwrap();
-    let io = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let worker = KafkaFeed::connect(&section, io.handle()).unwrap_err();
-    let publisher = KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err();
-    assert_eq!(worker.kind(), ConnectErrorKind::Config, "{worker}");
-    assert_eq!(publisher.kind(), ConnectErrorKind::Config, "{publisher}");
-    assert_eq!(worker.to_string(), publisher.to_string());
-}
-
 /// A `tls.root_ca` the feed cannot read, missing or holding no certificate,
 /// refuses the worker and the publisher as a config error at the key, with
 /// core's reason, before either builds a client.
@@ -1023,14 +1001,62 @@ fn an_unreadable_root_ca_refuses_the_worker_and_the_publisher() {
         .unwrap();
         let name = root_ca.file_name().unwrap().to_str().unwrap();
         for err in [
-            KafkaFeed::connect(&section, io.handle()).unwrap_err(),
-            KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err(),
+            KafkaFeed::connect(
+                crate::KafkaFeedConfig::from_section(&section).unwrap(),
+                io.handle(),
+            )
+            .unwrap_err(),
+            KafkaFeedPublisher::connect(
+                crate::KafkaFeedConfig::from_section(&section).unwrap(),
+                io.handle(),
+            )
+            .unwrap_err(),
         ] {
             assert_eq!(err.kind(), ConnectErrorKind::Config, "{err}");
             let msg = err.to_string();
             assert!(msg.contains("feed.kafka.tls.root_ca: "), "{msg}");
             assert!(msg.contains(name), "{msg}");
         }
+    }
+}
+
+/// Pins that the worker and the publisher check the config they are given
+/// before they build a client: a retry topic equal to the work topic is
+/// refused as a config error, where a connect that skipped the check would
+/// reach no broker and end at the bound as unavailable.
+#[test]
+fn the_worker_and_the_publisher_refuse_a_config_validate_refuses() {
+    let config = crate::KafkaFeedConfig::new(
+        "127.0.0.1:1",
+        "workers",
+        "units",
+        "units",
+        "units-dead",
+        "units-attempts",
+    );
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let bound = Duration::from_secs(1);
+    for err in [
+        KafkaFeed::connect_with(
+            config.clone(),
+            io.handle(),
+            super::startup::Scope::All,
+            bound,
+            SyncClock::system(),
+        )
+        .unwrap_err(),
+        KafkaFeedPublisher::connect_with(config, io.handle(), super::startup::Scope::All, bound)
+            .unwrap_err(),
+    ] {
+        assert_eq!(err.kind(), ConnectErrorKind::Config, "{err}");
+        assert_eq!(
+            err.to_string(),
+            "feed.kafka.retry_topic: must differ from `topic`"
+        );
     }
 }
 
@@ -2065,7 +2091,7 @@ mod cluster {
     //! the feed's buffer and ownership directly.
 
     use super::super::attempt::{self, Follower};
-    use super::super::config::KafkaFeedConfig;
+    use super::super::config::Trusted;
     use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH, Wait, tpl_of};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
@@ -2122,7 +2148,7 @@ mod cluster {
     fn connect(brokers: &str, group: &str, io: &tokio::runtime::Runtime) -> KafkaFeed {
         // The MockCluster answers no request for a topic's configuration.
         KafkaFeed::connect_with(
-            &section(brokers, group),
+            crate::KafkaFeedConfig::from_section(&section(brokers, group)).unwrap(),
             io.handle(),
             Scope::Existence,
             CONNECT_BOUND,
@@ -2265,10 +2291,7 @@ mod cluster {
 
     /// The feed's parts for `group` on a two-partition attempt topic, with
     /// the consumer subscribed and no thread started.
-    pub(super) fn parts_for(
-        brokers: &str,
-        group: &str,
-    ) -> (KafkaFeedConfig, Arc<Core>, Producer, Driver) {
+    pub(super) fn parts_for(brokers: &str, group: &str) -> (Trusted, Arc<Core>, Producer, Driver) {
         parts_on(brokers, group, SyncClock::system())
     }
 
@@ -2277,8 +2300,8 @@ mod cluster {
         brokers: &str,
         group: &str,
         clock: SyncClock,
-    ) -> (KafkaFeedConfig, Arc<Core>, Producer, Driver) {
-        let config = KafkaFeedConfig::from_section(&section(brokers, group)).unwrap();
+    ) -> (Trusted, Arc<Core>, Producer, Driver) {
+        let config = Trusted::from_section(&section(brokers, group)).unwrap();
         let (core, producer, d) = super::super::parts(&config, TWO, clock).unwrap();
         (config, core, producer, d)
     }
@@ -2312,7 +2335,7 @@ mod cluster {
     /// Start the follower and the gate, the gate at `step`, beside a
     /// consumer the test drives.
     pub(super) fn admission(
-        config: &KafkaFeedConfig,
+        config: &Trusted,
         core: &Arc<Core>,
         producer: &Producer,
         step: Duration,
@@ -2452,8 +2475,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("drop-queued-assign");
         let config =
-            KafkaFeedConfig::from_section(&section_with(&brokers, &group, "    debug: cgrp\n"))
-                .unwrap();
+            Trusted::from_section(&section_with(&brokers, &group, "    debug: cgrp\n")).unwrap();
         let (_, _producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         crate::testutil::stop_at(&d.consumer, crate::testutil::ASSIGN_STOP);
         let context = Arc::clone(d.consumer.context());
@@ -3179,7 +3201,7 @@ mod cluster {
                 .unwrap();
         }
         records.flush(Duration::from_secs(30)).unwrap();
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer = feed_producer(&config, &core);
@@ -3247,7 +3269,7 @@ mod cluster {
             RDKafkaApiKey::ListOffsets,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50],
         );
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         {
@@ -3309,7 +3331,7 @@ mod cluster {
             .map_err(|(e, _)| e)
             .unwrap();
         records.flush(Duration::from_secs(30)).unwrap();
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
         let producer: Producer = feed_producer(&config, &core);
@@ -3348,7 +3370,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("leaderless");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         let on = |partition| offset_on(&core, partition);
@@ -3393,7 +3415,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("leader-returns");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer = feed_producer(&config, &core);
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
@@ -3429,7 +3451,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-no-metadata");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer = feed_producer(&config, &core);
         core.lock().tracker.assign([super::tp(0)]);
@@ -3464,7 +3486,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refresh-bound");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer = feed_producer(&config, &core);
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
@@ -3506,7 +3528,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-no-rest");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         let offset = offset_on(&core, 0);
@@ -3565,7 +3587,7 @@ mod cluster {
                 .unwrap();
         }
         records.flush(Duration::from_secs(30)).unwrap();
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer = feed_producer(&config, &core);
@@ -3622,7 +3644,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refused-reread");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         {
@@ -3700,7 +3722,7 @@ mod cluster {
              attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n"
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(
             &config,
@@ -3795,7 +3817,7 @@ mod cluster {
              attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n"
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(
             &config,
@@ -3853,7 +3875,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-rest");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         let offset = offset_on(&core, 1);
@@ -3919,7 +3941,7 @@ mod cluster {
                 .unwrap();
         }
         records.flush(Duration::from_secs(30)).unwrap();
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         let gate = Gate::new(
@@ -3990,7 +4012,7 @@ mod cluster {
                 .unwrap();
         }
         records.flush(Duration::from_secs(30)).unwrap();
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         let gate = Gate::new(
@@ -4071,7 +4093,7 @@ mod cluster {
         let cluster = cluster_with(1);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("full-queue");
-        let config = KafkaFeedConfig::from_section(&section_with(
+        let config = Trusted::from_section(&section_with(
             &brokers,
             &group,
             "    queue.buffering.max.messages: \"1\"\n",
@@ -4522,8 +4544,7 @@ mod cluster {
     /// thread that polls, here the test's.
     fn parts_logging_topics(brokers: &str, group: &str) -> (Arc<Core>, Producer, Driver) {
         let config =
-            KafkaFeedConfig::from_section(&section_with(brokers, group, "    debug: topic\n"))
-                .unwrap();
+            Trusted::from_section(&section_with(brokers, group, "    debug: topic\n")).unwrap();
         super::super::parts(&config, TWO, SyncClock::system()).unwrap()
     }
 
@@ -4735,7 +4756,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("stats-release");
-        let mut config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let mut config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         config.statistics_interval = Duration::from_secs(5);
         let (core, _producer, mut d) =
             super::super::parts(&config, TWO, SyncClock::system()).unwrap();
@@ -4807,7 +4828,7 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("stats-drain");
-        let mut config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let mut config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         // Long enough that librdkafka's own snapshot never replaces the one
         // the test places.
         config.statistics_interval = Duration::from_secs(3600);
@@ -5395,7 +5416,7 @@ mod cluster {
              session.timeout.ms: \"6000\"\n    heartbeat.interval.ms: \"2000\"\n"
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let (core, producer, mut d) =
             super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         let feed = feed_over(&core, &producer, None);
@@ -5502,7 +5523,8 @@ mod cluster {
         io: &tokio::runtime::Runtime,
     ) -> KafkaFeedPublisher {
         KafkaFeedPublisher::connect_with(
-            &section_with(brokers, "publisher", rdkafka),
+            crate::KafkaFeedConfig::from_section(&section_with(brokers, "publisher", rdkafka))
+                .unwrap(),
             io.handle(),
             Scope::Existence,
             CONNECT_BOUND,
@@ -5730,7 +5752,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         write_marker(&brokers);
         let group = spate_test::unique_name(group);
-        let config = KafkaFeedConfig::from_section(&section_with(
+        let config = Trusted::from_section(&section_with(
             &brokers,
             &group,
             "    socket.timeout.ms: \"1000\"\n    max.poll.interval.ms: \"8000\"\n",
@@ -6371,7 +6393,7 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let group = spate_test::unique_name("fence");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer = feed_producer(&config, &core);
@@ -6592,7 +6614,7 @@ mod cluster {
         cluster.partition_leader(ATTEMPTS, 0, None).unwrap();
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("close-fence");
-        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let config = Trusted::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer = feed_producer(&config, &core);
         core.fences.fetch_add(1, Ordering::AcqRel);
@@ -6625,7 +6647,7 @@ mod docker {
     //! during, and a compacted attempt topic, which the mock never cleans.
 
     use super::super::attempt::{self, Follower};
-    use super::super::config::KafkaFeedConfig;
+    use super::super::config::Trusted;
     use super::super::gate::Gate;
     use super::super::producer::FeedProducerHooks;
     use super::super::{Core, Gating};
@@ -6689,7 +6711,11 @@ mod docker {
         for _ in 0..UNITS {
             acknowledge_first(&a);
         }
-        let _b = KafkaFeed::connect(&section(&brokers, &group), io.handle()).unwrap();
+        let _b = KafkaFeed::connect(
+            crate::KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap(),
+            io.handle(),
+        )
+        .unwrap();
         drive(&mut a, "A serves the revocation", |d| owns(d) == 0);
         assert_eq!(
             committed(&brokers, &group),
@@ -6727,7 +6753,7 @@ mod docker {
 
     /// Run one gate pass over a unit on each attempt partition of `core`,
     /// with a bound of 10 s, and assert that it admitted every unit.
-    fn gate_admits(config: &KafkaFeedConfig, core: &Arc<Core>) {
+    fn gate_admits(config: &Trusted, core: &Arc<Core>) {
         let producer = config
             .base(false)
             .create::<super::write::Producer, _>(
@@ -6783,7 +6809,7 @@ mod docker {
             spate_test::unique_name("tail")
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let thread = Follower::new(&config, Arc::clone(&core))
             .unwrap()
@@ -6851,7 +6877,7 @@ mod docker {
                     .is_ok_and(|read| read == marks)
             })
         });
-        let config = KafkaFeedConfig::from_section(&section(&brokers, "emptied")).unwrap();
+        let config = Trusted::from_section(&section(&brokers, "emptied")).unwrap();
         let core = Arc::new(Core::new(
             &config,
             NonZeroU32::new(2).unwrap(),
@@ -6894,7 +6920,7 @@ mod docker {
             ATTEMPT,
             &[("units/0/0", Some(&attempt::encode(1)[..]))],
         );
-        let config = KafkaFeedConfig::from_section(&section(brokers, "open")).unwrap();
+        let config = Trusted::from_section(&section(brokers, "open")).unwrap();
         let lister = attempt::test_lister(&config);
         wait_until(HANG, "the log end is above the open transaction", || {
             lister
@@ -7065,7 +7091,7 @@ mod docker {
             spate_test::unique_name("removed-tail")
         ))
         .unwrap();
-        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let config = Trusted::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let thread = Follower::new(&config, Arc::clone(&core))
             .unwrap()
@@ -7164,14 +7190,14 @@ mod feed_metrics {
 
     /// The section of a feed whose clients reach no broker, emitting
     /// statistics every `interval`.
-    fn statistics_config(interval: &str) -> KafkaFeedConfig {
+    fn statistics_config(interval: &str) -> Trusted {
         let section: FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
              retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
              attempt_topic: units-attempts\n  statistics_interval: {interval}\n"
         ))
         .unwrap();
-        KafkaFeedConfig::from_section(&section).unwrap()
+        Trusted::from_section(&section).unwrap()
     }
 
     /// A confirmed-or-not move of the delivery at `offset` of `tp(0)` to `to`.

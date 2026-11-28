@@ -29,8 +29,6 @@ The name also stays clear of the core trait it implements, such as `Source` or `
 
 **Follow:** [`crates/spate-kafka/src/lib.rs`](repo:crates/spate-kafka/src/lib.rs).
 
-**Departs:** the Kafka feed's config type is private ([#2319](https://github.com/spate-etl/spate/issues/2319)).
-
 **Checked by:** review.
 
 ### Name every exported config type for the connector
@@ -109,8 +107,6 @@ A feed with no config and no I/O builds through `from_section` on the feed itsel
 An invalid config fails at construction, as the `ConfigError` the rest of the configuration returns, and never later as text inside a start error.
 
 **Follow:** [`crates/spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs), and [`crates/spate-sqs/src/config.rs`](repo:crates/spate-sqs/src/config.rs) for a feed backend.
-
-**Departs:** the Kafka feed has no public config type ([#2319](https://github.com/spate-etl/spate/issues/2319)).
 
 **Checked by:** review.
 

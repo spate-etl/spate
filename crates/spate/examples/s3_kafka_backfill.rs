@@ -39,6 +39,7 @@ use rdkafka::error::RDKafkaErrorCode;
 use spate::NO_EVENT_TIME_MS;
 use spate::feed::{Feed, Unit};
 use spate::json::JsonLinesFramer;
+use spate::kafka::KafkaFeedConfig;
 use spate::kafka::feed::KafkaFeed;
 use spate::prelude::*;
 use spate::s3::{DescriptorObject, S3Source, SplitDescriptor};
@@ -153,7 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .ok_or("the file names no feed")?;
     let feed = match section.backend().component_type() {
-        "kafka" => Arc::new(KafkaFeed::connect(&section, &pipeline.io_handle())?),
+        "kafka" => Arc::new(KafkaFeed::connect(
+            KafkaFeedConfig::from_section(&section)?,
+            &pipeline.io_handle(),
+        )?),
         other => return Err(format!("this binary builds the `kafka` feed, not `{other}`").into()),
     };
     let pipeline = pipeline.feed(Arc::clone(&feed) as Arc<dyn Feed>);

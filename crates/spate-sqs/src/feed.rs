@@ -420,8 +420,8 @@ impl Shared {
     }
 }
 
-/// The work feed over one SQS standard queue, built from a
-/// `feed: { sqs: … }` section.
+/// The work feed over one SQS standard queue, built from an
+/// [`SqsFeedConfig`] by [`SqsFeed::connect`].
 ///
 /// A unit is a message: its body is the message body, sent as text, and its
 /// id travels in the String message attribute `spate.unit`. A delivery's

@@ -145,6 +145,7 @@ pub(crate) fn check_section_keys(section: &FeedSection) -> Result<(), ConfigErro
 impl SqsFeedConfig {
     /// A config for the queue at `queue_url`. Every other field starts at its
     /// YAML default.
+    #[must_use]
     pub fn new(queue_url: impl Into<String>) -> SqsFeedConfig {
         SqsFeedConfig {
             queue_url: queue_url.into(),

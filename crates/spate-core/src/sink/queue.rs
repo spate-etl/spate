@@ -68,6 +68,10 @@ impl ShardQueues {
     ///
     /// [`ChunkSendError`] holding the chunk when the shard's queue is full or
     /// closed.
+    ///
+    /// # Panics
+    ///
+    /// When `shard` is not below [`num_shards`](Self::num_shards).
     pub fn try_send(&self, shard: usize, chunk: EncodedChunk) -> Result<(), ChunkSendError> {
         let (result, live) = match self.senders[shard].try_send(chunk) {
             Ok(()) => (Ok(()), true),

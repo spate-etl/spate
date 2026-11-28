@@ -39,8 +39,11 @@ fn feed_producer_debug_logs_reach_tracing() {
         .enable_all()
         .build()
         .expect("runtime");
-    let publisher = KafkaFeedPublisher::connect_without_config_checks(&section, io.handle())
-        .expect("publisher");
+    let publisher = KafkaFeedPublisher::connect_without_config_checks(
+        spate_kafka::KafkaFeedConfig::from_section(&section).unwrap(),
+        io.handle(),
+    )
+    .expect("publisher");
     io.block_on(publisher.publish(Unit::new("a", b"body".to_vec())))
         .expect("publish");
 

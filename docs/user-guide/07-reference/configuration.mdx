@@ -362,14 +362,15 @@ The block is rendered from
 | `settling_window` | duration | `5m` | The [settling window](glossary.mdx#settling-window) of a bounded job: how long a worker waits for its lister's job fingerprint at startup, and how long the feed must read empty between two reads of the lister's end marker before the job [ends](../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends). From `20s` to `1day`; a backend whose counts settle more slowly refuses a shorter one, and its page says so. Refused on the in-process feed, which ends a job with no window, and by a source on a durable feed with no `location`. |
 
 The runtime builds the in-process feed itself from `memory`. Any other backend
-is built in code from the section and passed to `Pipeline::feed`, and the
-runtime refuses a feed whose backend differs from the key the section names. The
-section's backend keys, and `attempt_cap` as the feed's delivery cap, apply
-only when a feed is built from the section, so a feed passed to
-`Pipeline::feed` or `Pipeline::seeded_feed` keeps the settings it was built
-with. `units_held`, `location`
-and `settling_window` apply to every feed, since the source reads them, and so
-does `attempt_cap` as the re-enqueue cap of a source that re-enqueues units.
+is built in code from its config type, decoded from the section or set field by
+field, and passed to `Pipeline::feed`, and the runtime refuses a feed whose
+backend differs from the key the section names. The section's backend keys, and
+`attempt_cap` as the feed's delivery cap, apply only when the feed's config is
+decoded from the section, so a feed passed to `Pipeline::feed` or
+`Pipeline::seeded_feed` keeps the settings it was built with. `units_held`,
+`location` and `settling_window` apply to every feed, since the source reads
+them, and so does `attempt_cap` as the re-enqueue cap of a source that
+re-enqueues units.
 Before the source opens, the runtime hands the section to every feed, built
 from the section or passed in code, so a backend can refuse a key it cannot
 honor there.

@@ -52,10 +52,13 @@
 //! The [`feed`] module is a work feed backend: [`feed::KafkaFeed`] carries
 //! work units on a work topic that every worker reads as one consumer
 //! group, and moves a failed unit to a retry topic, or at the attempt cap to
-//! a dead-letter topic. `main()` builds it from the pipeline's
-//! `feed: { kafka: ... }` section and passes it to `Pipeline::feed`. A
-//! process that only publishes, such as a lister run, builds a
-//! [`feed::KafkaFeedPublisher`] from the same section, which joins no group.
+//! a dead-letter topic. `main()` decodes the pipeline's
+//! `feed: { kafka: ... }` section into a [`KafkaFeedConfig`], builds the feed
+//! from it with [`feed::KafkaFeed::connect`], and passes it to
+//! `Pipeline::feed`. Code that builds its pipeline without a file starts
+//! from [`KafkaFeedConfig::new`]. A process that only publishes, such as a
+//! lister run, builds a [`feed::KafkaFeedPublisher`] from the same config,
+//! which joins no group.
 //!
 //! This crate re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
@@ -81,6 +84,7 @@ mod source;
 mod testutil;
 
 pub use config::KafkaSourceConfig;
+pub use feed::config::KafkaFeedConfig;
 pub use lane::{KafkaBatch, KafkaLane};
 pub use sink::{
     KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig,

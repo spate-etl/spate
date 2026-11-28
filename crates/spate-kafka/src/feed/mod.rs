@@ -43,7 +43,7 @@
 //! to the dead-letter topic, and below it to the retry topic.
 
 mod attempt;
-mod config;
+pub(crate) mod config;
 mod consumer;
 mod depth;
 mod events;
@@ -56,7 +56,7 @@ mod startup;
 mod tests;
 mod write;
 
-pub(crate) use config::{FeedRole, KafkaFeedConfig};
+pub(crate) use config::{FeedRole, KafkaFeedConfig, Trusted};
 pub use publisher::KafkaFeedPublisher;
 
 use crate::client::COMPONENT_TYPE;
@@ -72,7 +72,6 @@ use producer::FeedProducerHooks;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::statistics::Statistics;
 use spate_core::clock::SyncClock;
-use spate_core::config::FeedSection;
 use spate_core::error::ConnectError;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
@@ -547,8 +546,8 @@ impl Drop for LatchOnPanic {
     }
 }
 
-/// The work feed over Kafka topics, built from a `feed: { kafka: … }`
-/// section.
+/// The work feed over Kafka topics, built from a
+/// [`KafkaFeedConfig`](crate::KafkaFeedConfig) by [`KafkaFeed::connect`].
 ///
 /// Workers that share a `group_id` share the work: each partition of the
 /// work and retry topics is read by one of them. A publish writes the unit
@@ -602,8 +601,8 @@ impl std::fmt::Debug for KafkaFeed {
 }
 
 impl KafkaFeed {
-    /// Build the feed a `feed: { kafka: … }` section names, check its topics,
-    /// and start its threads.
+    /// Check `config`, build the feed it names, check its topics, and start
+    /// its threads.
     ///
     /// Connecting reads the metadata and configuration of the work, retry,
     /// dead-letter and attempt topics, on the runtime `io`, before any of the
@@ -616,8 +615,9 @@ impl KafkaFeed {
     ///
     /// # Errors
     ///
-    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a section the feed cannot read, and for a
-    /// `tls.root_ca` that cannot be read or holds no certificate.
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) for a config
+    /// [`KafkaFeedConfig::validate`] refuses, and for a `tls.root_ca` that
+    /// cannot be read or holds no certificate.
     /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when librdkafka refuses the client
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the
@@ -646,20 +646,42 @@ impl KafkaFeed {
     ///
     /// # Examples
     ///
+    /// From the pipeline's `feed:` section:
+    ///
     /// ```no_run
     /// use spate_core::config::FeedSection;
+    /// use spate_kafka::KafkaFeedConfig;
     /// use spate_kafka::feed::KafkaFeed;
     ///
     /// # fn run(section: &FeedSection, io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
-    /// let feed = KafkaFeed::connect(section, io)?;
+    /// let feed = KafkaFeed::connect(KafkaFeedConfig::from_section(section)?, io)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// From a config built in code:
+    ///
+    /// ```no_run
+    /// use spate_kafka::KafkaFeedConfig;
+    /// use spate_kafka::feed::KafkaFeed;
+    ///
+    /// # fn run(io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = KafkaFeedConfig::new(
+    ///     "kafka-1:9092",
+    ///     "workers",
+    ///     "units",
+    ///     "units-retry",
+    ///     "units-dead",
+    ///     "units-attempts",
+    /// );
+    /// let feed = KafkaFeed::connect(config, io)?;
     /// # Ok(()) }
     /// ```
     pub fn connect(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
-            section,
+            config,
             io,
             startup::Scope::All,
             startup::CONNECT_BOUND,
@@ -677,11 +699,11 @@ impl KafkaFeed {
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn connect_without_config_checks(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
-            section,
+            config,
             io,
             startup::Scope::Existence,
             startup::CONNECT_BOUND,
@@ -703,12 +725,12 @@ impl KafkaFeed {
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn connect_without_config_checks_on(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
         clock: spate_core::clock::SharedClock,
     ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
-            section,
+            config,
             io,
             startup::Scope::Existence,
             startup::CONNECT_BOUND,
@@ -717,13 +739,14 @@ impl KafkaFeed {
     }
 
     fn connect_with(
-        section: &FeedSection,
+        config: KafkaFeedConfig,
         io: &tokio::runtime::Handle,
         scope: startup::Scope,
         bound: Duration,
         clock: SyncClock,
     ) -> Result<KafkaFeed, ConnectError> {
-        let config = KafkaFeedConfig::connecting(section)?;
+        config.validate()?;
+        let config = Trusted::new(config)?;
         crate::security::warn_sasl_plaintext(
             &config.rdkafka,
             &spate_core::config::SectionPath::feed(COMPONENT_TYPE),
@@ -777,7 +800,7 @@ impl KafkaFeed {
 }
 
 /// Start the depth thread.
-fn start_depth(config: &KafkaFeedConfig, core: &Arc<Core>) -> Result<DepthThread, ConnectError> {
+fn start_depth(config: &Trusted, core: &Arc<Core>) -> Result<DepthThread, ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
@@ -827,7 +850,7 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
 /// `io`, under `bound` on `clock`, with the rejection watch over the checking
 /// clients, which are closed when it returns.
 fn check_topics(
-    config: &KafkaFeedConfig,
+    config: &Trusted,
     io: &tokio::runtime::Handle,
     scope: startup::Scope,
     bound: Duration,
@@ -860,7 +883,7 @@ fn check_topics(
 /// The feed's shared state and its producer, built with the settings the
 /// feed owns. `attempt_partitions` is the attempt topic's partition count.
 fn producer_parts(
-    config: &KafkaFeedConfig,
+    config: &Trusted,
     attempt_partitions: NonZeroU32,
     clock: SyncClock,
 ) -> Result<(Arc<Core>, Producer), ConnectError> {
@@ -882,7 +905,7 @@ fn producer_parts(
 /// with the consumer subscribed, before the thread starts.
 /// `attempt_partitions` is the attempt topic's partition count.
 fn parts(
-    config: &KafkaFeedConfig,
+    config: &Trusted,
     attempt_partitions: NonZeroU32,
     clock: SyncClock,
 ) -> Result<(Arc<Core>, Producer, Driver), ConnectError> {

@@ -33,7 +33,7 @@
 
 use super::FeedRole;
 use super::config::COMPONENT;
-use super::config::KafkaFeedConfig;
+use super::config::Trusted;
 use super::consumer::POLL_TIMEOUT;
 use super::{Core, LatchOnPanic, Topics};
 use crate::client::read_position;
@@ -367,13 +367,13 @@ pub(crate) type Lister = BaseConsumer<SourceContext>;
 /// # Errors
 ///
 /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when librdkafka refuses the client configuration.
-pub(crate) fn lister(config: &KafkaFeedConfig) -> Result<Lister, ConnectError> {
+pub(crate) fn lister(config: &Trusted) -> Result<Lister, ConnectError> {
     reader(config, FeedRole::Gate, "the gate's attempt reader")
 }
 
 /// A consumer of the attempt topic in `role`, `what` naming it in an error.
 fn reader(
-    config: &KafkaFeedConfig,
+    config: &Trusted,
     role: FeedRole,
     what: &str,
 ) -> Result<BaseConsumer<SourceContext>, ConnectError> {
@@ -385,7 +385,7 @@ fn reader(
 
 /// The gate's [`Lister`] for a test.
 #[cfg(test)]
-pub(crate) fn test_lister(config: &KafkaFeedConfig) -> Lister {
+pub(crate) fn test_lister(config: &Trusted) -> Lister {
     lister(config).expect("the gate's attempt reader")
 }
 
@@ -407,7 +407,7 @@ impl Follower {
     ///
     /// [`ConnectErrorKind::Refused`](spate_core::error::ConnectErrorKind::Refused) when librdkafka refuses the client
     /// configuration or the assignment.
-    pub(crate) fn new(config: &KafkaFeedConfig, core: Arc<Core>) -> Result<Follower, ConnectError> {
+    pub(crate) fn new(config: &Trusted, core: Arc<Core>) -> Result<Follower, ConnectError> {
         let topic = &*core.topics.attempt;
         let partitions = core.attempt_partitions;
         let consumer = reader(config, FeedRole::Follower, "the attempt follower")?;
@@ -786,17 +786,17 @@ mod tests {
         );
     }
 
-    fn config() -> KafkaFeedConfig {
+    fn config() -> Trusted {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(
             "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
              retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
              attempt_topic: units-attempts\n",
         )
         .unwrap();
-        KafkaFeedConfig::from_section(&section).unwrap()
+        Trusted::from_section(&section).unwrap()
     }
 
-    fn follower(config: &KafkaFeedConfig) -> Result<Follower, ConnectError> {
+    fn follower(config: &Trusted) -> Result<Follower, ConnectError> {
         let core = Arc::new(Core::new(config, NonZeroU32::MIN, SyncClock::system()));
         Follower::new(config, core)
     }
@@ -901,7 +901,7 @@ mod tests {
 
         struct Rig {
             producer: BaseProducer,
-            config: KafkaFeedConfig,
+            config: Trusted,
             // Declared last, so dropped after the producer that uses it.
             cluster: MockKafka,
         }
@@ -925,7 +925,7 @@ mod tests {
                 spate_test::unique_name("follower")
             ))
             .unwrap();
-            let config = KafkaFeedConfig::from_section(&section).unwrap();
+            let config = Trusted::from_section(&section).unwrap();
             Rig {
                 producer,
                 config,

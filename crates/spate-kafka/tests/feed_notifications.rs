@@ -15,13 +15,12 @@ use object_store::path::Path;
 use object_store::{Attribute, ObjectStore as _, ObjectStoreExt as _, PutOptions, TagSet};
 use serde_json::Value;
 use spate_core::pipeline::ExitState;
-use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, wait_for_value, wait_until};
 use spate_test_s3_feed::{recs, written};
 use spate_test_support::{KAFKA_PORT, RGW_OPAQUE_DATA, S3Store, SingleBroker, Store};
 use support::broker;
 use support::feed::{
-    DEAD, RETRY, WORK, Worker, committed_once, create_topics, feed_yaml, high_watermark,
+    DEAD, ON_BROKER, RETRY, WORK, Worker, committed_once, create_topics, feed_yaml, high_watermark,
     high_watermark_once, launch_source, read_topic,
 };
 use testcontainers::ImageExt;
@@ -492,7 +491,7 @@ impl Notifying {
             self.s3.store_options_yaml()
         );
         let worker = launch_source(
-            KafkaFeed::connect,
+            ON_BROKER,
             &source,
             &feed_yaml(&self.brokers, &group, "", ""),
             |_| {},

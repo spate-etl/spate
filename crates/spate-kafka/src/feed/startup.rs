@@ -594,7 +594,7 @@ pub(crate) async fn bounded<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::config::KafkaFeedConfig;
+    use crate::feed::config::Trusted;
     use RDKafkaErrorCode as C;
     use spate_core::clock::TestClock;
     use spate_core::error::ConnectErrorKind;
@@ -729,13 +729,13 @@ mod tests {
     }
 
     /// The section the topics above come from.
-    fn config() -> KafkaFeedConfig {
+    fn config() -> Trusted {
         let section = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  topic: {WORK}\n  \
              retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n"
         ))
         .unwrap();
-        KafkaFeedConfig::from_section(&section).unwrap()
+        Trusted::from_section(&section).unwrap()
     }
 
     fn run(admin: &Scripted) -> Result<Checked, ConnectError> {
@@ -1380,7 +1380,7 @@ mod tests {
         std::thread::spawn(move || {
             let io = multi_thread();
             let connected = crate::feed::KafkaFeed::connect_with(
-                &section,
+                crate::KafkaFeedConfig::from_section(&section).unwrap(),
                 io.handle(),
                 Scope::Existence,
                 limit,
@@ -1417,7 +1417,7 @@ mod tests {
     fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<ConnectError> {
         connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
             crate::feed::KafkaFeed::connect_with(
-                section,
+                crate::KafkaFeedConfig::from_section(section).unwrap(),
                 io,
                 Scope::All,
                 limit,
@@ -1431,7 +1431,13 @@ mod tests {
     #[cfg(feature = "tls")]
     fn connect_publisher_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<ConnectError> {
         connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
-            crate::feed::KafkaFeedPublisher::connect_with(section, io, Scope::All, limit).err()
+            crate::feed::KafkaFeedPublisher::connect_with(
+                crate::KafkaFeedConfig::from_section(section).unwrap(),
+                io,
+                Scope::All,
+                limit,
+            )
+            .err()
         })
     }
 
@@ -1797,7 +1803,7 @@ mod tests {
         fn a_sasl_plaintext_feed_logs_one_cleartext_warning() {
             let lines = sasl_plaintext_connect_lines(|section, io| {
                 crate::feed::KafkaFeed::connect_with(
-                    section,
+                    crate::KafkaFeedConfig::from_section(section).unwrap(),
                     io,
                     Scope::All,
                     LONG,
@@ -1813,7 +1819,13 @@ mod tests {
         #[test]
         fn a_sasl_plaintext_publisher_logs_one_cleartext_warning() {
             let lines = sasl_plaintext_connect_lines(|section, io| {
-                crate::feed::KafkaFeedPublisher::connect_with(section, io, Scope::All, LONG).err()
+                crate::feed::KafkaFeedPublisher::connect_with(
+                    crate::KafkaFeedConfig::from_section(section).unwrap(),
+                    io,
+                    Scope::All,
+                    LONG,
+                )
+                .err()
             });
             crate::testutil::assert_one_cleartext_warning(&lines, "feed.kafka");
         }
@@ -1846,7 +1858,13 @@ mod tests {
                 &brokers,
                 SASL_PLAIN,
                 LONG,
-                |section, io, _| crate::feed::KafkaFeedPublisher::connect(section, io).err(),
+                |section, io, _| {
+                    crate::feed::KafkaFeedPublisher::connect(
+                        crate::KafkaFeedConfig::from_section(section).unwrap(),
+                        io,
+                    )
+                    .err()
+                },
             ));
             assert!(message.contains("Authentication failed"), "{message}");
         }

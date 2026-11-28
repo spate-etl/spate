@@ -235,42 +235,67 @@ struct Body {
     attempt_cap: Option<serde::de::IgnoredAny>,
 }
 
-/// A `feed: { kafka: … }` section, decoded and checked.
+/// The keys under `feed: { kafka: … }`, with the section's `attempt_cap`:
+/// the configuration [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect)
+/// and [`KafkaFeedPublisher::connect`](crate::feed::KafkaFeedPublisher::connect)
+/// build from.
+///
+/// Build one in code with [`new`](Self::new), or from a pipeline's `feed:`
+/// section with [`from_section`](Self::from_section).
+///
+/// ```
+/// use spate_kafka::KafkaFeedConfig;
+/// use std::time::Duration;
+///
+/// let mut config = KafkaFeedConfig::new(
+///     "localhost:9092",
+///     "workers",
+///     "units",
+///     "units-retry",
+///     "units-dead",
+///     "units-attempts",
+/// );
+/// config.delivery_timeout = Duration::from_secs(60);
+/// config.validate()?;
+/// # Ok::<(), spate_core::config::ConfigError>(())
+/// ```
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct KafkaFeedConfig {
+#[non_exhaustive]
+pub struct KafkaFeedConfig {
     /// Comma-separated bootstrap servers.
-    pub(crate) brokers: String,
+    pub brokers: String,
     /// The consumer group every worker of the feed joins.
-    pub(crate) group_id: String,
+    pub group_id: String,
     /// The work topic: where a publish writes a unit.
-    pub(crate) topic: String,
-    /// Where a unit failed below the attempt cap is written again.
-    pub(crate) retry_topic: String,
+    pub topic: String,
+    /// Where a unit failed below the attempt cap is written again. Differs
+    /// from `topic`.
+    pub retry_topic: String,
     /// Where a unit goes at the attempt cap, or a message that names no unit.
-    pub(crate) dead_letter_topic: String,
+    /// Differs from `topic` and `retry_topic`.
+    pub dead_letter_topic: String,
     /// The compacted topic each unit's attempt is recorded on before it is
-    /// read.
-    pub(crate) attempt_topic: String,
+    /// read. Differs from the other three topics.
+    pub attempt_topic: String,
     /// The bound on every write's wait for its delivery report, the attempt
     /// and tombstone writes beside the retry and dead-letter ones, and the
     /// producer's `message.timeout.ms`. It also bounds one pass of the gate,
-    /// which can run up to 2 s past it.
-    pub(crate) delivery_timeout: Duration,
-    /// librdkafka's statistics interval. Zero disables statistics.
-    pub(crate) statistics_interval: Duration,
+    /// which can run up to 2 s past it. Defaults to 30 s.
+    pub delivery_timeout: Duration,
+    /// librdkafka's statistics interval. Zero disables statistics. Defaults
+    /// to 5 s.
+    pub statistics_interval: Duration,
     /// Raw librdkafka properties for every feed client.
-    pub(crate) rdkafka: BTreeMap<String, String>,
+    pub rdkafka: BTreeMap<String, String>,
     /// The roots every feed client verifies brokers against: the system
     /// roots, and the certificates in `root_ca` beside them.
-    pub(crate) tls: TlsSection,
-    /// The bundle `tls.root_ca` builds, read once by
-    /// [`connecting`](Self::connecting) for every client the feed or the
-    /// publisher creates. `None` before then, and without `root_ca`.
-    pub(crate) ca_pem: Option<String>,
+    pub tls: TlsSection,
     /// The attempt at which a unit moves to the dead-letter topic: a unit
     /// failed on this attempt or later, or a unit whose recorded attempts
-    /// have reached it, unread. From the section's `attempt_cap`.
-    pub(crate) attempt_cap: NonZeroU32,
+    /// have reached it, unread. [`from_section`](Self::from_section) reads it
+    /// from `feed.attempt_cap`, beside `kafka:`. Defaults to
+    /// [`DEFAULT_ATTEMPT_CAP`](spate_core::feed::DEFAULT_ATTEMPT_CAP).
+    pub attempt_cap: NonZeroU32,
 }
 
 // Hand-written: the `rdkafka` map carries credentials. The destructure lists
@@ -288,7 +313,6 @@ impl std::fmt::Debug for KafkaFeedConfig {
             statistics_interval,
             rdkafka,
             tls,
-            ca_pem,
             attempt_cap,
         } = self;
         f.debug_struct("KafkaFeedConfig")
@@ -302,17 +326,51 @@ impl std::fmt::Debug for KafkaFeedConfig {
             .field("statistics_interval", statistics_interval)
             .field("rdkafka", &redact::map(rdkafka.keys()))
             .field("tls", tls)
-            .field("ca_pem_bytes", &ca_pem.as_deref().map(str::len))
             .field("attempt_cap", attempt_cap)
             .finish()
     }
 }
 
 impl KafkaFeedConfig {
+    /// A config for the feed over `brokers` whose workers join `group_id`,
+    /// with its four topics in the order the YAML lists them: the work topic,
+    /// then the retry, dead-letter and attempt topics. Every other field
+    /// starts at its YAML default.
+    #[must_use]
+    pub fn new(
+        brokers: impl Into<String>,
+        group_id: impl Into<String>,
+        topic: impl Into<String>,
+        retry_topic: impl Into<String>,
+        dead_letter_topic: impl Into<String>,
+        attempt_topic: impl Into<String>,
+    ) -> KafkaFeedConfig {
+        KafkaFeedConfig {
+            brokers: brokers.into(),
+            group_id: group_id.into(),
+            topic: topic.into(),
+            retry_topic: retry_topic.into(),
+            dead_letter_topic: dead_letter_topic.into(),
+            attempt_topic: attempt_topic.into(),
+            delivery_timeout: default_delivery_timeout(),
+            statistics_interval: default_statistics_interval(),
+            rdkafka: BTreeMap::new(),
+            tls: TlsSection::default(),
+            attempt_cap: spate_core::feed::DEFAULT_ATTEMPT_CAP,
+        }
+    }
+
     /// Decode and check the `kafka:` body of `section`, with the section's
     /// `attempt_cap`, else
     /// [`DEFAULT_ATTEMPT_CAP`](spate_core::feed::DEFAULT_ATTEMPT_CAP).
-    pub(crate) fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] at `feed` for a section that names another
+    /// backend. [`ConfigError::Component`], starting at `feed.kafka`, for an
+    /// unknown key, an `attempt_cap` under `kafka:`, and a body
+    /// [`validate`](Self::validate) refuses.
+    pub fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
         let body: Body = section.backend_body(COMPONENT_TYPE, NAME)?;
         if body.attempt_cap.is_some() {
             return Err(SectionPath::feed(COMPONENT_TYPE)
@@ -329,36 +387,25 @@ impl KafkaFeedConfig {
             statistics_interval: body.statistics_interval,
             rdkafka: body.rdkafka,
             tls: body.tls,
-            ca_pem: None,
             attempt_cap: section.attempt_cap_or_default(),
         };
         config.validate()?;
         Ok(config)
     }
 
-    /// [`from_section`](Self::from_section), with the bundle `tls.root_ca`
-    /// builds, for a feed or publisher about to create its clients.
+    /// Check the config's values against each other and against what
+    /// librdkafka accepts.
     ///
     /// # Errors
     ///
-    /// As [`from_section`](Self::from_section), and
-    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config) at `feed.kafka.tls.root_ca` when `root_ca`
-    /// cannot be read.
-    pub(crate) fn connecting(section: &FeedSection) -> Result<KafkaFeedConfig, ConnectError> {
-        Self::from_section(section)?.resolve(crate::security::ca_bundle)
-    }
-
-    /// This config with the bundle `bundle` builds from its `tls`.
-    fn resolve(
-        mut self,
-        bundle: impl FnOnce(&TlsSection) -> Result<Option<String>, String>,
-    ) -> Result<KafkaFeedConfig, ConnectError> {
-        self.ca_pem = bundle(&self.tls)
-            .map_err(|why| SectionPath::feed(COMPONENT_TYPE).invalid("tls.root_ca", why))?;
-        Ok(self)
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+    /// [`ConfigError::Component`], starting at `feed.kafka`, for an empty
+    /// broker list, group or topic name, a `retry_topic` equal to `topic`, a
+    /// `dead_letter_topic` equal to either, an `attempt_topic` equal to any of
+    /// the three, a `delivery_timeout` librdkafka refuses as
+    /// `message.timeout.ms`, a `statistics_interval` it refuses, an `rdkafka`
+    /// property the feed owns or forbids, and a TLS setting the build cannot
+    /// honor.
+    pub fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::feed(COMPONENT_TYPE);
         for (key, value) in [
             ("brokers", &self.brokers),
@@ -410,12 +457,14 @@ impl KafkaFeedConfig {
         crate::security::check_tls_feature(&self.rdkafka, &self.tls, &at)
     }
 
-    /// What the feed's clients share with every Kafka client.
+    /// What the feed's clients share with every Kafka client, without the
+    /// bundle `tls.root_ca` builds: for the checks [`validate`](Self::validate)
+    /// runs. A client takes [`Trusted::base`].
     ///
     /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
     /// reading them always sees them set.
-    pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
+    fn base(&self, openssl_env: bool) -> Base<'_> {
         Base {
             section: "feed.kafka",
             brokers: &self.brokers,
@@ -423,7 +472,7 @@ impl KafkaFeedConfig {
             statistics_interval: self.statistics_interval,
             openssl_env,
             root_ca: self.tls.root_ca.is_some(),
-            ca_pem: self.ca_pem.as_deref(),
+            ca_pem: None,
         }
     }
 
@@ -431,11 +480,86 @@ impl KafkaFeedConfig {
     pub(crate) fn client(&self, role: FeedRole) -> Client<'_> {
         Client { config: self, role }
     }
+}
+
+/// A [`KafkaFeedConfig`] with the bundle its `tls.root_ca` builds, read once
+/// for every client the feed or the publisher creates. Its
+/// [`base`](Self::base) is the one way to a feed client's [`Base`], so no
+/// client is created without the bundle.
+pub(crate) struct Trusted {
+    config: KafkaFeedConfig,
+    ca_pem: Option<String>,
+}
+
+impl Trusted {
+    /// `config` with the bundle its `tls.root_ca` builds.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectErrorKind::Config`](spate_core::error::ConnectErrorKind::Config)
+    /// at `feed.kafka.tls.root_ca` when `root_ca` cannot be read or holds no
+    /// certificate.
+    pub(crate) fn new(config: KafkaFeedConfig) -> Result<Trusted, ConnectError> {
+        Self::with_bundle(config, crate::security::ca_bundle)
+    }
+
+    /// `config` with the bundle `bundle` builds from its `tls`.
+    fn with_bundle(
+        config: KafkaFeedConfig,
+        bundle: impl FnOnce(&TlsSection) -> Result<Option<String>, String>,
+    ) -> Result<Trusted, ConnectError> {
+        let ca_pem = bundle(&config.tls)
+            .map_err(|why| SectionPath::feed(COMPONENT_TYPE).invalid("tls.root_ca", why))?;
+        Ok(Trusted { config, ca_pem })
+    }
+
+    /// What the feed's clients share with every Kafka client, the bundle
+    /// included.
+    pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
+        self.config
+            .base(openssl_env)
+            .trusting(self.ca_pem.as_deref())
+    }
+
+    /// The config decoded from `section`, with no bundle, for a test that
+    /// creates feed clients.
+    #[cfg(test)]
+    pub(crate) fn from_section(section: &FeedSection) -> Result<Trusted, ConfigError> {
+        Ok(Self::without_bundle(KafkaFeedConfig::from_section(
+            section,
+        )?))
+    }
+
+    /// `config` with no bundle, for a test that creates feed clients.
+    #[cfg(test)]
+    pub(crate) fn without_bundle(config: KafkaFeedConfig) -> Trusted {
+        Trusted {
+            config,
+            ca_pem: None,
+        }
+    }
 
     /// `role`'s librdkafka configuration.
     #[cfg(test)]
     pub(crate) fn config(&self, role: FeedRole, openssl_env: bool) -> rdkafka::ClientConfig {
         self.base(openssl_env).config(&self.client(role))
+    }
+}
+
+impl std::ops::Deref for Trusted {
+    type Target = KafkaFeedConfig;
+
+    fn deref(&self) -> &KafkaFeedConfig {
+        &self.config
+    }
+}
+
+// A test changes a setting after decoding; production code never changes a
+// config whose bundle it has read.
+#[cfg(test)]
+impl std::ops::DerefMut for Trusted {
+    fn deref_mut(&mut self) -> &mut KafkaFeedConfig {
+        &mut self.config
     }
 }
 
@@ -457,18 +581,18 @@ mod tests {
         const BUNDLE: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
         let mut config = KafkaFeedConfig::from_section(&section(MINIMAL)).unwrap();
         config.tls.root_ca = Some("/etc/spate/private-ca.pem".into());
-        let refused = config
-            .clone()
-            .resolve(|_| Err("unreadable".to_owned()))
-            .unwrap_err();
+        let Err(refused) = Trusted::with_bundle(config.clone(), |_| Err("unreadable".to_owned()))
+        else {
+            panic!("an unreadable bundle is refused");
+        };
         assert_eq!(refused.kind(), ConnectErrorKind::Config, "{refused}");
         assert_eq!(refused.to_string(), "feed.kafka.tls.root_ca: unreadable");
-        let config = config
-            .resolve(|tls| {
-                assert_eq!(tls.root_ca, Some("/etc/spate/private-ca.pem".into()));
-                Ok(Some(BUNDLE.to_owned()))
-            })
-            .unwrap();
+        let Ok(config) = Trusted::with_bundle(config, |tls| {
+            assert_eq!(tls.root_ca, Some("/etc/spate/private-ca.pem".into()));
+            Ok(Some(BUNDLE.to_owned()))
+        }) else {
+            panic!("a readable bundle is accepted");
+        };
         for role in FeedRole::ALL {
             assert_eq!(
                 config.config(role, false).get("ssl.ca.pem"),
@@ -484,6 +608,12 @@ mod tests {
 
     fn parse(yaml: &str) -> Result<KafkaFeedConfig, ConfigError> {
         KafkaFeedConfig::from_section(&section(yaml))
+    }
+
+    /// The config `yaml` decodes to, with no bundle, to read its clients'
+    /// settings.
+    fn trusted(yaml: &str) -> Trusted {
+        Trusted::without_bundle(parse(yaml).unwrap())
     }
 
     fn with_rdkafka(key: &str, value: &str) -> Result<KafkaFeedConfig, ConfigError> {
@@ -523,7 +653,7 @@ mod tests {
     /// transaction. Regression for #1763 and #1765.
     #[test]
     fn only_the_depth_client_and_the_attempt_readers_read_uncommitted() {
-        let config = parse(MINIMAL).unwrap();
+        let config = trusted(MINIMAL);
         for role in FeedRole::ALL {
             let client = config.config(role, true);
             let expected = matches!(role, FeedRole::Depth | FeedRole::Follower | FeedRole::Gate)
@@ -600,6 +730,24 @@ mod tests {
                 .to_string();
             assert!(err.contains("partition.assignment.strategy"), "{err}");
         }
+    }
+
+    /// Pins that a config built in code starts at the defaults the YAML
+    /// path gives a section holding only the required keys, the attempt cap
+    /// included, and differs from a capped section only in its cap.
+    #[test]
+    fn new_matches_a_section_holding_only_the_required_keys() {
+        let mut built = KafkaFeedConfig::new(
+            "localhost:9092",
+            "workers",
+            "units",
+            "units-retry",
+            "units-dead",
+            "units-attempts",
+        );
+        assert_eq!(built, parse(MINIMAL).unwrap());
+        built.attempt_cap = NonZeroU32::new(3).unwrap();
+        assert_eq!(built, parse(&format!("attempt_cap: 3\n{MINIMAL}")).unwrap());
     }
 
     /// Pins that the attempt cap is read from the section, and refused in
@@ -764,11 +912,10 @@ mod tests {
     /// feed's own settings over it.
     #[test]
     fn each_client_gets_the_settings_the_feed_owns() {
-        let config = parse(&format!(
+        let config = trusted(&format!(
             "{MINIMAL}  delivery_timeout: 7s\n  statistics_interval: 2s\n  \
              rdkafka:\n    session.timeout.ms: \"6000\"\n"
-        ))
-        .unwrap();
+        ));
         let consumer = config.config(FeedRole::Consumer, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
@@ -810,7 +957,7 @@ mod tests {
         }
         assert_eq!(admin.get("statistics.interval.ms"), None);
 
-        let quiet = parse(&format!("{MINIMAL}  statistics_interval: 0s\n")).unwrap();
+        let quiet = trusted(&format!("{MINIMAL}  statistics_interval: 0s\n"));
         assert_eq!(
             quiet
                 .config(FeedRole::Consumer, true)
@@ -830,11 +977,10 @@ mod tests {
     /// them otherwise, and no statistics.
     #[test]
     fn the_follower_config_joins_the_feeds_group_and_only_reads() {
-        let mut config = parse(&format!(
+        let mut config = trusted(&format!(
             "{MINIMAL}  statistics_interval: 5s\n  \
              rdkafka:\n    session.timeout.ms: \"6000\"\n"
-        ))
-        .unwrap();
+        ));
         // Built by hand: validation refuses these keys in the passthrough.
         for (key, value) in [
             ("group.id", "other"),
@@ -900,7 +1046,7 @@ mod tests {
     /// the producer, whose snapshots the feed reads, and no other.
     #[test]
     fn only_the_consumer_and_producer_emit_statistics() {
-        let config = parse(&format!("{MINIMAL}  statistics_interval: 2s\n")).unwrap();
+        let config = trusted(&format!("{MINIMAL}  statistics_interval: 2s\n"));
         for role in FeedRole::ALL {
             let expected =
                 matches!(role, FeedRole::Consumer | FeedRole::Producer).then_some("2000");

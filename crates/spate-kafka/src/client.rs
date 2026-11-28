@@ -1015,7 +1015,7 @@ mod tests {
     use crate::KafkaSourceConfig;
     use crate::config::Consumer;
     use crate::context::SourceHooks;
-    use crate::feed::{FeedRole, KafkaFeedConfig};
+    use crate::feed::{FeedRole, KafkaFeedConfig, Trusted};
     use crate::security::tests::assert_ca_cases;
     use crate::sink::{KafkaSinkConfig, SinkRole};
     use crate::testutil::raw::raw_config;
@@ -1231,7 +1231,7 @@ mod tests {
     struct Sections {
         source: KafkaSourceConfig,
         sink: KafkaSinkConfig,
-        feed: KafkaFeedConfig,
+        feed: Trusted,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1255,7 +1255,11 @@ mod tests {
             .unwrap();
             let mut feed = KafkaFeedConfig::from_section(&section).unwrap();
             feed.rdkafka = rdkafka.clone();
-            Sections { source, sink, feed }
+            Sections {
+                source,
+                sink,
+                feed: Trusted::without_bundle(feed),
+            }
         }
 
         /// Every role, with its section and its base.

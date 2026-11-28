@@ -51,8 +51,10 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
     create_topics(&brokers);
 
     let group = spate_test::unique_name("membership");
-    let feed = KafkaFeed::connect(&section(&feed_yaml(&brokers, &group, "", "")), io.handle())
-        .expect("connect");
+    let config =
+        spate_kafka::KafkaFeedConfig::from_section(&section(&feed_yaml(&brokers, &group, "", "")))
+            .unwrap();
+    let feed = KafkaFeed::connect(config, io.handle()).expect("connect");
     let connected = Instant::now();
     let (waker, park) = wake_channel();
     feed.set_waker(waker);

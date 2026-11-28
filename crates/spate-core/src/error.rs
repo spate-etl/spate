@@ -992,6 +992,13 @@ mod tests {
         assert_eq!(chain(&links(&["same", "same", "target"])), "same: target");
     }
 
+    /// Each link is compared with the link before it alone, so a link that
+    /// an earlier link ends with is still printed.
+    #[test]
+    fn chain_compares_each_link_with_the_one_before() {
+        assert_eq!(chain(&links(&["a: b", "c", "b"])), "a: b: c: b");
+    }
+
     /// A source whose text appears in its parent's text, though not at its
     /// end, is printed.
     #[test]

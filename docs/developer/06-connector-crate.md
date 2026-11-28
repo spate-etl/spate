@@ -136,8 +136,32 @@ One that does I/O, such as a feed's `connect`, returns core's `ConnectError`.
 **Why:** a caller then asks "retry or stop?" the same way of every role, and the client's error survives for logging.
 A meaning that belongs to one role, such as `NotReady` on a deserializer, stays on that role.
 
-**Departs:** no connector attaches its client's error as `source()` yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
+**Departs:** no connector attaches its client's error to a run-time error yet ([#2431](https://github.com/spate-etl/spate/issues/2431)).
 Until one does, a connector keeps the client error's text in the reason.
+
+**Checked by:** review.
+
+### Put the client's error in `source()` and the context in the reason
+
+Write the reason as what the connector was doing, such as `listing` or `inserting`, plus any hint the connector adds.
+Attach the client's error with `with_source()`, and leave its text out of the reason.
+A role error that wraps another role error, such as a source reporting its feed's error, attaches that error the same way.
+Build a TLS hint for the reason with `spate::tls_hint!`, since the attached error already carries the TLS error's text.
+A feed backend passes the error it built, source attached, to `ReaderSignal::latch` and `fail_soon`.
+
+Attach no error whose text or `Debug` quotes a config value or a credential; keep its redacted text in the reason.
+A deserializer attaches no error whose text can quote the payload.
+When a client's text has no bound, such as a server's reply body, attach a crate type whose `Display` and `Debug` bound it.
+
+Render an error for a log line or a failure reason with `spate::error::chain`.
+It prints each link once, though many clients print their source in their own text as well as return it.
+
+**Why:** the cause then appears once, in the same place for every connector, and a caller decides by `kind()` or `class()` without parsing text.
+The source is for logging, and its type can change when Spate updates a client crate.
+
+**Follow:** `chain` and `tls_hint!` in [`crates/spate-core/src/error.rs`](repo:crates/spate-core/src/error.rs).
+
+**Departs:** see the previous rule ([#2431](https://github.com/spate-etl/spate/issues/2431)).
 
 **Checked by:** review.
 

@@ -1076,7 +1076,13 @@ fn buffer_one(feed: &KafkaFeed) {
 fn a_transient_consumer_error_is_returned_once() {
     let feed = idle_feed();
     buffer_one(&feed);
-    feed.core.lock().signal.fail_soon("broker down".to_owned());
+    feed.core
+        .lock()
+        .signal
+        .fail_soon(spate_core::feed::FeedError::new(
+            FeedErrorKind::Retryable,
+            "broker down",
+        ));
     let error = feed.receive(8).unwrap_err();
     assert_eq!(error.kind(), FeedErrorKind::Retryable);
     assert_eq!(feed.receive(8).unwrap().len(), 1);

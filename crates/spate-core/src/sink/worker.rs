@@ -748,13 +748,13 @@ impl<W: ShardWriter> ShardWorker<W> {
                         let class = err.class();
                         metrics.errors(class, 1);
                         metrics.replica_error(replica);
-                        tracing::warn!(replica, attempts, error = %err, "sink write failed");
+                        tracing::warn!(replica, attempts, error = %crate::error::chain(&err), "sink write failed");
                         if class != ErrorClass::Retryable
                             || (retry.max_attempts > 0 && attempts >= retry.max_attempts)
                         {
                             return WriteDone {
                                 seq: this_seq,
-                                failure: Some(err.to_string()),
+                                failure: Some(crate::error::chain(&err)),
                             };
                         }
                         metrics.retries(1);

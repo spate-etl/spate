@@ -198,7 +198,7 @@ impl DeadLetterSampler {
                 ),
                 Some(Err(e)) => tracing::warn!(
                     feed = feed.component_type(),
-                    error = %e,
+                    error = %crate::error::chain(&e),
                     "could not read the depth of the feed's dead-letter destination; \
                      `spate_feed_dead_letter_units` keeps its last reading"
                 ),

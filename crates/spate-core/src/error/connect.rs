@@ -242,6 +242,10 @@ mod tests {
         assert_eq!(err.to_string(), want);
         let source = std::error::Error::source(&err).expect("the config error's source");
         assert_eq!(source.to_string(), "disk");
+        assert_eq!(
+            crate::error::chain(&err),
+            "failed to read config file `spate.yaml`: disk"
+        );
     }
 
     /// An attached source is what `source()` returns, and `find_source`

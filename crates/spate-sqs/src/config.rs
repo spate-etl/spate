@@ -160,10 +160,10 @@ impl SqsFeedConfig {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Component`], starting at `feed.sqs`, for a section that
-    /// names another backend or holds an unknown key, for an `attempt_cap`,
-    /// for a `settling_window` under a minute, and for a body
-    /// [`validate`](Self::validate) refuses.
+    /// [`ConfigError::Component`] at `feed` for a section that names another
+    /// backend. [`ConfigError::Component`], starting at `feed.sqs`, for an
+    /// unknown key, an `attempt_cap`, a `settling_window` under a minute, and
+    /// a body [`validate`](Self::validate) refuses.
     pub fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
         let config: SqsFeedConfig = section.backend_body(COMPONENT_TYPE, NAME)?;
         check_section_keys(section)?;
@@ -180,7 +180,7 @@ impl SqsFeedConfig {
     /// `visibility` outside 3 s to 12 h or not in whole seconds, a
     /// `queue_url` or `endpoint` that is not an `http` or `https` URL or
     /// carries userinfo, a `queue_url` that names a FIFO queue, and a
-    /// `tls.root_ca` without an `https://` endpoint.
+    /// `tls.root_ca` with an `endpoint` that is not `https://`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let at = SectionPath::feed(COMPONENT_TYPE);
         check_duration(self.visibility, VISIBILITY)

@@ -3452,10 +3452,12 @@ mod cluster {
     }
 
     /// Pins that the metadata request after a failed read is bounded by the
-    /// gate's step: with the broker holding its reply far past `HANG`, a
-    /// pass whose read fails still returns.
+    /// gate's step, and that the wait after it takes only what is left of
+    /// the step: with the broker holding its reply far past `HANG`, a pass
+    /// whose read fails still returns, and its refresh used the whole step.
     #[test]
     fn a_refresh_that_gets_no_answer_ends_within_the_step() {
+        const STEP: Duration = Duration::from_millis(200);
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refresh-bound");
@@ -3471,7 +3473,7 @@ mod cluster {
             attempt::test_lister(&config),
             Duration::from_secs(3600),
         )
-        .with_step(Duration::from_millis(200));
+        .with_step(STEP);
         // The first pass caches the leaderless partition, so the second
         // pass's read fails from the cache and sends only the refresh.
         gate.pass();
@@ -3485,6 +3487,10 @@ mod cluster {
             returns_within(HANG, move || gate.pass()),
             "a refresh with no answer held the pass past its step"
         );
+        // librdkafka ends the refresh at its timeout, the step, so at most
+        // the clocks' rounding is left of it.
+        let left = core.lock().step_left.expect("the pass waited");
+        assert!(left < STEP / 2, "the wait after the refresh took {left:?}");
     }
 
     /// Pins that a pass which reads every watermark it needs admits its

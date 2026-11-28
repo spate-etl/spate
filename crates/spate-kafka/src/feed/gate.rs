@@ -187,8 +187,13 @@ impl Gate {
     /// at once is not repeated in a busy loop. When `refresh` is set, the
     /// step begins with a metadata request for the attempt topic on the
     /// lister, bounded by the step, and the wait takes what is left of it. A
-    /// stop, or a delivery that arrives while it waits, ends the wait early.
+    /// feed that stopped or latched skips both, and a stop or a delivery that
+    /// arrives during the wait ends it early.
     fn rest(&self, refresh: bool) {
+        // A refresh on an ended feed would hold its teardown for a step.
+        if self.ended().is_err() {
+            return;
+        }
         let begun = Instant::now();
         if refresh {
             // librdkafka answers a partition its cache holds with no leader
@@ -205,6 +210,7 @@ impl Gate {
             let st = {
                 let mut st = st;
                 st.step_waits += 1;
+                st.step_left = Some(left);
                 st
             };
             drop(
@@ -605,9 +611,10 @@ mod tests {
     use std::num::NonZeroU32;
     use std::sync::mpsc;
 
-    /// Pins that the wait after a pass that put units back is skipped on a
-    /// feed that stopped or latched before the wait began, whose notify has
-    /// already fired or never fires: with a step of an hour, `rest` returns.
+    /// Pins that the refresh and the wait after a pass that put units back
+    /// are skipped on a feed that stopped or latched before the wait began,
+    /// whose notify has already fired or never fires: with a step of an hour
+    /// and a broker that never answers, `rest` returns.
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -644,7 +651,7 @@ mod tests {
             }
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                gate.rest(false);
+                gate.rest(true);
                 let _ = tx.send(());
             });
             assert!(

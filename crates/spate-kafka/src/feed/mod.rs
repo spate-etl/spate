@@ -172,6 +172,10 @@ pub(crate) struct State {
     /// this lock just before each.
     #[cfg(test)]
     pub(crate) step_waits: usize,
+    /// How long the gate's last step wait was set to run, written with
+    /// [`step_waits`](Self::step_waits).
+    #[cfg(test)]
+    pub(crate) step_left: Option<Duration>,
 }
 
 /// A close the consumer thread has not settled yet.

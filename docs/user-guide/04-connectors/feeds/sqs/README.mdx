@@ -38,8 +38,8 @@ defaults of the table under [Configuration](#configuration).
 on a value the table refuses. It then reads the queue and its dead-letter queue
 once and runs the [startup checks](#startup-checks), so a missing queue, a
 refused credential or a queue the feed cannot dead-letter from fails there,
-before the pipeline starts. Connecting takes at most 30 seconds, every step included;
-past that it fails as unavailable, naming the step it was on.
+before the pipeline starts. Connecting takes at most 30 seconds, every step
+included; past that it fails as unavailable, naming the step it was on.
 
 ## Configuration
 

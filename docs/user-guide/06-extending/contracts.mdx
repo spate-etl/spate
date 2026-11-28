@@ -100,9 +100,10 @@ payload into several records should refuse `PerRecord`, because that source has
 split them already. When a deserializer refuses, the run fails with the refusal
 before the source opens.
 
-Spate logs the text of a `DeserError` in the `WARN` line for a skipped payload
-and uses it as the pipeline's failure reason. Keep the payload's content out of
-that text, because logs are often read by people who may not read the data.
+Spate logs the text of a `DeserError` and its source chain in the `WARN` line
+for a skipped payload and uses them as the pipeline's failure reason. Keep the
+payload's content out of that text, and attach no error whose text can quote
+the payload, because logs are often read by people who may not read the data.
 
 ## Records and what a batch reports
 

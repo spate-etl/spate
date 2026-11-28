@@ -160,7 +160,7 @@ impl ShardWriter for MockWriter {
             }
             Outcome::Fail(class, delay) => {
                 self.pause(delay).await;
-                Err(SinkError::from_class(class, "scripted failure"))
+                Err(SinkError::from_class(class, "scripted failure").with_source(ScriptedCause))
             }
             Outcome::Hang => {
                 // Held "concurrent" on purpose; aborted at drain deadline.
@@ -185,11 +185,18 @@ impl ShardWriter for MockWriter {
     }
 }
 
+/// The client error a scripted write failure carries as its source.
+#[derive(Debug, thiserror::Error)]
+#[error("scripted cause")]
+struct ScriptedCause;
+
 struct Fixture {
     writer: Arc<MockWriter>,
     queues: ShardQueues,
     pool: SinkPool<MockWriter>,
     budget: Arc<InflightBudget>,
+    /// The register the pool records each abandoned batch's reason in.
+    failures: SinkFailures,
 }
 
 fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize) -> Fixture {
@@ -253,6 +260,7 @@ fn fixture_with_basis(
         })
         .collect();
     let runtime = tokio::runtime::Handle::current();
+    let failures = SinkFailures::new();
     let pool = match clock {
         Some(clock) => SinkPool::spawn_on_clock(
             Arc::clone(&writer),
@@ -263,7 +271,7 @@ fn fixture_with_basis(
             metrics,
             "test",
             "test",
-            SinkFailures::new(),
+            failures.clone(),
             &runtime,
             clock,
         ),
@@ -277,7 +285,7 @@ fn fixture_with_basis(
             metrics,
             "test",
             "test",
-            SinkFailures::new(),
+            failures.clone(),
             &runtime,
         ),
     };
@@ -286,6 +294,7 @@ fn fixture_with_basis(
         queues,
         pool,
         budget,
+        failures,
     }
 }
 
@@ -643,6 +652,13 @@ async fn exhausted_attempts_abandon_and_fail_acks() {
     );
     assert_eq!(f.writer.calls().len(), 3, "exactly max_attempts writes");
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(
+        f.failures.describe().as_deref(),
+        Some(
+            "sink `test` abandoned a batch: sink error (Retryable): scripted failure: \
+             scripted cause"
+        )
+    );
 }
 
 #[tokio::test(start_paused = true)]

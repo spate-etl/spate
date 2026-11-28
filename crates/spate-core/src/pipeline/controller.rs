@@ -158,7 +158,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     ) {
         state.failure = Some(FatalError {
             component: "source".into(),
-            reason: format!("source open failed: {e}"),
+            reason: format!("source open failed: {}", crate::error::chain(&e)),
         });
     }
 
@@ -387,11 +387,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             Err(e) if e.class() == ErrorClass::Fatal => {
                 state.failure = Some(FatalError {
                     component: "source".into(),
-                    reason: format!("poll_events failed: {e}"),
+                    reason: format!("poll_events failed: {}", crate::error::chain(&e)),
                 });
             }
             Err(e) => {
-                tracing::warn!(error = %e, "retryable source control-plane error");
+                tracing::warn!(error = %crate::error::chain(&e), "retryable source control-plane error");
             }
         }
 
@@ -480,7 +480,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         && !drained_exit
         && let Err(e) = source.stop_reading()
     {
-        tracing::warn!(error = %e, "the source could not hand back the units it holds");
+        tracing::warn!(error = %crate::error::chain(&e), "the source could not hand back the units it holds");
     }
     // A graceful stop's deadline counts from its trigger, so the reading
     // above spends from the same `drain_timeout`.
@@ -542,7 +542,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     );
     // A source that did not open read nothing and stored no offset.
     let final_flush_failed = if opened && let Err(e) = source.flush_commits() {
-        tracing::error!(error = %e, "final commit flush failed; offsets will replay");
+        tracing::error!(error = %crate::error::chain(&e), "final commit flush failed; offsets will replay");
         true
     } else {
         false
@@ -841,7 +841,7 @@ fn pause_at_source<S: Source>(source: &mut S, state: &mut State, lanes: &[LaneId
     let settled = match source.pause(lanes) {
         Ok(()) => true,
         Err(e) => {
-            crate::rate_limited_warn!(PAUSE_WARN, error = %e, "source pause failed");
+            crate::rate_limited_warn!(PAUSE_WARN, error = %crate::error::chain(&e), "source pause failed");
             false
         }
     };
@@ -865,7 +865,7 @@ fn resume_at_source<S: Source>(source: &mut S, state: &mut State, lanes: &[LaneI
             }
         }
         Err(e) => {
-            crate::rate_limited_warn!(PAUSE_WARN, error = %e, "source resume failed");
+            crate::rate_limited_warn!(PAUSE_WARN, error = %crate::error::chain(&e), "source resume failed");
             for lane in lanes {
                 if let Some(pause) = state.paused.get_mut(lane) {
                     pause.settled = false;
@@ -993,16 +993,16 @@ fn commit_cycle<S: Source>(
             metrics.commit(false, started.elapsed(&SystemClock));
             state.failure.get_or_insert(FatalError {
                 component: "source".into(),
-                reason: format!("commit failed fatally: {e}"),
+                reason: format!("commit failed fatally: {}", crate::error::chain(&e)),
             });
         }
         Err(e) if final_pass => {
             metrics.commit(false, started.elapsed(&SystemClock));
-            tracing::warn!(error = %e, "final commit failed; uncommitted positions may replay");
+            tracing::warn!(error = %crate::error::chain(&e), "final commit failed; uncommitted positions may replay");
         }
         Err(e) => {
             metrics.commit(false, started.elapsed(&SystemClock));
-            tracing::warn!(error = %e, "commit failed; retrying next tick");
+            tracing::warn!(error = %crate::error::chain(&e), "commit failed; retrying next tick");
         }
     }
 }
@@ -1297,7 +1297,7 @@ fn revoke_lanes<S: Source>(
         false,
     );
     if let Err(e) = source.flush_commits() {
-        tracing::warn!(error = %e, "flush of stored commits failed during revocation");
+        tracing::warn!(error = %crate::error::chain(&e), "flush of stored commits failed during revocation");
     }
 
     let mut revoked_parts: FastSet<PartitionId> = lanes

@@ -1081,7 +1081,7 @@ fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(
             feed = feed.component_type(),
-            error = %e,
+            error = %crate::error::chain(&e),
             "the feed did not close cleanly; the units it still held return through redelivery"
         ),
         Err(_) => tracing::warn!(
@@ -1236,7 +1236,7 @@ pub(crate) async fn probe_sinks(probe: SinkProbeFn, health: Arc<HealthState>) {
         let connected = match probe().await {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!(error = %e, "sink probe failed");
+                tracing::warn!(error = %crate::error::chain(&e), "sink probe failed");
                 false
             }
         };

@@ -497,7 +497,8 @@ impl Driver {
             }
             _ => {
                 let mut st = self.core.lock();
-                st.signal.fail_soon(reason);
+                st.signal
+                    .fail_soon(FeedError::new(FeedErrorKind::Retryable, reason));
             }
         }
     }

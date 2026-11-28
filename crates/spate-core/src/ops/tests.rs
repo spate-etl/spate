@@ -117,6 +117,11 @@ impl Deserializer<SubF> for EmitThenFailDeser {
     }
 }
 
+/// The client error a scripted failure carries as its source.
+#[derive(Debug, thiserror::Error)]
+#[error("scripted cause")]
+struct ScriptedCause;
+
 /// Length-prefixed encoder for `SubEvent`; fails record-level on `BADROW`
 /// chunks, retryably on `RETRYROW` chunks and fatally on `FATALROW` chunks.
 #[derive(Clone, Default)]
@@ -137,7 +142,7 @@ impl RowEncoder<SubF> for SubEncoder {
             return Err(SinkError::retryable("transient encoder error"));
         }
         if rec.payload.chunk == b"FATALROW" {
-            return Err(SinkError::fatal("encoder broken"));
+            return Err(SinkError::fatal("encoder broken").with_source(ScriptedCause));
         }
         buf.extend_from_slice(rec.payload.chunk);
         Ok(())
@@ -252,7 +257,7 @@ impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
         1
     }
     fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
-        Err(SinkError::fatal("cannot finalize the block"))
+        Err(SinkError::fatal("cannot finalize the block").with_source(ScriptedCause))
     }
 }
 
@@ -1268,7 +1273,10 @@ fn a_deserializer_failure_does_not_outrank_a_stage_that_latched() {
     let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
         panic!("expected fatal");
     };
-    assert!(f.reason.contains("encoder broken"), "{}", f.reason);
+    assert_eq!(
+        f.reason,
+        "sink error (Fatal): encoder broken: scripted cause"
+    );
 }
 
 /// When two shards fail to finalize in one flush, the reported reason names the
@@ -2805,7 +2813,13 @@ fn a_finish_chunk_failure_counts_a_fatal_on_the_stage_that_raised_it() {
         let bufs = payloads(&["row"]);
         let (mut batch, _rx) = TestBatch::new(&bufs);
         assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
-        assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+        let PushOutcome::Fatal(f) = c.flush() else {
+            panic!("a failed finalize must be fatal");
+        };
+        assert_eq!(
+            f.reason,
+            "sink error (Fatal): cannot finalize the block: scripted cause"
+        );
         // The drain flushes again over the same rows.
         let _ = c.flush();
         let _ = c.flush();
@@ -3128,7 +3142,9 @@ impl Deserializer<LogF> for FatalDeser {
                 self.not_ready_first -= 1;
                 return Err(DeserError::not_ready("schema fetch in flight"));
             }
-            return Err(DeserError::fatal("registry rejected the credentials"));
+            return Err(
+                DeserError::fatal("registry rejected the credentials").with_source(ScriptedCause)
+            );
         }
         LogDeser.deserialize(raw, ack, out)
     }
@@ -3159,7 +3175,10 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
             panic!("expected Fatal whatever the Skip policy");
         };
         assert_eq!(f.component, "deserializer");
-        assert!(f.reason.contains("rejected the credentials"), "{f}");
+        assert_eq!(
+            f.reason,
+            "registry rejected the credentials: scripted cause"
+        );
         drop(batch);
         drop(c);
         ack_status = Some(ack_rx.try_recv().expect("batch resolved").status);
@@ -3198,7 +3217,8 @@ impl Deserializer<LogF> for SchemaUnavailableDeser {
         out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
     ) -> Result<(), DeserError> {
         if raw.bytes.ends_with(b"|noschema") {
-            return Err(DeserError::schema_unavailable("schema 7 is not registered"));
+            return Err(DeserError::schema_unavailable("schema 7 is not registered")
+                .with_source(ScriptedCause));
         }
         LogDeser.deserialize(raw, ack, out)
     }
@@ -3277,7 +3297,10 @@ fn a_schema_unavailable_payload_stops_the_chain_under_fail() {
         panic!("expected fatal under Fail");
     };
     assert_eq!(f.component, "deserializer");
-    assert_eq!(f.reason, "schema unavailable: schema 7 is not registered");
+    assert_eq!(
+        f.reason,
+        "schema unavailable: schema 7 is not registered: scripted cause"
+    );
     drop(batch);
     drop(c);
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
@@ -3574,7 +3597,7 @@ fn a_codec_failure_counts_a_fatal_on_the_sink_stage() {
     struct AlwaysFails;
     impl FrameCodec for AlwaysFails {
         fn encode_frame(&mut self, _chunk: &[u8]) -> Result<&[u8], SinkError> {
-            Err(SinkError::fatal("cannot code the chunk"))
+            Err(SinkError::fatal("cannot code the chunk").with_source(ScriptedCause))
         }
     }
     let rendered = crate::metrics::render_local(|| {
@@ -3592,7 +3615,13 @@ fn a_codec_failure_counts_a_fatal_on_the_sink_stage() {
         let bufs = payloads(&["row"]);
         let (mut batch, _rx) = TestBatch::new(&bufs);
         assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
-        assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+        let PushOutcome::Fatal(f) = c.flush() else {
+            panic!("a failed codec must be fatal");
+        };
+        assert_eq!(
+            f.reason,
+            "sink error (Fatal): cannot code the chunk: scripted cause"
+        );
         let _ = c.flush();
         let _ = c.flush();
         assert!(rxs[0].try_recv().is_err(), "a failed codec ships nothing");

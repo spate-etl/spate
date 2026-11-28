@@ -299,8 +299,7 @@ mod tests {
         let e = wrapper.provide_credentials().await.unwrap_err();
         assert_eq!(
             chain(&e),
-            "an error occurred while loading credentials: an error occurred while loading \
-             credentials: no profile"
+            "an error occurred while loading credentials: no profile"
         );
         wrapper.provide_credentials().await.unwrap();
         assert_eq!(inner.started(), 2);
@@ -550,8 +549,8 @@ mod tests {
         let e = wrapper.provide_credentials().await.unwrap_err();
         assert_eq!(
             chain(&e),
-            "an error occurred while loading credentials: an error occurred while loading \
-             credentials: the credentials provider panicked: non-string panic payload"
+            "an error occurred while loading credentials: the credentials provider panicked: \
+             non-string panic payload"
         );
     }
 

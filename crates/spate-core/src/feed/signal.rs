@@ -13,13 +13,13 @@ use super::{FeedError, FeedErrorKind, FeedWaker};
 /// # Examples
 ///
 /// ```
-/// use spate_core::feed::{FeedErrorKind, ReaderSignal, wake_channel};
+/// use spate_core::feed::{FeedError, FeedErrorKind, ReaderSignal, wake_channel};
 /// use std::time::Duration;
 ///
 /// let mut signal = ReaderSignal::default();
 /// let (waker, park) = wake_channel();
 /// signal.set_waker(waker, false);
-/// let (error, first) = signal.latch("the queue was deleted");
+/// let (error, first) = signal.latch(FeedError::new(FeedErrorKind::Fatal, "the queue was deleted"));
 /// assert!(first);
 /// assert_eq!(error.kind(), FeedErrorKind::Fatal);
 /// assert!(park.park(Duration::ZERO));
@@ -49,17 +49,20 @@ impl ReaderSignal {
         }
     }
 
-    /// Latch a [`Fatal`](FeedErrorKind::Fatal) error built from `reason`,
-    /// and wake the reader.
+    /// Latch `error` as [`Fatal`](FeedErrorKind::Fatal), with its reason and
+    /// source, and wake the reader.
     ///
     /// The first latch wins: a later call keeps the first error and drops its
-    /// own `reason`. Returns the latched error, and whether this call latched
-    /// it, so the feed logs its stop once.
-    pub fn latch(&mut self, reason: &str) -> (FeedError, bool) {
+    /// own. Returns the latched error, and whether this call latched it, so
+    /// the feed logs its stop once.
+    pub fn latch(&mut self, error: FeedError) -> (FeedError, bool) {
         let first = self.fatal.is_none();
         let error = self
             .fatal
-            .get_or_insert_with(|| FeedError::new(FeedErrorKind::Fatal, reason))
+            .get_or_insert(FeedError {
+                kind: FeedErrorKind::Fatal,
+                ..error
+            })
             .clone();
         self.wake();
         (error, first)
@@ -71,11 +74,14 @@ impl ReaderSignal {
         self.fatal.as_ref()
     }
 
-    /// Hold a [`Retryable`](FeedErrorKind::Retryable) error built from
-    /// `reason` for the next [`check`](Self::check), in place of any one not
-    /// yet returned, and wake the reader.
-    pub fn fail_soon(&mut self, reason: String) {
-        self.retryable = Some(FeedError::new(FeedErrorKind::Retryable, reason));
+    /// Hold `error` as [`Retryable`](FeedErrorKind::Retryable), with its
+    /// reason and source, for the next [`check`](Self::check), in place of
+    /// any one not yet returned, and wake the reader.
+    pub fn fail_soon(&mut self, error: FeedError) {
+        self.retryable = Some(FeedError {
+            kind: FeedErrorKind::Retryable,
+            ..error
+        });
         self.wake();
     }
 
@@ -98,8 +104,38 @@ impl ReaderSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::find_source;
     use crate::feed::wake_channel;
     use std::time::Duration;
+
+    fn fatal(reason: &str) -> FeedError {
+        FeedError::new(FeedErrorKind::Fatal, reason)
+    }
+
+    fn retryable(reason: &str) -> FeedError {
+        FeedError::new(FeedErrorKind::Retryable, reason)
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("client error")]
+    struct ClientError;
+
+    /// Pins that a latched error and a one-shot error keep the source they
+    /// were given and take the kind their method names.
+    #[test]
+    fn each_error_keeps_its_source_and_takes_its_kind() {
+        let mut signal = ReaderSignal::default();
+        signal
+            .fail_soon(FeedError::new(FeedErrorKind::Fatal, "transient").with_source(ClientError));
+        let once = signal.check().expect_err("the one-shot error");
+        assert_eq!(once.kind, FeedErrorKind::Retryable);
+        assert_eq!(once.reason(), "transient");
+        assert!(find_source::<ClientError>(&once).is_some());
+        let (latched, _) = signal.latch(retryable("stopped").with_source(ClientError));
+        assert_eq!(latched.kind, FeedErrorKind::Fatal);
+        assert_eq!(latched.reason(), "stopped");
+        assert!(find_source::<ClientError>(&latched).is_some());
+    }
 
     /// Pins that `set_waker` wakes at once only when units are ready.
     #[test]
@@ -133,11 +169,11 @@ mod tests {
         let mut signal = ReaderSignal::default();
         let (waker, park) = wake_channel();
         signal.set_waker(waker, false);
-        let (error, first) = signal.latch("first");
+        let (error, first) = signal.latch(fatal("first"));
         assert!(first);
         assert_eq!(error, FeedError::new(FeedErrorKind::Fatal, "first"));
         assert!(park.park(Duration::ZERO), "the latch did not wake");
-        let (again, first) = signal.latch("second");
+        let (again, first) = signal.latch(fatal("second"));
         assert!(!first);
         assert_eq!(again, error);
         assert_eq!(signal.latched(), Some(&error));
@@ -151,8 +187,8 @@ mod tests {
         let (waker, park) = wake_channel();
         signal.set_waker(waker, false);
         assert_eq!(signal.check(), Ok(()));
-        signal.fail_soon("older".to_owned());
-        signal.fail_soon("newer".to_owned());
+        signal.fail_soon(retryable("older"));
+        signal.fail_soon(retryable("newer"));
         assert!(park.park(Duration::ZERO), "fail_soon did not wake");
         assert_eq!(
             signal.check(),
@@ -166,8 +202,8 @@ mod tests {
     #[test]
     fn a_latched_error_comes_before_a_one_shot_error() {
         let mut signal = ReaderSignal::default();
-        signal.fail_soon("transient".to_owned());
-        let (error, _) = signal.latch("stopped");
+        signal.fail_soon(retryable("transient"));
+        let (error, _) = signal.latch(fatal("stopped"));
         assert_eq!(signal.check(), Err(error.clone()));
         assert_eq!(signal.check(), Err(error));
         assert_eq!(signal.latched().map(|e| e.kind), Some(FeedErrorKind::Fatal));

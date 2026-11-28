@@ -197,7 +197,7 @@ where
             self.meter.0.fatal_error();
             self.fatal.0.get_or_insert_with(|| FatalError {
                 component: self.component.to_string(),
-                reason: e.to_string(),
+                reason: crate::error::chain(&e),
             });
             return;
         }
@@ -235,7 +235,7 @@ where
                     self.meter.0.fatal_error();
                     self.fatal.0.get_or_insert_with(|| FatalError {
                         component: self.component.to_string(),
-                        reason: e.to_string(),
+                        reason: crate::error::chain(&e),
                     });
                     return;
                 }
@@ -360,7 +360,7 @@ where
                         crate::rate_limited_warn!(
                             ENCODE_SKIP_WARN,
                             component = &*self.component,
-                            error = %e,
+                            error = %crate::error::chain(&e),
                             "record skipped by sink encoder error policy"
                         );
                     }
@@ -368,7 +368,7 @@ where
                         self.meter.0.fatal_error();
                         self.fatal.0.get_or_insert_with(|| FatalError {
                             component: self.component.to_string(),
-                            reason: e.to_string(),
+                            reason: crate::error::chain(&e),
                         });
                     }
                 }

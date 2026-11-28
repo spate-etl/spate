@@ -323,11 +323,11 @@ impl EndCheck {
                 self.phase = Phase::Ended(EndOutcome::Stalled(depth));
             }
             (DepthOf::DeadLetters, Err(e)) => {
-                tracing::warn!(error = %e, "reading the dead-letter destination failed; reading it again");
+                tracing::warn!(error = %crate::error::chain(&e), "reading the dead-letter destination failed; reading it again");
                 self.phase = Phase::DeadLetters { due };
             }
             (DepthOf::Feed, Err(e)) => {
-                tracing::warn!(error = %e, "reading the feed's depth failed; restarting the end check");
+                tracing::warn!(error = %crate::error::chain(&e), "reading the feed's depth failed; restarting the end check");
                 self.reopen(due);
             }
             (DepthOf::Feed, Ok(depth)) if !depth.is_empty() => {

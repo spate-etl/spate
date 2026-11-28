@@ -79,6 +79,12 @@ pub trait SourceLane: Send {
     /// A lane that reports [`finished`](Self::finished) may return its
     /// end-of-input `Ok(None)` without waiting out `timeout`, because the
     /// pipeline thread stops polling it.
+    ///
+    /// # Errors
+    ///
+    /// A [`Fatal`](crate::error::ErrorClass::Fatal)-class error stops the
+    /// pipeline. The pipeline thread logs any other error, counts the call as
+    /// an empty poll and polls again.
     fn poll(
         &mut self,
         max_records: usize,
@@ -403,6 +409,11 @@ pub trait Source: Send {
     /// nothing more; see [`FeedOrigin`].
     /// The default rejects the section, so a source that reads no feed fails
     /// at startup when one is set.
+    ///
+    /// # Errors
+    ///
+    /// An error stops startup before the source opens: the run returns it as
+    /// [`StartError::Config`](crate::pipeline::StartError::Config).
     fn configure_feed(
         &mut self,
         section: &FeedSection,
@@ -423,11 +434,24 @@ pub trait Source: Send {
     /// [`attach_metrics`](Self::attach_metrics) and
     /// [`configure_feed`](Self::configure_feed), before the runtime polls the
     /// source.
+    ///
+    /// # Errors
+    ///
+    /// Any error ends the run as failed before the runtime polls the source.
+    /// The run returns `Ok` with that failed
+    /// [`ExitReport`](crate::pipeline::ExitReport), and skips the final
+    /// [`flush_commits`](Self::flush_commits).
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError>;
 
     /// Service control-plane work (rebalance callbacks, statistics) and
     /// return the next event, waiting at most `timeout`. Must be called
     /// regularly regardless of backpressure state.
+    ///
+    /// # Errors
+    ///
+    /// A [`Fatal`](crate::error::ErrorClass::Fatal)-class error stops the
+    /// pipeline. The controller logs any other error and calls again on its
+    /// next pass.
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<Self::Lane>, SourceError>;
 
     /// Store per-partition committable positions (each is the offset one
@@ -438,9 +462,23 @@ pub trait Source: Send {
     /// The last commit of a stop is this call too. It runs on the controller
     /// thread, so a source that commits to a remote store bounds the call
     /// itself.
+    ///
+    /// # Errors
+    ///
+    /// A [`Fatal`](crate::error::ErrorClass::Fatal)-class error stops the
+    /// pipeline. The controller logs any other error and sends the positions
+    /// again on the next commit tick. The last commit of a stop has no next
+    /// tick: a run that drained its input then ends as failed, and after a
+    /// shutdown signal the positions replay on the next start.
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError>;
 
     /// Synchronously flush stored positions (shutdown, revocation).
+    ///
+    /// # Errors
+    ///
+    /// The controller logs the error whatever its class. A failed flush at
+    /// the end of a run that drained its input ends the run as failed; at
+    /// any other point the positions replay.
     fn flush_commits(&mut self) -> Result<(), SourceError> {
         Ok(())
     }
@@ -452,12 +490,22 @@ pub trait Source: Send {
     /// made again on a later commit tick. A source may stop fetching some
     /// time after the call, and documents how long. Optional capability:
     /// sources that cannot pause rely on bounded-queue pushback alone.
+    ///
+    /// # Errors
+    ///
+    /// The controller logs the error whatever its class and calls again on a
+    /// later commit tick.
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
         Ok(())
     }
 
     /// Resume fetching for `lanes`.
+    ///
+    /// # Errors
+    ///
+    /// As [`pause`](Self::pause): logged whatever its class, and called again
+    /// on a later commit tick.
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
         Ok(())

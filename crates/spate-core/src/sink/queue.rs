@@ -63,6 +63,15 @@ impl ShardQueues {
     /// Non-blocking send to `shard`. On `Err` the chunk comes back and the
     /// caller applies backpressure. A closed queue (sink shut down) also
     /// returns the chunk; the driver observes shutdown separately.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkSendError`] holding the chunk when the shard's queue is full or
+    /// closed.
+    ///
+    /// # Panics
+    ///
+    /// When `shard` is not below [`num_shards`](Self::num_shards).
     pub fn try_send(&self, shard: usize, chunk: EncodedChunk) -> Result<(), ChunkSendError> {
         let (result, live) = match self.senders[shard].try_send(chunk) {
             Ok(()) => (Ok(()), true),

@@ -68,10 +68,22 @@ pub enum FramingContract {
 /// sees the same records as one that fed the stream whole.
 pub trait RecordFramer: Send {
     /// Feed the next run of decoded bytes.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes break the format or a record passes the framer's size
+    /// bound. The runtime never calls the framer; the source that feeds it
+    /// decides what an error does to the stream.
     fn push(&mut self, bytes: &[u8]) -> io::Result<()>;
 
     /// End of the stream/object: complete an unterminated final record if the
     /// format allows one, and validate any end-of-stream structure.
+    ///
+    /// # Errors
+    ///
+    /// When the stream ends inside a record the format cannot complete, or
+    /// its end-of-stream structure is invalid. As for [`push`](Self::push),
+    /// the source decides what follows.
     fn finish(&mut self) -> io::Result<()>;
 
     /// Pop the next completed record, in stream order.

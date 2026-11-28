@@ -37,12 +37,23 @@ impl PipelineRun {
     ///
     /// Use this to wait for a pipeline that stops on its own (e.g. a
     /// `Fail`-policy fatal) without a manual shutdown trigger.
+    ///
+    /// # Errors
+    ///
+    /// `Some(Err)` holding the [`StartError`] the closure given to
+    /// [`spawn`](Self::spawn) returned.
     pub fn wait_exit(&self, timeout: Duration) -> Option<Result<ExitReport, StartError>> {
         self.rx.recv_timeout(timeout).ok()
     }
 
     /// Block until the pipeline exits and join its thread, returning the run
     /// result. Panics if the thread panicked.
+    ///
+    /// # Errors
+    ///
+    /// The [`StartError`] the closure given to [`spawn`](Self::spawn)
+    /// returned. When that closure is `runtime.run()`, a run that started and
+    /// then failed returns `Ok` with a failed [`ExitReport`].
     pub fn join(self) -> Result<ExitReport, StartError> {
         let report = self.rx.recv().expect("pipeline thread dropped its result");
         self.join.join().expect("pipeline thread panicked");

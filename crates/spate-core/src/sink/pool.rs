@@ -234,6 +234,10 @@ impl<W: ShardWriter> SinkPool<W> {
 
     /// Probe every replica of every shard (readiness). Fails on the first
     /// unhealthy endpoint.
+    ///
+    /// # Errors
+    ///
+    /// The first [`SinkError`] a replica's probe returns.
     pub async fn probe_all(&self) -> Result<(), SinkError> {
         for shard in &self.endpoints {
             for endpoint in shard.iter() {

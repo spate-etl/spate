@@ -164,6 +164,13 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// The stage logs the error's text for a skipped record and uses it as
     /// the pipeline's failure reason, so an encoder keeps the record's
     /// content out of it.
+    ///
+    /// # Errors
+    ///
+    /// The stage rolls back the record's partial encoding. Under `Skip` it
+    /// counts and skips the record, unless the error is
+    /// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal); every other
+    /// case stops the pipeline.
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,
@@ -204,6 +211,10 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// Because a Native block concatenates with the blocks around it, each
     /// `finish_chunk` frame is independently valid, so workers still
     /// accumulate frames without re-encoding.
+    ///
+    /// # Errors
+    ///
+    /// Any error stops the pipeline; see above.
     fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
         let _ = buf;
         Ok(())
@@ -405,6 +416,14 @@ pub trait ShardWriter: Send + Sync + 'static {
     /// I/O worker keep the deadline from firing, so the shutdown hangs.
     /// Give the underlying client a request timeout and let the framework's
     /// retry policy handle the failure.
+    ///
+    /// # Errors
+    ///
+    /// The sink logs the error and retries the same sealed batch with backoff
+    /// while the error is [`Retryable`](crate::error::ErrorClass::Retryable),
+    /// up to `retry.max_attempts` when that is set. Any other class, or a
+    /// retryable error on the last allowed attempt, abandons the batch and
+    /// fails its acknowledgments, so its records replay after a restart.
     fn write_batch(
         &self,
         endpoint: &Self::Endpoint,
@@ -412,6 +431,11 @@ pub trait ShardWriter: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
     /// Connectivity probe for readiness. Defaults to healthy.
+    ///
+    /// # Errors
+    ///
+    /// The runtime logs the error, reports the sinks as not connected on
+    /// `/readyz`, and probes again sooner than after a success.
     fn probe(
         &self,
         endpoint: &Self::Endpoint,

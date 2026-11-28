@@ -525,6 +525,12 @@ impl std::fmt::Debug for Pipeline {
 impl Pipeline {
     /// Load configuration from a YAML file and initialize the process; see
     /// [`from_config`](Self::from_config).
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError::Config`] holding any error
+    /// [`PipelineConfig::from_path`] returns, and otherwise as
+    /// [`from_config`](Self::from_config).
     pub fn from_path(path: &Path) -> Result<Self, BuildError> {
         Self::from_config(PipelineConfig::from_path(path)?)
     }
@@ -547,8 +553,13 @@ impl Pipeline {
     ///
     /// # Errors
     ///
-    /// [`BuildError::AsyncContext`] when called from inside an async runtime.
-    /// Build pipelines from a plain thread, usually `main`.
+    /// - [`BuildError::AsyncContext`] when called from inside an async
+    ///   runtime. Build pipelines from a plain thread, usually `main`.
+    /// - [`BuildError::Config`] for `pipeline.io_threads` of zero or a
+    ///   `chunk:` key inside a component body. A config built in code skips
+    ///   [`PipelineConfig::validate`], so these two run here.
+    /// - [`BuildError::Metrics`] when the exporter fails to install.
+    /// - [`BuildError::Io`] when the I/O runtime fails to build.
     pub fn from_config(config: PipelineConfig) -> Result<Self, BuildError> {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(BuildError::AsyncContext);
@@ -622,12 +633,21 @@ impl Pipeline {
     /// Install the single sink under the reserved name `"default"` with
     /// default [`SinkOptions`], the ergonomic path for single-sink
     /// pipelines. Sugar for [`add_sink`](Self::add_sink)`("default", bundle)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_sink_with`](Self::add_sink_with). A second call fails with
+    /// [`BuildError::DuplicateSinkName`].
     pub fn sink<B: SinkBundle>(self, bundle: B) -> Result<Self, BuildError> {
         self.add_sink_with("default", bundle, SinkOptions::default())
     }
 
     /// [`sink`](Self::sink) with explicit [`SinkOptions`]. Sugar for
     /// [`add_sink_with`](Self::add_sink_with)`("default", bundle, options)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_sink_with`](Self::add_sink_with).
     pub fn sink_with<B: SinkBundle>(
         self,
         bundle: B,
@@ -641,6 +661,10 @@ impl Pipeline {
     /// table/stream; the chain's [`split`](crate::ops::ChainBuilder) terminal
     /// resolves each branch's queues by this name via
     /// [`ChainCtx::sink`](ChainCtx::sink).
+    ///
+    /// # Errors
+    ///
+    /// As [`add_sink_with`](Self::add_sink_with).
     pub fn add_sink<B: SinkBundle>(
         self,
         name: impl Into<String>,
@@ -956,6 +980,13 @@ impl Pipeline {
     /// [`into_runtime`](Self::into_runtime) + [`PipelineRuntime::run`]:
     /// run the pipeline to completion, blocking until a shutdown signal
     /// drains it or a fatal error stops it.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::Build`] as [`into_runtime`](Self::into_runtime), and
+    /// [`PipelineError::Start`] as [`PipelineRuntime::run`]. A failure after
+    /// the pipeline starts, a fatal error included, returns `Ok` with a
+    /// failed [`ExitReport`]; [`ExitReport::ok`] turns it into an error.
     pub fn run<S: Source + 'static>(self, source: S) -> Result<ExitReport, PipelineError> {
         Ok(self.into_runtime(source)?.run()?)
     }

@@ -1,6 +1,7 @@
-//! The `absolute_paths` lint, the thread spawn bans and the std and
-//! `hashbrown` map bans as the workspace configures them, and the `-D warnings` the clippy gate
-//! appends, which a warn-level entry relies on.
+//! The `absolute_paths` and `missing_errors_doc` lints, the thread spawn bans
+//! and the std and `hashbrown` map bans as the workspace configures them, and
+//! the `-D warnings` the clippy gate appends, which a warn-level entry relies
+//! on.
 
 use std::fs;
 use std::path::Path;
@@ -153,6 +154,40 @@ pub fn four_segments() -> u8 {
             "line {line} is a three-segment path\n{stderr}"
         );
     }
+}
+
+/// A crate under the workspace's clippy lint table and the repository's
+/// `clippy.toml` holds a public and a private function that return `Result`
+/// with no `# Errors` section. The public one fails `clippy -D warnings` and
+/// the private one does not, which pins the `missing_errors_doc` entry and
+/// keeps the lint to exported items.
+#[test]
+fn missing_errors_doc_refuses_public_functions_only() {
+    let source = "\
+/// Parse one digit.
+pub fn public_digit(text: &str) -> Result<u8, String> {
+    private_digit(text)
+}
+
+/// Parse one digit.
+fn private_digit(text: &str) -> Result<u8, String> {
+    text.parse().map_err(|_| text.to_owned())
+}
+";
+    let (passed, stderr) = clippy_probe("errors-doc-probe", source);
+
+    assert!(!passed, "{stderr}");
+    assert!(stderr.contains("missing `# Errors` section"), "{stderr}");
+    let public = line_of(source, "pub fn public_digit");
+    assert!(
+        stderr.contains(&format!("src/lib.rs:{public}:")),
+        "{stderr}"
+    );
+    let private = line_of(source, "fn private_digit");
+    assert!(
+        !stderr.contains(&format!("src/lib.rs:{private}:")),
+        "line {private} is a private function\n{stderr}"
+    );
 }
 
 /// A crate under the repository's `clippy.toml` that starts a thread through

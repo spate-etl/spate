@@ -620,8 +620,9 @@ impl PipelineConfig {
     /// # Errors
     ///
     /// - [`ConfigError::Interpolation`] for a `${VAR}` form that is malformed
-    ///   or unclosed, names an unset variable, or substitutes a value with a
-    ///   line break.
+    ///   or unclosed, names an unset variable, is a `${VAR:?message}` whose
+    ///   variable is unset or empty, or substitutes a value with a line
+    ///   break.
     /// - [`ConfigError::Parse`] for YAML that does not match the schema,
     ///   including a component section that names no component or several.
     /// - Any error [`validate`](Self::validate) returns.
@@ -688,9 +689,9 @@ impl PipelineConfig {
     ///
     /// - [`ConfigError::Validation`] for an empty `pipeline.name`, a pipeline,
     ///   checkpoint or backpressure value out of its range, both or neither
-    ///   of `sink:` and `sinks:`, an empty or reserved sink name, a
-    ///   `feed.settling_window` out of its range, and a `feed.location` or
-    ///   `feed.settling_window` on a `memory` feed.
+    ///   of `sink:` and `sinks:`, an empty `sinks:` map, an empty or reserved
+    ///   sink name, a `feed.settling_window` out of its range, and a
+    ///   `feed.location` or `feed.settling_window` on a `memory` feed.
     /// - [`ConfigError::Component`] for a `chunk:` key inside a component
     ///   body, and for a malformed `chunk`, `queue`, `batch`, `inflight`,
     ///   `retry` or `breaker` block on any declared sink.

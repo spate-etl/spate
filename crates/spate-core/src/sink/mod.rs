@@ -416,6 +416,14 @@ pub trait ShardWriter: Send + Sync + 'static {
     /// I/O worker keep the deadline from firing, so the shutdown hangs.
     /// Give the underlying client a request timeout and let the framework's
     /// retry policy handle the failure.
+    ///
+    /// # Errors
+    ///
+    /// The sink logs the error and retries the same sealed batch with backoff
+    /// while the error is [`Retryable`](crate::error::ErrorClass::Retryable),
+    /// up to `retry.max_attempts` when that is set. Any other class, or a
+    /// retryable error on the last allowed attempt, abandons the batch and
+    /// fails its acknowledgments, so its records replay after a restart.
     fn write_batch(
         &self,
         endpoint: &Self::Endpoint,
@@ -423,6 +431,11 @@ pub trait ShardWriter: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
 
     /// Connectivity probe for readiness. Defaults to healthy.
+    ///
+    /// # Errors
+    ///
+    /// The runtime logs the error, reports the sinks as not connected on
+    /// `/readyz`, and probes again sooner than after a success.
     fn probe(
         &self,
         endpoint: &Self::Endpoint,

@@ -217,6 +217,11 @@ pub mod date32 {
     /// # Errors
     ///
     /// When the input is not an `Int32`.
+    ///
+    /// # Panics
+    ///
+    /// When the day count lands outside the dates `NaiveDate` holds. Every
+    /// value in the server's Date32 range is inside it.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDate, D::Error>
     where
         D: Deserializer<'de>,
@@ -297,6 +302,11 @@ pub mod time64 {
                 /// # Errors
                 ///
                 /// When the input is not an `Int64`.
+                ///
+                /// # Panics
+                ///
+                /// In [`secs`](super::secs) and [`millis`](super::millis), when
+                /// the ticks fall outside what `Duration` holds.
                 pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
                 where
                     D: Deserializer<'de>,

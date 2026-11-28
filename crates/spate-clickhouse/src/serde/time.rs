@@ -213,6 +213,11 @@ pub mod date32 {
     /// # Errors
     ///
     /// When the input is not an `Int32`.
+    ///
+    /// # Panics
+    ///
+    /// When the day count lands outside the dates `Date` holds. Every value in
+    /// the server's Date32 range is inside it.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
     where
         D: Deserializer<'de>,

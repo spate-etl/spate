@@ -616,6 +616,16 @@ impl PipelineConfig {
 
     /// Load from YAML text: interpolate `${VAR}` forms against the process
     /// environment, parse, and validate.
+    ///
+    /// # Errors
+    ///
+    /// - [`ConfigError::Interpolation`] for a `${VAR}` form that is malformed
+    ///   or unclosed, names an unset variable, is a `${VAR:?message}` whose
+    ///   variable is unset or empty, or substitutes a value with a line
+    ///   break.
+    /// - [`ConfigError::Parse`] for YAML that does not match the schema,
+    ///   including a component section that names no component or several.
+    /// - Any error [`validate`](Self::validate) returns.
     // An inherent `from_str` (rather than `std::str::FromStr`) keeps the
     // call site `PipelineConfig::from_str(text)?` working without a trait
     // import, matching `from_path` beside it.
@@ -629,6 +639,11 @@ impl PipelineConfig {
     }
 
     /// Load from a YAML file (read, interpolate, parse, validate).
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Io`] when the file cannot be read or is not UTF-8, and
+    /// otherwise as [`from_str`](Self::from_str).
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_owned(),
@@ -667,6 +682,19 @@ impl PipelineConfig {
     /// Cross-field validation, run automatically by the loaders. Public so
     /// programmatically built configs (tests, `spate-test`) get the same
     /// checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first refusal:
+    ///
+    /// - [`ConfigError::Validation`] for an empty `pipeline.name`, a pipeline,
+    ///   checkpoint or backpressure value out of its range, both or neither
+    ///   of `sink:` and `sinks:`, an empty `sinks:` map, an empty or reserved
+    ///   sink name, a `feed.settling_window` out of its range, and a
+    ///   `feed.location` or `feed.settling_window` on a `memory` feed.
+    /// - [`ConfigError::Component`] for a `chunk:` key inside a component
+    ///   body, and for a malformed `chunk`, `queue`, `batch`, `inflight`,
+    ///   `retry` or `breaker` block on any declared sink.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let fail = |msg: String| Err(ConfigError::Validation(msg));
 

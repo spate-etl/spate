@@ -238,6 +238,11 @@ impl AdminServer {
     /// Bind the admin socket. Use port 0 to let the OS choose (tests).
     ///
     /// `render` of `None` serves the probes without `/metrics`.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error from binding `addr`, such as an address already in use
+    /// or a privileged port.
     pub async fn bind(
         addr: SocketAddr,
         render: Option<RenderFn>,

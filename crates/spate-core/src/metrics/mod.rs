@@ -335,6 +335,12 @@ static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::Onc
 /// For [`Exporter::Prometheus`] this also registers the `process_*`
 /// collector (CPU, memory, fds). No HTTP listener is spawned here; the
 /// admin server owns the socket.
+///
+/// # Errors
+///
+/// [`MetricsError::AlreadyInstalled`] as above, and
+/// [`MetricsError::Build`] when the Prometheus exporter refuses its
+/// configuration.
 pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError> {
     // The check-then-install below is not atomic on its own. Two threads
     // racing it both find the slot empty, both call `install_recorder`, and

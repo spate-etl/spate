@@ -53,6 +53,10 @@ macro_rules! option_module {
             use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
 
             /// Serialize an optional value via the parent module.
+            ///
+            /// # Errors
+            ///
+            /// As the parent module's `serialize`.
             pub fn serialize<S>(value: &Option<$ty>, serializer: S) -> Result<S::Ok, S::Error>
             where
                 S: Serializer,
@@ -73,6 +77,11 @@ macro_rules! option_module {
             }
 
             /// Deserialize an optional value via the parent module.
+            ///
+            /// # Errors
+            ///
+            /// As the parent module's `deserialize`, for the value inside the
+            /// option.
             pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<$ty>, D::Error>
             where
                 D: Deserializer<'de>,

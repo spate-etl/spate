@@ -18,6 +18,8 @@ Add `# Errors`, `# Panics` and `# Safety` sections where they apply, and `# Exam
 Open a module with a header that names what the module provides and its role in the crate.
 
 The workspace lints warn on `missing_docs`, and `cargo xtask clippy` denies warnings, so it fails on a public item with no rustdoc.
+The workspace lints also warn on `clippy::missing_errors_doc`, so the gate fails on a public function that returns `Result` and has no `# Errors` section.
+The lint reads only a bare `Result` return type, so give a function that wraps its `Result` its section by hand, such as one that returns `Option<Result<…>>` or `impl Future<Output = Result<…>>`.
 
 ## An inline comment states why
 

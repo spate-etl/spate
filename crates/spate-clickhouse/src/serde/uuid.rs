@@ -18,6 +18,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 /// Serialize a `Uuid` as a ClickHouse `UUID` value.
+///
+/// # Errors
+///
+/// When `serializer` fails.
 pub fn serialize<S>(uuid: &Uuid, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -30,6 +34,11 @@ where
 }
 
 /// Deserialize a `Uuid` from a ClickHouse `UUID` value.
+///
+/// # Errors
+///
+/// When the input is not a pair of `UInt64` halves, or, from a human-readable
+/// deserializer, not a string holding a UUID.
 pub fn deserialize<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
 where
     D: Deserializer<'de>,

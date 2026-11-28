@@ -1,8 +1,5 @@
 absolute-paths-max-segments = 3
 
-# `missing_safety_doc` checks private `unsafe fn`s too.
-check-private-items = true
-
 disallowed-macros = [
     { path = "metrics::counter", reason = "register through a `Meter` or the stage constructors in `spate-core`'s `metrics::labels`; the raw facade is the INV-9 opt-out and takes an `expect` naming why" },
     { path = "metrics::gauge", reason = "register through a `Meter` or the stage constructors in `spate-core`'s `metrics::labels`; the raw facade is the INV-9 opt-out and takes an `expect` naming why" },

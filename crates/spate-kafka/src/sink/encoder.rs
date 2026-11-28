@@ -146,6 +146,14 @@ impl KafkaMessage {
 /// [`ErrorClass::Fatal`]: spate_core::error::ErrorClass::Fatal
 pub trait MessageEncoder<F: RecFamily>: Send + Clone + 'static {
     /// Fill `msg` (already cleared) from `rec`.
+    ///
+    /// # Errors
+    ///
+    /// The sink stage handles the error as for
+    /// [`RowEncoder::encode`](spate_core::sink::RowEncoder::encode): under
+    /// `Skip` a record-level error skips the record, and a
+    /// [`Fatal`](spate_core::error::ErrorClass::Fatal) error, or any error
+    /// under `Fail`, stops the pipeline.
     fn encode<'buf>(
         &mut self,
         rec: &Record<F::Rec<'buf>>,

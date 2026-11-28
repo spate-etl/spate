@@ -7717,6 +7717,8 @@ struct HeldRun {
     io: tokio::runtime::Handle,
     /// Fires when the I/O runtime shuts down, the teardown's last step.
     io_stopped: mpsc::Receiver<()>,
+    /// Fires when `run` stops the sink probe.
+    probe_stopped: mpsc::Receiver<()>,
     logs: LogCapture,
 }
 
@@ -7745,12 +7747,27 @@ impl HeldRun {
     }
 }
 
-/// Start `source` under `cfg`, with `feed` and `probe` when given.
+// Redundant for the compiler. cargo-mutants skips an item under exactly
+// `cfg(test)`, and a mutant here only reopens the race the wait closes.
+#[cfg(test)]
+impl HeldRun {
+    /// Wait until `run` has read the instant its teardown's grace counts from.
+    /// It stops the sink probe just before that read, so two reads after the
+    /// probe stops include it.
+    fn wait_for_the_teardown_start(&self) {
+        self.probe_stopped
+            .recv_timeout(spate_test::HANG)
+            .expect("run stops the sink probe before its teardown");
+        self.clock.wait_for_reads();
+    }
+}
+
+/// Start `source` under `cfg`, with `feed` when given, and a sink probe that
+/// never answers and reports when it stops.
 fn run_held(
     cfg: PipelineConfig,
     source: HookedSource,
     feed: Option<Arc<dyn crate::feed::Feed>>,
-    probe: Option<crate::sink::SinkProbeFn>,
 ) -> HeldRun {
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -7771,10 +7788,18 @@ fn run_held(
             DrainReport::default()
         })
     });
+    let (probe_stopped_tx, probe_stopped) = mpsc::channel();
+    let probe_guard = SendOnDrop(probe_stopped_tx);
+    // The task owns the closure, so the guard drops with the task even when
+    // the abort comes before its first poll.
+    let probe: crate::sink::SinkProbeFn = Box::new(move || {
+        let _guard = &probe_guard;
+        Box::pin(std::future::pending())
+    });
     let sink = SinkRuntime {
         queues: vec![queues],
         drain,
-        probe,
+        probe: Some(probe),
         failures: SinkFailures::new(),
     };
     let clock = Arc::new(RunClock {
@@ -7811,6 +7836,7 @@ fn run_held(
         clock,
         io: handle,
         io_stopped,
+        probe_stopped,
         logs,
     }
 }
@@ -7843,12 +7869,12 @@ fn run_gives_up_on_a_source_drop_at_the_drain_deadline_and_its_grace() {
     source.on_drop = Some(hook);
     let cfg = test_config(1);
     assert_eq!(cfg.checkpoint.drain_timeout, TEST_DRAIN);
-    let run = run_held(cfg, source, None, None);
+    let run = run_held(cfg, source, None);
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock
         .advance(TEST_DRAIN + Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
@@ -7875,7 +7901,7 @@ fn the_grace_counts_from_a_final_commit_that_ends_after_the_drain_deadline() {
     source.on_drop = Some(hook);
     let (flush_hook, flushing, release_flush) = blocking_hook();
     source.on_flush = Some(flush_hook);
-    let run = run_held(test_config(1), source, None, None);
+    let run = run_held(test_config(1), source, None);
     run.shutdown.trigger();
     flushing
         .recv_timeout(spate_test::HANG)
@@ -7886,7 +7912,7 @@ fn the_grace_counts_from_a_final_commit_that_ends_after_the_drain_deadline() {
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock
         .advance(Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
@@ -7910,12 +7936,12 @@ fn run_gives_up_on_a_feed_drop_at_the_same_bound() {
     let (hook, entered, release) = blocking_hook();
     let mut cfg = test_config(1);
     cfg.feed = feed_section("memory: {}");
-    let run = run_held(cfg, source, Some(HookedFeed::shared(hook)), None);
+    let run = run_held(cfg, source, Some(HookedFeed::shared(hook)));
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the feed drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     let line = run.gave_up_line().expect("run logs the close it left");
@@ -7942,13 +7968,12 @@ fn an_abandoned_feed_drop_keeps_its_series_claimed() {
         feed_config(),
         HookedSource::new(source),
         Some(HookedFeed::shared(hook)),
-        None,
     );
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the feed drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
 
@@ -7957,7 +7982,6 @@ fn an_abandoned_feed_drop_keeps_its_series_claimed() {
         feed_config(),
         HookedSource::new(source),
         Some(HookedFeed::shared(Box::new(|| {}))),
-        None,
     );
     // A run that starts would wait for this trigger; a refused one has returned.
     second.shutdown.trigger();
@@ -7998,13 +8022,13 @@ fn an_abandoned_source_drop_keeps_the_io_runtime() {
         });
         let _ = ran_tx.send(done.recv_timeout(spate_test::HANG).is_ok());
     }));
-    let run = run_held(test_config(1), source, None, None);
+    let run = run_held(test_config(1), source, None);
     *io_slot.lock().unwrap() = Some(run.io.clone());
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
@@ -8025,11 +8049,11 @@ fn a_controller_panic_gives_a_blocked_source_drop_the_grace() {
     let (hook, entered, release) = blocking_hook();
     source.on_drop = Some(hook);
     script.lock().unwrap().push_back(Script::PanicPoll);
-    let run = run_held(test_config(1), source, None, None);
+    let run = run_held(test_config(1), source, None);
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    run.clock.wait_for_reads();
+    run.wait_for_the_teardown_start();
     run.clock
         .advance(Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
@@ -8066,7 +8090,7 @@ fn the_feed_drops_before_the_io_runtime_stops() {
     });
     let mut cfg = test_config(1);
     cfg.feed = feed_section("memory: {}");
-    let run = run_held(cfg, source, Some(feed), None);
+    let run = run_held(cfg, source, Some(feed));
     *io_slot.lock().unwrap() = Some(run.io.clone());
     run.shutdown.trigger();
     assert!(
@@ -8085,27 +8109,16 @@ fn the_io_tasks_stop_before_a_teardown_that_outlasts_run() {
     let mut source = HookedSource::new(source);
     let (hook, entered, release) = blocking_hook();
     source.on_drop = Some(hook);
-    let (probe_dropped_tx, probe_dropped) = mpsc::channel();
-    let guard = SendOnDrop(probe_dropped_tx);
-    // The task owns the closure, so the guard drops with the task even when
-    // the abort comes before its first poll.
-    let probe: crate::sink::SinkProbeFn = Box::new(move || {
-        let _guard = &guard;
-        Box::pin(std::future::pending())
-    });
-    let run = run_held(test_config(1), source, None, Some(probe));
+    let run = run_held(test_config(1), source, None);
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    probe_dropped
-        .recv_timeout(spate_test::HANG)
-        .expect("the sink probe stops while the source's Drop still runs");
+    run.wait_for_the_teardown_start();
     assert!(
         !run.join.is_finished(),
         "the sink probe stopped only when run returned"
     );
-    run.clock.wait_for_reads();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
